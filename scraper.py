@@ -122,16 +122,40 @@ class Scraper:
         "www.zozo.jp": "shift_jis",
     }
 
+    # 需要更完整 headers 的網站
+    STRICT_SITES = {"zozo.jp", "www.zozo.jp"}
+
     async def _fetch(self, url: str) -> str:
         """取得網頁 HTML（自動偵測編碼）"""
         from urllib.parse import urlparse
         domain = urlparse(url).hostname or ""
 
+        # 針對嚴格網站使用更完整的 headers
+        headers = dict(self.headers)
+        if domain in self.STRICT_SITES:
+            headers.update({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Referer": "https://zozo.jp/",
+            })
+
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=SCRAPE_TIMEOUT,
+            http2=True,  # 使用 HTTP/2，更接近真實瀏覽器
         ) as client:
-            resp = await client.get(url, headers=self.headers)
+            resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             raw = resp.content
 
