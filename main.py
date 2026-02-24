@@ -71,6 +71,14 @@ class CreateOrderResponse(BaseModel):
     error: str | None = None
 
 
+class ManualOrderRequest(BaseModel):
+    title: str
+    price_jpy: int
+    original_price_jpy: int = 0
+    image_url: str = ""
+    source_url: str = ""
+
+
 # ================================================================
 # 端點
 # ================================================================
@@ -177,6 +185,43 @@ async def create_order(req: CreateOrderRequest):
         )
 
     except Exception as e:
+        return CreateOrderResponse(
+            success=False,
+            error=f"建立商品失敗：{str(e)}",
+        )
+
+
+@app.post("/api/create-manual", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
+async def create_manual_order(req: ManualOrderRequest):
+    """
+    手動建立代購商品（爬取失敗時，客人自己填資訊）
+    """
+    try:
+        if not req.title:
+            return CreateOrderResponse(success=False, error="請填寫商品名稱")
+        if req.price_jpy <= 0:
+            return CreateOrderResponse(success=False, error="價格錯誤")
+
+        result = await shopify.create_daiko_product(
+            title=req.title,
+            price_jpy=req.price_jpy,
+            image_url=req.image_url,
+            description="",
+            source_url=req.source_url,
+            original_price_jpy=req.original_price_jpy,
+            brand="",
+        )
+
+        return CreateOrderResponse(
+            success=True,
+            product_id=result["product_id"],
+            checkout_url=result["storefront_url"],
+            admin_url=result["admin_url"],
+        )
+
+    except Exception as e:
+        import traceback
+        print(f"[API] create-manual 錯誤: {traceback.format_exc()}")
         return CreateOrderResponse(
             success=False,
             error=f"建立商品失敗：{str(e)}",
