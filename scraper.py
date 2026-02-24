@@ -75,19 +75,31 @@ class Scraper:
             soup = BeautifulSoup(html, "html.parser")
 
             # Step 1: 嘗試 JSON-LD
-            self._extract_json_ld(soup, product)
+            try:
+                self._extract_json_ld(soup, product)
+            except Exception as e:
+                print(f"[Scraper] JSON-LD 解析失敗: {e}")
 
             # Step 2: 嘗試 OG tags
-            self._extract_og_tags(soup, product)
+            try:
+                self._extract_og_tags(soup, product)
+            except Exception as e:
+                print(f"[Scraper] OG tags 解析失敗: {e}")
 
             # Step 3: 網站專用解析器
-            domain = urlparse(url).hostname or ""
-            if domain in self.site_parsers:
-                self.site_parsers[domain](soup, product)
+            try:
+                domain = urlparse(url).hostname or ""
+                if domain in self.site_parsers:
+                    self.site_parsers[domain](soup, product)
+            except Exception as e:
+                print(f"[Scraper] 專用解析器失敗: {e}")
 
             # Step 4: 通用 fallback
-            if not product.title:
-                self._extract_generic(soup, product)
+            try:
+                if not product.title or not product.price_jpy:
+                    self._extract_generic(soup, product)
+            except Exception as e:
+                print(f"[Scraper] 通用解析失敗: {e}")
 
             # 價格後處理：確保是整數日幣
             if product.price_jpy:
@@ -104,43 +116,60 @@ class Scraper:
 
         return product
 
+    # 已知網站的編碼對應
+    ENCODING_MAP = {
+        "zozo.jp": "shift_jis",
+        "www.zozo.jp": "shift_jis",
+    }
+
     async def _fetch(self, url: str) -> str:
         """取得網頁 HTML（自動偵測編碼）"""
+        from urllib.parse import urlparse
+        domain = urlparse(url).hostname or ""
+
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=SCRAPE_TIMEOUT,
         ) as client:
             resp = await client.get(url, headers=self.headers)
             resp.raise_for_status()
+            raw = resp.content
 
-            # 自動偵測編碼（日本網站常用 Shift_JIS、EUC-JP）
+            # 1. 已知網站直接指定編碼
+            if domain in self.ENCODING_MAP:
+                try:
+                    return raw.decode(self.ENCODING_MAP[domain])
+                except (UnicodeDecodeError, LookupError):
+                    pass
+
+            # 2. 從 HTML meta tag 偵測 charset
+            #    例如: <meta charset="Shift_JIS"> 或 <meta content="text/html; charset=euc-jp">
+            raw_head = raw[:4096]  # 只看前面
+            charset_match = re.search(rb'charset=["\']?([a-zA-Z0-9_-]+)', raw_head)
+            if charset_match:
+                detected = charset_match.group(1).decode("ascii").lower()
+                try:
+                    return raw.decode(detected)
+                except (UnicodeDecodeError, LookupError):
+                    pass
+
+            # 3. 從 HTTP header 偵測
             content_type = resp.headers.get("content-type", "")
-            if "charset" in content_type:
+            if "charset" in content_type.lower():
                 return resp.text
 
-            # 嘗試從 HTML meta tag 偵測
-            raw = resp.content
-            try:
-                # 先用 UTF-8 試
-                text = raw.decode("utf-8")
-                if "\ufffd" not in text[:2000]:  # 沒有亂碼
+            # 4. 依序嘗試常見編碼
+            for enc in ["utf-8", "shift_jis", "euc-jp", "cp932"]:
+                try:
+                    text = raw.decode(enc)
+                    # 檢查是否有大量亂碼
+                    if enc == "utf-8" and "\ufffd" in text[:2000]:
+                        continue
                     return text
-            except UnicodeDecodeError:
-                pass
+                except UnicodeDecodeError:
+                    continue
 
-            # 嘗試 Shift_JIS（日本網站常用）
-            try:
-                return raw.decode("shift_jis")
-            except UnicodeDecodeError:
-                pass
-
-            # 嘗試 EUC-JP
-            try:
-                return raw.decode("euc-jp")
-            except UnicodeDecodeError:
-                pass
-
-            # fallback
+            # 5. fallback
             return raw.decode("utf-8", errors="replace")
 
     # ================================================================

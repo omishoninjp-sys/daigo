@@ -120,9 +120,13 @@ async def scrape_product(req: ScrapeRequest):
         )
 
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[API] scrape 錯誤: {tb}")
+        error_msg = str(e) or type(e).__name__
         return ScrapeResponse(
             success=False,
-            error=f"爬取失敗：{str(e)}",
+            error=f"爬取失敗：{error_msg}",
         )
 
 
