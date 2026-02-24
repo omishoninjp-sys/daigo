@@ -39,7 +39,7 @@ DEFAULT_JPY_TO_TWD_RATE = float(os.getenv("DEFAULT_JPY_TO_TWD_RATE", "0"))
 # ============================================================
 # 爬蟲設定
 # ============================================================
-SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "15"))
+SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ============================================================
