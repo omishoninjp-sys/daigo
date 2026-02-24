@@ -105,14 +105,43 @@ class Scraper:
         return product
 
     async def _fetch(self, url: str) -> str:
-        """取得網頁 HTML"""
+        """取得網頁 HTML（自動偵測編碼）"""
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=SCRAPE_TIMEOUT,
         ) as client:
             resp = await client.get(url, headers=self.headers)
             resp.raise_for_status()
-            return resp.text
+
+            # 自動偵測編碼（日本網站常用 Shift_JIS、EUC-JP）
+            content_type = resp.headers.get("content-type", "")
+            if "charset" in content_type:
+                return resp.text
+
+            # 嘗試從 HTML meta tag 偵測
+            raw = resp.content
+            try:
+                # 先用 UTF-8 試
+                text = raw.decode("utf-8")
+                if "\ufffd" not in text[:2000]:  # 沒有亂碼
+                    return text
+            except UnicodeDecodeError:
+                pass
+
+            # 嘗試 Shift_JIS（日本網站常用）
+            try:
+                return raw.decode("shift_jis")
+            except UnicodeDecodeError:
+                pass
+
+            # 嘗試 EUC-JP
+            try:
+                return raw.decode("euc-jp")
+            except UnicodeDecodeError:
+                pass
+
+            # fallback
+            return raw.decode("utf-8", errors="replace")
 
     # ================================================================
     # 解析策略
@@ -317,11 +346,42 @@ class Scraper:
                 product.price_jpy = self._extract_jpy_price(price_el.get_text())
 
     def _parse_zozo(self, soup: BeautifulSoup, product: ProductInfo):
-        """ZOZOTOWN 專用"""
+        """ZOZOTOWN 專用（含手機版 /sp/ 路徑）"""
+        # 標題：找 h1 或 og:title
+        if not product.title:
+            h1 = soup.find("h1")
+            if h1:
+                product.title = h1.get_text(strip=True)
+
+        # 價格：ZOZO 的價格格式是 ¥XX,XXX（税込）
         if not product.price_jpy:
-            price_el = soup.select_one("[class*='price']")
-            if price_el:
-                product.price_jpy = self._extract_jpy_price(price_el.get_text())
+            # 找含有「税込」的價格文字
+            body_text = soup.get_text()
+            # 匹配 ¥14,800税込 或 ¥14,800（税込）
+            tax_price = re.findall(r'[¥￥]([0-9,]+)(?:税込|（税込）|\(税込\))', body_text)
+            if tax_price:
+                product.price_jpy = self._normalize_price(tax_price[0])
+
+            # fallback: 找一般的價格
+            if not product.price_jpy:
+                price_el = soup.select_one('[class*="price"]')
+                if price_el:
+                    product.price_jpy = self._extract_jpy_price(price_el.get_text())
+
+        # 圖片：ZOZO 的商品圖在 c.imgz.jp
+        if not product.image_url:
+            for img in soup.find_all("img"):
+                src = img.get("src", "")
+                if "imgz.jp" in src and ("_d_" in src or "_b_" in src):
+                    product.image_url = src
+                    break
+
+        # 品牌
+        if not product.brand:
+            # 找 breadcrumb 或品牌連結
+            brand_link = soup.select_one('a[href*="/brand/"]')
+            if brand_link:
+                product.brand = brand_link.get_text(strip=True)
 
     # ================================================================
     # 工具方法
