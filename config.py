@@ -8,6 +8,7 @@ SHOPIFY_STORE = os.getenv("SHOPIFY_STORE", "your-store.myshopify.com")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
 SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
 DAIGO_COLLECTION_ID = os.getenv("DAIGO_COLLECTION_ID", "")
+STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
 
 # 定價
 PRICING_TIERS = [

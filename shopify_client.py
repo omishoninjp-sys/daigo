@@ -1,6 +1,6 @@
 """Shopify Admin API 整合"""
 import httpx
-from config import SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, SHOPIFY_API_VERSION, DAIGO_COLLECTION_ID
+from config import SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, SHOPIFY_API_VERSION, DAIGO_COLLECTION_ID, STORE_DOMAIN
 
 
 class ShopifyClient:
@@ -58,12 +58,11 @@ class ShopifyClient:
         if DAIGO_COLLECTION_ID:
             await self._add_to_collection(product_id)
 
-        store_domain = SHOPIFY_STORE.replace(".myshopify.com", "")
         return {
             "product_id": product_id,
             "handle": handle,
             "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-            "storefront_url": f"https://{store_domain}.com/products/{handle}",
+            "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
         }
 
     async def _add_to_collection(self, product_id):
