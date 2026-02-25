@@ -90,6 +90,10 @@ class Scraper:
 
             if product.price_jpy:
                 product.price_jpy = self._normalize_price(product.price_jpy)
+                # 合理價格範圍：¥100 ~ ¥1,000,000（超過的通常是抓錯）
+                if product.price_jpy and (product.price_jpy < 100 or product.price_jpy > 1000000):
+                    print(f"[Scraper] 價格不合理 ¥{product.price_jpy}，重置")
+                    product.price_jpy = None
             if product.image_url and not product.image_url.startswith("http"):
                 base = f"{urlparse(url).scheme}://{urlparse(url).hostname}"
                 product.image_url = base + product.image_url
@@ -160,7 +164,9 @@ class Scraper:
                         offers = offers[0] if offers else {}
                     price = offers.get("price") or offers.get("lowPrice")
                     if price:
-                        product.price_jpy = self._normalize_price(price)
+                        p = self._normalize_price(price)
+                        if p and 100 <= p <= 1000000:
+                            product.price_jpy = p
                         product.currency = offers.get("priceCurrency", "JPY")
             except (json.JSONDecodeError, StopIteration):
                 continue
@@ -195,21 +201,34 @@ class Scraper:
             product.price_jpy = self._find_price_in_html(soup)
 
     def _find_price_in_html(self, soup):
+        """從 HTML 找日幣價格，優先抓「税込」價格"""
+        text = soup.get_text()
+
+        # 優先：找「X,XXX円（税込）」格式
+        tax_prices = re.findall(r'([0-9,]+)\s*円\s*[（\(]?\s*税込', text)
+        if tax_prices:
+            p = self._normalize_price(tax_prices[0])
+            if p and 100 <= p <= 1000000:
+                return p
+
+        # 其次：找 price class 裡的價格
         for sel in ['[class*="price"]', '[class*="Price"]', '[id*="price"]', '[data-price]']:
             for el in soup.select(sel):
                 p = self._extract_jpy_price(el.get_text(strip=True))
-                if p and p > 0:
+                if p and 100 <= p <= 1000000:
                     return p
                 dp = el.get("data-price")
                 if dp:
-                    return self._normalize_price(dp)
+                    v = self._normalize_price(dp)
+                    if v and 100 <= v <= 1000000:
+                        return v
 
-        text = soup.get_text()
+        # 最後：找 ¥ 或 円 模式，取最常出現的合理價格
         prices = re.findall(r'[¥￥]\s*([0-9,]+)', text)
         prices += re.findall(r'([0-9,]+)\s*円', text)
         if prices:
             normalized = [self._normalize_price(p) for p in prices]
-            normalized = [p for p in normalized if p and 100 <= p <= 9999999]
+            normalized = [p for p in normalized if p and 100 <= p <= 1000000]
             if normalized:
                 return Counter(normalized).most_common(1)[0][0]
         return None
