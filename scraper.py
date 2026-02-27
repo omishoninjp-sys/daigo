@@ -1,38 +1,21 @@
 """
-商品資訊爬取模組（Playwright 無頭瀏覽器版）
+商品資訊爬取模組 v3
+- Amazon.co.jp: requests + BeautifulSoup（快速、穩定）
+- ZOZOTOWN: undetected-chromedriver（繞過 Akamai）
+- 其他網站: Playwright 無頭瀏覽器
 """
 import re
 import json
 import asyncio
 from urllib.parse import urlparse
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from collections import Counter
 
+import httpx
 from bs4 import BeautifulSoup
-from config import SCRAPE_TIMEOUT, USER_AGENT
+from config import SCRAPE_TIMEOUT, USER_AGENT, ZOZO_SCRAPER_URL
 
-_browser = None
-_browser_lock = asyncio.Lock()
-
-
-async def get_browser():
-    global _browser
-    async with _browser_lock:
-        if _browser is None or not _browser.is_connected():
-            from playwright.async_api import async_playwright
-            pw = await async_playwright().start()
-            _browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-extensions",
-                    "--single-process",
-                ],
-            )
-        return _browser
-
+# ============ ProductInfo ============
 
 @dataclass
 class ProductInfo:
@@ -43,14 +26,8 @@ class ProductInfo:
     source_url: str = ""
     brand: str = ""
     currency: str = "JPY"
-    extra_images: list = None
-    variants: list = None
-
-    def __post_init__(self):
-        if self.extra_images is None:
-            self.extra_images = []
-        if self.variants is None:
-            self.variants = []
+    extra_images: list = field(default_factory=list)
+    variants: list = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -60,79 +37,429 @@ class ProductInfo:
         return bool(self.title and self.price_jpy and self.price_jpy > 0)
 
 
+# ============ Platform Detection ============
+
+def detect_platform(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if "zozo" in host:
+        return "zozotown"
+    if "amazon.co.jp" in host or "amazon.jp" in host or "amzn.asia" in host or "amzn.to" in host:
+        return "amazon"
+    if "rakuten.co.jp" in host:
+        return "rakuten"
+    return "generic"
+
+
+# ============ Scraper ============
+
 class Scraper:
     def __init__(self):
-        self.site_parsers = {
-            "amazon.co.jp": self._parse_amazon_jp,
-            "www.amazon.co.jp": self._parse_amazon_jp,
-            "item.rakuten.co.jp": self._parse_rakuten,
-            "www.rakuten.co.jp": self._parse_rakuten,
-            "zozo.jp": self._parse_zozo,
-            "www.zozo.jp": self._parse_zozo,
-        }
+        pass
 
     async def scrape(self, url: str) -> ProductInfo:
+        platform = detect_platform(url)
+
+        if platform == "zozotown":
+            return await self._scrape_zozotown(url)
+        elif platform == "amazon":
+            return await self._scrape_amazon(url)
+        else:
+            return await self._scrape_with_playwright(url)
+
+    # ============================================================
+    # Amazon.co.jp - requests（不需要瀏覽器，速度快）
+    # ============================================================
+    async def _scrape_amazon(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
+
         try:
-            html = await self._fetch(url)
+            # 短連結展開
+            if "amzn.asia" in url or "amzn.to" in url:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=10) as c:
+                    resp = await c.head(url)
+                    url = str(resp.url)
+                    product.source_url = url
+
+            # 驗證 ASIN
+            am = re.search(r'/(?:dp|gp/product|gp/aw/d|ASIN)/([A-Z0-9]{10})', url)
+            if not am:
+                return product  # 不是商品頁
+
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
+                "Referer": "https://www.amazon.co.jp/",
+                "Upgrade-Insecure-Requests": "1",
+            }
+
+            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    return product
+                if "captcha" in str(resp.url).lower():
+                    return product
+                html = resp.text
+
             soup = BeautifulSoup(html, "html.parser")
 
-            for step_name, step_fn in [
-                ("JSON-LD", lambda: self._extract_json_ld(soup, product)),
-                ("OG tags", lambda: self._extract_og_tags(soup, product)),
-                ("Site parser", lambda: self._run_site_parser(url, soup, product)),
-                ("Generic", lambda: self._extract_generic(soup, product) if not product.title or not product.price_jpy else None),
-            ]:
-                try:
-                    step_fn()
-                except Exception as e:
-                    print(f"[Scraper] {step_name} failed: {e}")
+            # 登入頁檢查
+            if soup.find("form", {"name": "signIn"}) or soup.select_one("#ap_email"):
+                return product
 
-            if product.price_jpy:
-                product.price_jpy = self._normalize_price(product.price_jpy)
-                # 合理價格範圍：¥100 ~ ¥1,000,000（超過的通常是抓錯）
-                if product.price_jpy and (product.price_jpy < 100 or product.price_jpy > 1000000):
-                    print(f"[Scraper] 價格不合理 ¥{product.price_jpy}，重置")
-                    product.price_jpy = None
+            # 標題
+            el = soup.select_one("#productTitle")
+            if el:
+                product.title = el.get_text(strip=True)
+            if not product.title:
+                t = soup.find("title")
+                if t:
+                    txt = t.get_text(strip=True)
+                    if "サインイン" not in txt and "Sign" not in txt:
+                        product.title = txt
+
+            # 品牌
+            el = soup.select_one("#bylineInfo") or soup.select_one(".po-brand .po-break-word")
+            if el:
+                b = el.get_text(strip=True)
+                b = re.sub(r'^(ブランド[：:]\s*|Brand[：:]\s*|Visit the |のストアを表示)', '', b)
+                product.brand = re.sub(r'\s*(Store|ストア)$', '', b).strip()
+
+            # 價格
+            for sel in [
+                "#corePrice_feature_div .a-offscreen",
+                "span.a-price span.a-offscreen",
+                ".a-price .a-offscreen",
+                "#priceblock_ourprice",
+                "#priceblock_dealprice",
+            ]:
+                el = soup.select_one(sel)
+                if el:
+                    pm = re.search(r'[\d,]+', el.get_text(strip=True).replace('￥', '').replace('¥', ''))
+                    if pm:
+                        product.price_jpy = int(pm.group().replace(',', ''))
+                        break
+
+            # 圖片
+            hi = re.findall(r'"hiRes"\s*:\s*"(https?://[^"]+)"', html)
+            if hi:
+                all_imgs = list(dict.fromkeys(hi))[:10]
+                if all_imgs:
+                    product.image_url = all_imgs[0]
+                    product.extra_images = all_imgs[1:]
+            else:
+                el = soup.select_one("#landingImage")
+                if el:
+                    src = el.get("data-old-hires") or el.get("src", "")
+                    if src:
+                        product.image_url = src
+                for img in soup.select("#altImages img"):
+                    src = img.get("src", "")
+                    if src and "sprite" not in src and "grey-pixel" not in src:
+                        lg = re.sub(r'\._[^.]*_\.', '.', src)
+                        if lg != product.image_url and lg not in product.extra_images:
+                            product.extra_images.append(lg)
+
+            # 說明
+            bullets = soup.select("#feature-bullets li span.a-list-item")
+            if bullets:
+                product.description = "\n".join(
+                    [b.get_text(strip=True) for b in bullets if len(b.get_text(strip=True)) > 2]
+                )[:500]
+
+            print(f"[Amazon] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[Amazon] ⚠️ 價格未找到")
+
+        except Exception as e:
+            print(f"[Amazon] ❌ 錯誤: {e}")
+
+        return product
+
+    # ============================================================
+    # ZOZOTOWN - undetected-chromedriver（繞過 Akamai）
+    # ============================================================
+    async def _scrape_zozotown(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+
+        # 如果有外部 product-fetcher，優先用它
+        if ZOZO_SCRAPER_URL:
+            result = await self._scrape_zozo_via_proxy(url)
+            if result and result.title:
+                return result
+
+        # 直接用 undetected-chromedriver
+        try:
+            data = await asyncio.get_event_loop().run_in_executor(
+                None, self._fetch_zozo_uc, url
+            )
+            if data and data.get("title"):
+                product.title = data.get("title", "")
+                product.price_jpy = data.get("price", 0) or None
+                product.brand = data.get("brand", "")
+                product.description = data.get("description", "")[:500]
+                images = data.get("images", [])
+                if images:
+                    product.image_url = images[0]
+                    product.extra_images = images[1:9]
+                print(f"[ZOZO] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else "[ZOZO] ⚠️ 無價格")
+            else:
+                print("[ZOZO] ⚠️ undetected-chromedriver 未取得資料")
+        except Exception as e:
+            print(f"[ZOZO] ❌ 錯誤: {e}")
+
+        return product
+
+    def _fetch_zozo_uc(self, url: str) -> dict | None:
+        """用 undetected-chromedriver 在 server 上跑（同步，由 executor 包裝）"""
+        import os, tempfile, shutil, time as _time
+
+        try:
+            import undetected_chromedriver as uc
+        except ImportError:
+            print("[ZOZO] undetected-chromedriver 未安裝")
+            return None
+
+        tmp_dir = os.path.join(tempfile.gettempdir(), f'daigo_uc_{int(_time.time() * 1000)}')
+        driver = None
+        try:
+            options = uc.ChromeOptions()
+            options.add_argument('--lang=ja-JP')
+            options.add_argument('--window-size=1920,1080')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument(f'--user-data-dir={tmp_dir}')
+
+            # 自動偵測 Chrome 版本
+            ver = int(os.environ.get('CHROME_VERSION', '0'))
+            kwargs = {}
+            if ver > 0:
+                kwargs['version_main'] = ver
+
+            use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
+            driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
+
+            # 暖機
+            driver.get('https://www.google.com')
+            _time.sleep(2)
+
+            print(f"[ZOZO] 載入: {url}")
+            driver.get(url)
+
+            for i in range(10):
+                _time.sleep(2)
+                try:
+                    html = driver.page_source
+                    title = driver.title
+                except:
+                    continue
+
+                has_data = ('application/ld+json' in html or
+                           '__NEXT_DATA__' in html or
+                           'og:title' in html)
+
+                print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+
+                if has_data:
+                    result = driver.execute_script(r"""
+                        var r = {title:'', brand:'', price:0, price_text:'',
+                                 original_price:0, original_price_text:'', discount:'',
+                                 images:[], description:'', item_id:'', in_stock:true};
+
+                        var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
+                        if (m) r.item_id = m[1];
+
+                        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                            try {
+                                var d = JSON.parse(s.textContent);
+                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
+                                if (d && d['@type'] === 'Product') {
+                                    r.title = d.name || '';
+                                    var b = d.brand || '';
+                                    r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
+                                    r.description = d.description || '';
+                                    var img = d.image || [];
+                                    if (typeof img === 'string') img = [img];
+                                    r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
+                                    var offers = d.offers || {};
+                                    if (Array.isArray(offers)) offers = offers[0] || {};
+                                    if (offers.price) {
+                                        r.price = parseInt(offers.price);
+                                        r.price_text = '\u00a5' + r.price.toLocaleString();
+                                    }
+                                    if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
+                                }
+                            } catch(e) {}
+                        });
+
+                        if (!r.title) {
+                            var nd = document.getElementById('__NEXT_DATA__');
+                            if (nd) {
+                                try {
+                                    var props = JSON.parse(nd.textContent).props.pageProps;
+                                    var prod = props.product || props.goods || props.item || {};
+                                    if (prod.name) r.title = prod.name;
+                                    if (prod.brandName) r.brand = prod.brandName;
+                                    if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                    if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
+                                } catch(e) {}
+                            }
+                        }
+
+                        if (!r.title) {
+                            var og = document.querySelector('meta[property="og:title"]');
+                            if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
+                        }
+                        if (r.images.length === 0) {
+                            var ogImg = document.querySelector('meta[property="og:image"]');
+                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
+                        }
+
+                        if (!r.price) {
+                            document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
+                                if (!r.price) {
+                                    var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
+                                    if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                }
+                            });
+                        }
+
+                        var seen = {};
+                        r.images.forEach(function(u){ seen[u] = true; });
+                        document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
+                            var src = img.src || img.getAttribute('data-src') || '';
+                            if (src && !seen[src] && img.naturalWidth > 50) {
+                                r.images.push(src);
+                                seen[src] = true;
+                            }
+                        });
+                        document.querySelectorAll('[srcset*="c.imgz.jp"]').forEach(function(el) {
+                            var parts = (el.getAttribute('srcset') || '').split(',');
+                            parts.forEach(function(p) {
+                                var u = p.trim().split(/\s+/)[0];
+                                if (u && u.indexOf('c.imgz.jp') !== -1 && !seen[u]) {
+                                    r.images.push(u);
+                                    seen[u] = true;
+                                }
+                            });
+                        });
+                        r.images = r.images.slice(0, 20);
+
+                        return r;
+                    """)
+
+                    try: driver.quit()
+                    except: pass
+                    return result
+
+                if 'access denied' in title.lower() and i >= 2:
+                    print("[ZOZO] 被 Akamai 擋住")
+                    break
+
+            try: driver.quit()
+            except: pass
+
+        except Exception as e:
+            print(f"[ZOZO] uc 錯誤: {e}")
+            if driver:
+                try: driver.quit()
+                except: pass
+        finally:
+            try: shutil.rmtree(tmp_dir, ignore_errors=True)
+            except: pass
+
+        return None
+
+    async def _scrape_zozo_via_proxy(self, url: str) -> ProductInfo | None:
+        """備用：代理到外部 product-fetcher"""
+        product = ProductInfo(source_url=url)
+        try:
+            print(f"[ZOZO] 代理到 {ZOZO_SCRAPER_URL}")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{ZOZO_SCRAPER_URL.rstrip('/')}/api/fetch",
+                    json={"url": url},
+                )
+                data = resp.json()
+
+            if data.get("error"):
+                print(f"[ZOZO] 外部爬蟲錯誤: {data['error']}")
+                return None
+
+            product.title = data.get("title", "")
+            product.price_jpy = data.get("price", 0) or None
+            product.brand = data.get("brand", "")
+            product.description = data.get("description", "")[:500]
+            images = data.get("images", [])
+            if images:
+                product.image_url = images[0]
+                product.extra_images = images[1:9]
+            return product if product.title else None
+
+        except Exception as e:
+            print(f"[ZOZO] 外部爬蟲連線失敗: {e}")
+            return None
+
+    # ============================================================
+    # 通用 - Playwright（其他日本網站）
+    # ============================================================
+    async def _scrape_with_playwright(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+        try:
+            html = await self._fetch_playwright(url)
+            soup = BeautifulSoup(html, "html.parser")
+
+            # JSON-LD
+            self._extract_json_ld(soup, product)
+            # OG tags
+            self._extract_og_tags(soup, product)
+            # Generic HTML
+            if not product.title or not product.price_jpy:
+                self._extract_generic(soup, product)
+
+            # 價格合理性檢查
+            if product.price_jpy and (product.price_jpy < 100 or product.price_jpy > 1000000):
+                print(f"[Generic] ⚠️ 價格不合理 ¥{product.price_jpy}，重置")
+                product.price_jpy = None
+
+            # 相對 URL 修正
             if product.image_url and not product.image_url.startswith("http"):
                 base = f"{urlparse(url).scheme}://{urlparse(url).hostname}"
                 product.image_url = base + product.image_url
 
         except Exception as e:
-            print(f"[Scraper] Failed {url}: {e}")
-            raise
+            print(f"[Generic] ❌ 錯誤: {e}")
+
         return product
 
-    def _run_site_parser(self, url, soup, product):
-        domain = urlparse(url).hostname or ""
-        if domain in self.site_parsers:
-            self.site_parsers[domain](soup, product)
+    async def _fetch_playwright(self, url: str) -> str:
+        from playwright.async_api import async_playwright
 
-    async def _fetch(self, url: str) -> str:
-        """用 Playwright 載入頁面"""
-        browser = await get_browser()
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            locale="ja-JP",
-            extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"},
-        )
-        page = await context.new_page()
-        try:
-            # 封鎖 media 和 font 加速載入
-            await page.route("**/*", lambda route: (
-                route.abort()
-                if route.request.resource_type in ("media", "font")
-                else route.continue_()
-            ))
-            await page.goto(url, wait_until="domcontentloaded", timeout=SCRAPE_TIMEOUT * 1000)
-            await page.wait_for_timeout(2000)
-            return await page.content()
-        finally:
-            await page.close()
-            await context.close()
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                locale="ja-JP",
+                extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"},
+            )
+            page = await context.new_page()
+            try:
+                await page.route("**/*", lambda route: (
+                    route.abort() if route.request.resource_type in ("media", "font") else route.continue_()
+                ))
+                await page.goto(url, wait_until="domcontentloaded", timeout=SCRAPE_TIMEOUT * 1000)
+                await page.wait_for_timeout(2000)
+                return await page.content()
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
 
-    # === Extractors ===
-
+    # ============================================================
+    # Extractors（通用解析器）
+    # ============================================================
     def _extract_json_ld(self, soup, product):
         for script in soup.find_all("script", type="application/ld+json"):
             try:
@@ -167,7 +494,6 @@ class Scraper:
                         p = self._normalize_price(price)
                         if p and 100 <= p <= 1000000:
                             product.price_jpy = p
-                        product.currency = offers.get("priceCurrency", "JPY")
             except (json.JSONDecodeError, StopIteration):
                 continue
 
@@ -201,29 +527,22 @@ class Scraper:
             product.price_jpy = self._find_price_in_html(soup)
 
     def _find_price_in_html(self, soup):
-        """從 HTML 找日幣價格，優先抓「税込」價格"""
         text = soup.get_text()
-
-        # 優先：找「X,XXX円（税込）」格式
+        # 優先：税込價格
         tax_prices = re.findall(r'([0-9,]+)\s*円\s*[（\(]?\s*税込', text)
         if tax_prices:
             p = self._normalize_price(tax_prices[0])
             if p and 100 <= p <= 1000000:
                 return p
-
-        # 其次：找 price class 裡的價格
-        for sel in ['[class*="price"]', '[class*="Price"]', '[id*="price"]', '[data-price]']:
+        # price class
+        for sel in ['[class*="price"]', '[class*="Price"]', '[id*="price"]']:
             for el in soup.select(sel):
-                p = self._extract_jpy_price(el.get_text(strip=True))
-                if p and 100 <= p <= 1000000:
-                    return p
-                dp = el.get("data-price")
-                if dp:
-                    v = self._normalize_price(dp)
-                    if v and 100 <= v <= 1000000:
-                        return v
-
-        # 最後：找 ¥ 或 円 模式，取最常出現的合理價格
+                m = re.search(r'[¥￥]?\s*([\d,]+)', el.get_text(strip=True))
+                if m:
+                    p = int(m.group(1).replace(',', ''))
+                    if 100 <= p <= 1000000:
+                        return p
+        # ¥ 或 円
         prices = re.findall(r'[¥￥]\s*([0-9,]+)', text)
         prices += re.findall(r'([0-9,]+)\s*円', text)
         if prices:
@@ -232,77 +551,6 @@ class Scraper:
             if normalized:
                 return Counter(normalized).most_common(1)[0][0]
         return None
-
-    # === Site Parsers ===
-
-    def _parse_amazon_jp(self, soup, product):
-        if not product.title:
-            el = soup.find(id="productTitle")
-            if el:
-                product.title = el.get_text(strip=True)
-        if not product.price_jpy:
-            el = soup.select_one(".a-price .a-offscreen")
-            if el:
-                product.price_jpy = self._extract_jpy_price(el.get_text())
-            if not product.price_jpy:
-                el = soup.find(id="priceblock_ourprice") or soup.find(id="priceblock_dealprice")
-                if el:
-                    product.price_jpy = self._extract_jpy_price(el.get_text())
-        if not product.image_url:
-            el = soup.find(id="landingImage") or soup.find(id="imgBlkFront")
-            if el:
-                product.image_url = el.get("data-old-hires") or el.get("src", "")
-        if not product.brand:
-            el = soup.find(id="bylineInfo")
-            if el:
-                product.brand = el.get_text(strip=True).replace("ブランド: ", "").replace("のストアを表示", "")
-
-    def _parse_rakuten(self, soup, product):
-        if not product.title:
-            el = soup.find("span", class_="item_name") or soup.find("h1")
-            if el:
-                product.title = el.get_text(strip=True)
-        if not product.price_jpy:
-            el = soup.select_one(".price2, .item_price, [class*='price']")
-            if el:
-                product.price_jpy = self._extract_jpy_price(el.get_text())
-
-    def _parse_zozo(self, soup, product):
-        if not product.title:
-            h1 = soup.find("h1")
-            if h1:
-                product.title = h1.get_text(strip=True)
-        if not product.price_jpy:
-            text = soup.get_text()
-            tax = re.findall(r'[¥￥]([0-9,]+)(?:税込|（税込）|\(税込\))', text)
-            if tax:
-                product.price_jpy = self._normalize_price(tax[0])
-            if not product.price_jpy:
-                all_p = re.findall(r'[¥￥]([0-9,]+)', text)
-                valid = [self._normalize_price(p) for p in all_p]
-                valid = [p for p in valid if p and 100 <= p <= 999999]
-                if valid:
-                    product.price_jpy = Counter(valid).most_common(1)[0][0]
-        if not product.image_url:
-            for img in soup.find_all("img"):
-                src = img.get("src", "")
-                if "imgz.jp" in src and ("_d_" in src or "_b_" in src):
-                    product.image_url = src
-                    break
-        if not product.brand:
-            el = soup.select_one('a[href*="/brand/"]')
-            if el:
-                product.brand = el.get_text(strip=True)
-
-    # === Utils ===
-
-    @staticmethod
-    def _extract_jpy_price(text):
-        if not text:
-            return None
-        cleaned = text.replace('¥', '').replace('￥', '').replace('円', '').replace('税込', '').strip()
-        m = re.search(r'([0-9][0-9,]*)', cleaned)
-        return int(m.group(1).replace(',', '')) if m else None
 
     @staticmethod
     def _normalize_price(price):

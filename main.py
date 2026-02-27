@@ -1,17 +1,20 @@
 """
-GOYOUTATI DAIGO 代購系統 API
+GOYOUTATI DAIGO 代購系統 API v3
+- Amazon: requests（快速）
+- ZOZOTOWN: 代理到本機 product-fetcher
+- 其他網站: Playwright
 """
 import traceback
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import API_SECRET_KEY, ALLOWED_ORIGINS
+from config import API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL
 from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
 
-app = FastAPI(title="GOYOUTATI DAIGO API", version="2.0.0")
+app = FastAPI(title="GOYOUTATI DAIGO API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,7 +67,16 @@ class CreateOrderResponse(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "daigo-api"}
+    return {
+        "status": "ok",
+        "service": "daigo-api",
+        "version": "3.0.0",
+        "scrapers": {
+            "amazon": "requests (direct)",
+            "zozotown": f"external ({ZOZO_SCRAPER_URL})" if ZOZO_SCRAPER_URL else "undetected-chromedriver (built-in)",
+            "generic": "playwright",
+        },
+    }
 
 
 @app.get("/api/rate")
@@ -79,7 +91,10 @@ async def get_rate():
 @app.post("/api/scrape", response_model=ScrapeResponse, dependencies=[Depends(verify_api_key)])
 async def scrape_product(req: ScrapeRequest):
     try:
-        product: ProductInfo = await scraper.scrape(str(req.url))
+        url = str(req.url).strip()
+
+        product: ProductInfo = await scraper.scrape(url)
+
         if not product.title:
             return ScrapeResponse(success=False, error="無法從此連結抓取商品資訊")
 
@@ -94,7 +109,9 @@ async def scrape_product(req: ScrapeRequest):
 @app.post("/api/create-order", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
 async def create_order(req: CreateOrderRequest):
     try:
-        product: ProductInfo = await scraper.scrape(str(req.url))
+        url = str(req.url).strip()
+        product: ProductInfo = await scraper.scrape(url)
+
         if not product.title:
             return CreateOrderResponse(success=False, error="無法抓取商品資訊")
         if not product.price_jpy:
@@ -106,7 +123,7 @@ async def create_order(req: CreateOrderRequest):
         result = await shopify.create_daigo_product(
             title=title, price_jpy=pricing["selling_price_jpy"],
             image_url=product.image_url, description=product.description,
-            source_url=str(req.url), original_price_jpy=product.price_jpy,
+            source_url=url, original_price_jpy=product.price_jpy,
             brand=product.brand, extra_images=product.extra_images,
         )
 
