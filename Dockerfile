@@ -20,6 +20,7 @@ RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-
     && google-chrome --version
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir setuptools
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Playwright Chromium（通用網站 fallback 用）
