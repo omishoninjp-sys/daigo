@@ -10,6 +10,10 @@ SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
 DAIGO_COLLECTION_ID = os.getenv("DAIGO_COLLECTION_ID", "")
 STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
 
+# ZOZOTOWN 外部爬蟲（選填，備用）
+# 不設定的話，系統會直接在 Zeabur 上用 undetected-chromedriver
+ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
+
 # 定價
 PRICING_TIERS = [
     (0,      3000,    1.40),
@@ -25,8 +29,8 @@ DEFAULT_JPY_TO_TWD_RATE = float(os.getenv("DEFAULT_JPY_TO_TWD_RATE", "0"))
 
 # 爬蟲
 SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 # API 安全
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://your-store.myshopify.com").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")
