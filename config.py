@@ -31,6 +31,10 @@ DEFAULT_JPY_TO_TWD_RATE = float(os.getenv("DEFAULT_JPY_TO_TWD_RATE", "0"))
 SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+# 代理（ZOZOTOWN 用，日本住宅 IP 繞過 Akamai IP 信譽檢查）
+# 格式：http://user:pass@host:port
+PROXY_URL = os.getenv("PROXY_URL", "")
+
 # API 安全
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")
