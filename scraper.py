@@ -15,48 +15,6 @@ import httpx
 from bs4 import BeautifulSoup
 from config import SCRAPE_TIMEOUT, USER_AGENT, ZOZO_SCRAPER_URL, PROXY_URL
 
-
-def _create_proxy_auth_extension(proxy_url: str, tmp_dir: str) -> str | None:
-    """建立 Chrome extension 處理 proxy 帳密認證"""
-    import os, zipfile
-    from urllib.parse import urlparse
-
-    parsed = urlparse(proxy_url)
-    if not parsed.username or not parsed.password:
-        return None  # 沒有帳密，不需要 extension
-
-    host = parsed.hostname
-    port = parsed.port or 80
-    user = parsed.username
-    pwd = parsed.password
-
-    manifest = '''{
-        "version": "1.0.0",
-        "manifest_version": 2,
-        "name": "Proxy Auth",
-        "permissions": ["proxy", "tabs", "unlimitedStorage", "storage", "<all_urls>", "webRequest", "webRequestBlocking"],
-        "background": {"scripts": ["background.js"]},
-        "minimum_chrome_version": "22.0.0"
-    }'''
-
-    background = '''var config = {
-        mode: "fixed_servers",
-        rules: { singleProxy: { scheme: "http", host: "%s", port: parseInt(%s) }, bypassList: ["localhost"] }
-    };
-    chrome.proxy.settings.set({value: config, scope: "regular"}, function(){});
-    function callbackFn(details) {
-        return { authCredentials: { username: "%s", password: "%s" } };
-    }
-    chrome.webRequest.onAuthRequired.addListener(callbackFn, {urls: ["<all_urls>"]}, ['blocking']);
-    ''' % (host, port, user, pwd)
-
-    ext_path = os.path.join(tmp_dir, 'proxy_auth.zip')
-    with zipfile.ZipFile(ext_path, 'w') as zf:
-        zf.writestr('manifest.json', manifest)
-        zf.writestr('background.js', background)
-
-    return ext_path
-
 # ============ ProductInfo ============
 
 @dataclass
@@ -251,22 +209,21 @@ class Scraper:
         return product
 
     def _fetch_zozo_uc(self, url: str) -> dict | None:
-        """用 undetected-chromedriver 在 server 上跑（同步，由 executor 包裝）"""
+        """
+        用 selenium-wire + undetected-chromedriver 跑 ZOZOTOWN
+        selenium-wire 內建 proxy 帳密認證（透過本地 mitm proxy），不需要 extension
+        """
         import os, tempfile, shutil, time as _time
-
-        try:
-            import undetected_chromedriver as uc
-        except ImportError:
-            print("[ZOZO] undetected-chromedriver 未安裝")
-            return None
 
         tmp_dir = os.path.join(tempfile.gettempdir(), f'daigo_uc_{int(_time.time() * 1000)}')
         os.makedirs(tmp_dir, exist_ok=True)
         driver = None
-        display = None
 
         try:
-            options = uc.ChromeOptions()
+            # selenium-wire 的 uc 包裝
+            from seleniumwire.undetected_chromedriver import Chrome, ChromeOptions
+
+            options = ChromeOptions()
             options.add_argument('--lang=ja-JP')
             options.add_argument('--window-size=1920,1080')
             options.add_argument('--no-sandbox')
@@ -274,26 +231,15 @@ class Scraper:
             options.add_argument('--disable-gpu')
             options.add_argument(f'--user-data-dir={tmp_dir}')
 
-            # Proxy 設定
-            use_proxy = bool(PROXY_URL)
-            if use_proxy:
-                from urllib.parse import urlparse
-                parsed = urlparse(PROXY_URL)
-                proxy_host_port = f"{parsed.hostname}:{parsed.port or 80}"
-                options.add_argument(f'--proxy-server=http://{proxy_host_port}')
-                print(f"[ZOZO] 使用 proxy: {proxy_host_port}")
-
-                # 帳密認證需要 extension（headless 不支援 extension，用 xvfb）
-                if parsed.username and parsed.password:
-                    ext_path = _create_proxy_auth_extension(PROXY_URL, tmp_dir)
-                    if ext_path:
-                        options.add_argument(f'--load-extension={ext_path.replace(".zip", "_dir")}')
-                        # 解壓 extension
-                        import zipfile
-                        ext_dir = ext_path.replace(".zip", "_dir")
-                        os.makedirs(ext_dir, exist_ok=True)
-                        with zipfile.ZipFile(ext_path, 'r') as zf:
-                            zf.extractall(ext_dir)
+            # selenium-wire proxy 設定（自動處理帳密認證）
+            sw_options = {}
+            if PROXY_URL:
+                sw_options['proxy'] = {
+                    'http': PROXY_URL,
+                    'https': PROXY_URL,
+                    'no_proxy': 'localhost,127.0.0.1',
+                }
+                print(f"[ZOZO] 使用 proxy（selenium-wire 自動處理認證）")
 
             # Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
@@ -301,21 +247,13 @@ class Scraper:
             if ver > 0:
                 kwargs['version_main'] = ver
 
-            # Proxy 有帳密 → 需要 extension → 需要非 headless → 用 xvfb
-            if use_proxy and PROXY_URL and '@' in PROXY_URL:
-                try:
-                    from pyvirtualdisplay import Display
-                    display = Display(visible=False, size=(1920, 1080))
-                    display.start()
-                    print("[ZOZO] xvfb 虛擬螢幕啟動")
-                except Exception as e:
-                    print(f"[ZOZO] xvfb 啟動失敗: {e}，嘗試 headless")
-
-                use_headless = display is None  # xvfb 成功就不用 headless
-            else:
-                use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
-
-            driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
+            use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
+            driver = Chrome(
+                options=options,
+                headless=use_headless,
+                seleniumwire_options=sw_options,
+                **kwargs,
+            )
 
             # 暖機
             driver.get('https://www.google.com')
@@ -439,13 +377,11 @@ class Scraper:
 
         except Exception as e:
             print(f"[ZOZO] uc 錯誤: {e}")
+            import traceback; traceback.print_exc()
             if driver:
                 try: driver.quit()
                 except: pass
         finally:
-            if display:
-                try: display.stop()
-                except: pass
             try: shutil.rmtree(tmp_dir, ignore_errors=True)
             except: pass
 
