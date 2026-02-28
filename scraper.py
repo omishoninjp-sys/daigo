@@ -385,9 +385,13 @@ class Scraper:
             options.add_argument('--disable-default-apps')
             options.add_argument('--disable-client-side-phishing-detection')
 
-            # Proxy: 暫時停用，先測 Zeabur 直連
+            # Proxy: IP 白名單認證，直連不需帳密
             if PROXY_URL:
-                print(f"[ZOZO] ⚠️ 暫時跳過 proxy，測試直連")
+                from urllib.parse import urlparse as _urlparse
+                _pp = _urlparse(PROXY_URL)
+                options.add_argument(f'--proxy-server=http://{_pp.hostname}:{_pp.port}')
+                options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com')
+                print(f"[ZOZO] proxy 直連（IP白名單）: {_pp.hostname}:{_pp.port}")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
@@ -410,27 +414,6 @@ class Scraper:
             # 快速暖機
             driver.get('about:blank')
             _time.sleep(1)
-
-            # 診斷：Chrome 能不能載入任何網頁？
-            print("[ZOZO] 診斷：測試 Chrome 連線...")
-            try:
-                driver.set_page_load_timeout(15)
-                driver.get('http://httpbin.org/ip')
-                _time.sleep(2)
-                diag_html = driver.page_source
-                diag_title = driver.title
-                print(f"[ZOZO] 診斷結果: {len(diag_html)} bytes | title={diag_title[:40]}")
-                print(f"[ZOZO] 診斷 HTML: {diag_html[:300]}")
-            except Exception as e:
-                print(f"[ZOZO] 診斷失敗: {type(e).__name__}: {e}")
-                # 試另一個
-                try:
-                    driver.get('http://example.com')
-                    _time.sleep(2)
-                    diag_html = driver.page_source
-                    print(f"[ZOZO] example.com: {len(diag_html)} bytes | {diag_html[:200]}")
-                except Exception as e2:
-                    print(f"[ZOZO] example.com 也失敗: {e2}")
 
             driver.set_page_load_timeout(45)
 
