@@ -383,13 +383,46 @@ class Scraper:
 
                         // === DOM fallback: variant extraction ===
                         if (r.variants.length === 0) {
-                            // 嘗試從 DOM 抓取子項資訊
-                            var variantEls = document.querySelectorAll('[class*="variant"], [class*="Variant"], [class*="sku"], [class*="Sku"], [data-test*="size"], [data-test*="color"]');
-                            r.variant_debug += ' | DOM variant els: ' + variantEls.length;
+                            // Dump: 找所有含「在庫」文字的元素的父結構
+                            var stockTexts = [];
+                            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                            while (walker.nextNode()) {
+                                var t = walker.currentNode.textContent.trim();
+                                if (t.indexOf('在庫') !== -1 || t.indexOf('カート') !== -1) {
+                                    var el = walker.currentNode.parentElement;
+                                    var path = [];
+                                    var cur = el;
+                                    for (var d = 0; d < 5 && cur; d++) {
+                                        var cn = cur.className ? ('.' + String(cur.className).split(/\s+/).join('.')) : '';
+                                        path.unshift(cur.tagName.toLowerCase() + cn);
+                                        cur = cur.parentElement;
+                                    }
+                                    stockTexts.push(path.join(' > ') + ' :: ' + t.substring(0, 40));
+                                }
+                            }
+                            r.variant_debug += ' | stockTexts(' + stockTexts.length + '): ' + stockTexts.slice(0, 8).join(' ;; ');
 
-                            // 嘗試找「在庫あり」的項目
-                            var stockEls = document.querySelectorAll('[class*="stock"], [class*="Stock"]');
-                            r.variant_debug += ' | stock els: ' + stockEls.length;
+                            // Dump: 找 color/size 相關的 data 屬性
+                            var dataEls = document.querySelectorAll('[data-color], [data-size], [data-sku], [data-product-id], [data-item-id]');
+                            r.variant_debug += ' | data-attrs: ' + dataEls.length;
+
+                            // Dump: 看看頁面裡有什麼 section/list 結構包含 M/L/XL
+                            var sizeTexts = [];
+                            document.querySelectorAll('li, tr, [role="listitem"], [role="row"]').forEach(function(el) {
+                                var t = el.textContent.trim().substring(0, 80);
+                                if ((t.indexOf('在庫あり') !== -1 || t.indexOf('SOLD') !== -1) &&
+                                    /[SMLXF]\s*\//.test(t) || /[サイズ]/.test(t)) {
+                                    sizeTexts.push(el.tagName + '.' + (el.className||'').split(/\s+/)[0] + ' :: ' + t.substring(0,60));
+                                }
+                            });
+                            r.variant_debug += ' | sizeRows(' + sizeTexts.length + '): ' + sizeTexts.slice(0, 6).join(' ;; ');
+
+                            // 嘗試 ZOZO 特有結構：p-goods-add-cart 區域
+                            var cartArea = document.querySelector('[class*="add-cart"], [class*="AddCart"], [class*="addCart"], [id*="cart"]');
+                            if (cartArea) {
+                                r.variant_debug += ' | cartArea: ' + cartArea.tagName + '.' + (cartArea.className||'').substring(0, 60);
+                                r.variant_debug += ' | cartHTML(' + cartArea.innerHTML.length + '): ' + cartArea.innerHTML.substring(0, 200);
+                            }
                         }
 
                         // === OG fallback ===
