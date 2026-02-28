@@ -288,7 +288,7 @@ class Scraper:
             driver.get(url)
 
             for i in range(10):
-                _time.sleep(2)
+                _time.sleep(3 if i < 3 else 2)  # 前 3 次多等一點
                 try:
                     html = driver.page_source
                     title = driver.title
@@ -299,7 +299,22 @@ class Scraper:
                            '__NEXT_DATA__' in html or
                            'og:title' in html)
 
-                print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+                # Debug: 前 2 次印頁面資訊
+                if i < 2:
+                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:80]} | data={has_data}")
+                    # 印 <head> 裡有什麼
+                    import re as _re
+                    scripts = _re.findall(r'<script[^>]*>(.{0,50})', html[:5000])
+                    print(f"[ZOZO] scripts: {scripts[:5]}")
+                    metas = _re.findall(r'<meta[^>]*>', html[:5000])
+                    print(f"[ZOZO] metas: {metas[:5]}")
+                    # 看有沒有 Akamai 標記
+                    if 'akamai' in html.lower() or 'challenge' in html.lower() or 'captcha' in html.lower():
+                        print(f"[ZOZO] ⚠️ 偵測到 Akamai challenge 頁面")
+                    if 'Access Denied' in html or 'access denied' in title.lower():
+                        print(f"[ZOZO] ⚠️ Access Denied")
+                else:
+                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
 
                 if has_data:
                     result = driver.execute_script(r"""
