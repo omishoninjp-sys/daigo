@@ -214,39 +214,42 @@ class Scraper:
         return product
 
     async def _fetch_zozo_http(self, url: str) -> ProductInfo | None:
-        """直接 HTTP 請求 ZOZOTOWN（透過 proxy 繞過地區限制）"""
+        """用 curl_cffi 模擬 Chrome TLS 指紋請求 ZOZOTOWN"""
         import json, re
         product = ProductInfo(source_url=url)
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-        }
-
-        proxy_url = PROXY_URL if PROXY_URL else None
-
         try:
-            async with httpx.AsyncClient(
-                proxy=proxy_url,
-                timeout=20,
-                follow_redirects=True,
-            ) as client:
-                print(f"[ZOZO-HTTP] 請求: {url}" + (f" (proxy: {proxy_url.split('@')[-1]})" if proxy_url else ""))
-                resp = await client.get(url, headers=headers)
+            from curl_cffi.requests import AsyncSession
+
+            headers = {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
+                'Cache-Control': 'max-age=0',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
+            proxy = PROXY_URL if PROXY_URL else None
+            proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+            async with AsyncSession(impersonate="chrome131") as session:
+                print(f"[ZOZO-HTTP] curl_cffi 請求: {url}" + (f" (proxy)" if proxy else ""))
+                resp = await session.get(
+                    url,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=20,
+                    allow_redirects=True,
+                )
                 html = resp.text
                 print(f"[ZOZO-HTTP] 回應: {resp.status_code} | {len(html)} bytes")
 
                 if resp.status_code != 200:
                     print(f"[ZOZO-HTTP] ⚠️ 非 200: {resp.status_code}")
+                    print(f"[ZOZO-HTTP] 內容: {html[:300]}")
                     return None
 
                 # 解析 ld+json
@@ -303,7 +306,7 @@ class Scraper:
                         except:
                             pass
 
-                # fallback: og:title
+                # fallback: og tags
                 if not product.title:
                     og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
                     if og_match:
@@ -314,21 +317,22 @@ class Scraper:
                     if og_img:
                         product.image_url = og_img.group(1)
 
-                # 價格 fallback
                 if not product.price_jpy:
                     price_match = re.search(r'[¥￥]([\d,]+)', html)
                     if price_match:
                         product.price_jpy = int(price_match.group(1).replace(',', ''))
 
                 if product.title:
-                    print(f"[ZOZO-HTTP] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-HTTP] ✅ {product.title[:40]} (無價格)")
+                    print(f"[ZOZO-HTTP] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-HTTP] ✅ {product.title[:40]}")
                     return product
                 else:
-                    # Debug: 印出收到什麼
-                    print(f"[ZOZO-HTTP] ⚠️ 無法解析商品資訊")
+                    print(f"[ZOZO-HTTP] ⚠️ 無法解析")
                     print(f"[ZOZO-HTTP] HTML前500: {html[:500]}")
                     return None
 
+        except ImportError:
+            print("[ZOZO-HTTP] curl_cffi 未安裝，跳過")
+            return None
         except Exception as e:
             print(f"[ZOZO-HTTP] ❌ 錯誤: {e}")
             return None
