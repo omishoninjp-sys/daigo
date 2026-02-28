@@ -271,7 +271,9 @@ class Scraper:
                     proxy_proc = None
                 else:
                     options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
-                    print(f"[ZOZO] proxy 轉發 :{local_port} → {_pp.hostname}:{_pp.port}")
+                    # 只讓 zozo.jp 走 proxy，其他直連（避免 Google 背景請求搶頻寬）
+                    options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com;accounts.google.com')
+                    print(f"[ZOZO] proxy 轉發 :{local_port} → {_pp.hostname}:{_pp.port}（僅 zozo.jp）")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
@@ -289,13 +291,18 @@ class Scraper:
 
             use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
             driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
+            driver.set_page_load_timeout(30)  # 最多等 30 秒載入頁面
 
-            # 快速暖機（不用 google.com，避免觸發大量背景請求）
+            # 快速暖機
             driver.get('about:blank')
             _time.sleep(1)
 
             print(f"[ZOZO] 載入: {url}")
-            driver.get(url)
+            try:
+                driver.get(url)
+            except Exception as e:
+                # TimeoutException 表示頁面沒在 30 秒內載完，但 DOM 可能已經有資料
+                print(f"[ZOZO] 頁面載入超時（可能正常）: {type(e).__name__}")
 
             for i in range(10):
                 _time.sleep(3 if i < 3 else 2)  # 前 3 次多等一點
