@@ -468,6 +468,28 @@ class Scraper:
                             }
 
                             r.variant_debug += ' | dts: ' + dts.length + ' | parsed: ' + r.variants.length;
+
+                            // Dump first form for debugging sku
+                            var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
+                            if (firstForm) {
+                                var formInfo = 'action:' + (firstForm.action||'').substring(0, 60);
+                                firstForm.querySelectorAll('input').forEach(function(inp) {
+                                    formInfo += ' | ' + (inp.name||inp.type) + '=' + (inp.value||'').substring(0, 30);
+                                });
+                                r.variant_debug += ' | form: ' + formInfo;
+                            }
+
+                            // Dedup: 同色同尺寸只留一個
+                            var seen = {};
+                            var unique = [];
+                            r.variants.forEach(function(v) {
+                                var key = v.color + '|' + v.size;
+                                if (!seen[key]) {
+                                    seen[key] = true;
+                                    unique.push(v);
+                                }
+                            });
+                            r.variants = unique;
                         }
 
                         // === OG fallback ===
