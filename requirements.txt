@@ -7,4 +7,4 @@ pydantic==2.10.4
 playwright==1.49.1
 undetected-chromedriver>=3.5
 selenium>=4.0
-selenium-wire>=5.1
+pproxy>=2.7

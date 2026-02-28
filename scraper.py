@@ -210,20 +210,24 @@ class Scraper:
 
     def _fetch_zozo_uc(self, url: str) -> dict | None:
         """
-        用 selenium-wire + undetected-chromedriver 跑 ZOZOTOWN
-        selenium-wire 內建 proxy 帳密認證（透過本地 mitm proxy），不需要 extension
+        用 undetected-chromedriver 跑 ZOZOTOWN
+        Proxy 認證方式：pproxy 本地轉發（不需要 extension、不需要 selenium-wire）
         """
-        import os, tempfile, shutil, time as _time
+        import os, tempfile, shutil, time as _time, subprocess, socket
+
+        try:
+            import undetected_chromedriver as uc
+        except ImportError:
+            print("[ZOZO] undetected-chromedriver 未安裝")
+            return None
 
         tmp_dir = os.path.join(tempfile.gettempdir(), f'daigo_uc_{int(_time.time() * 1000)}')
         os.makedirs(tmp_dir, exist_ok=True)
         driver = None
+        proxy_proc = None
 
         try:
-            # selenium-wire 的 uc 包裝
-            from seleniumwire.undetected_chromedriver import Chrome, ChromeOptions
-
-            options = ChromeOptions()
+            options = uc.ChromeOptions()
             options.add_argument('--lang=ja-JP')
             options.add_argument('--window-size=1920,1080')
             options.add_argument('--no-sandbox')
@@ -231,15 +235,22 @@ class Scraper:
             options.add_argument('--disable-gpu')
             options.add_argument(f'--user-data-dir={tmp_dir}')
 
-            # selenium-wire proxy 設定（自動處理帳密認證）
-            sw_options = {}
+            # Proxy: 用 pproxy 起本地轉發，Chrome 連本地（不需認證）
             if PROXY_URL:
-                sw_options['proxy'] = {
-                    'http': PROXY_URL,
-                    'https': PROXY_URL,
-                    'no_proxy': 'localhost,127.0.0.1',
-                }
-                print(f"[ZOZO] 使用 proxy（selenium-wire 自動處理認證）")
+                # 找空閒 port
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(('127.0.0.1', 0))
+                local_port = sock.getsockname()[1]
+                sock.close()
+
+                # pproxy: 本地 HTTP proxy → 轉發到有認證的上游 proxy
+                proxy_proc = subprocess.Popen(
+                    ['python', '-m', 'pproxy', '-l', f'http://127.0.0.1:{local_port}', '-r', PROXY_URL],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                _time.sleep(1)  # 等 pproxy 啟動
+                options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
+                print(f"[ZOZO] pproxy 本地轉發 :{local_port} → proxy-cheap")
 
             # Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
@@ -248,12 +259,7 @@ class Scraper:
                 kwargs['version_main'] = ver
 
             use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
-            driver = Chrome(
-                options=options,
-                headless=use_headless,
-                seleniumwire_options=sw_options,
-                **kwargs,
-            )
+            driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
 
             # 暖機
             driver.get('https://www.google.com')
@@ -382,6 +388,9 @@ class Scraper:
                 try: driver.quit()
                 except: pass
         finally:
+            if proxy_proc:
+                try: proxy_proc.terminate()
+                except: pass
             try: shutil.rmtree(tmp_dir, ignore_errors=True)
             except: pass
 
