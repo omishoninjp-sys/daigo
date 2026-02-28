@@ -381,131 +381,93 @@ class Scraper:
                             }
                         }
 
-                        // === DOM fallback: variant extraction from ZOZO structure ===
+                        // === DOM: variant extraction from ZOZO DT/DD structure ===
                         if (r.variants.length === 0) {
-                            var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
-                            var currentColor = '';
-                            var currentColorImg = '';
+                            // ZOZO 結構: <dl> → <dt>顏色名</dt><dd>含 ul>li 尺寸列表</dd>
+                            var dts = document.querySelectorAll('dt.p-goods-information-action__term');
 
-                            items.forEach(function(item) {
-                                var fullText = item.textContent.replace(/\s+/g, ' ').trim();
+                            dts.forEach(function(dt) {
+                                var colorName = dt.textContent.trim();
+                                var dd = dt.nextElementSibling; // 對應的 <dd>
+                                if (!dd) return;
 
-                                // 顏色縮圖: 有 p-goods-add-cart-thumbnail 的是顏色分隔
-                                var thumb = item.querySelector('[class*="cart-thumbnail"], button[class*="thumbnail"]');
-                                if (thumb) {
-                                    // 顏色名可能在同層或附近的文字節點
-                                    // 嘗試找不是尺寸的純文字（ブラウン、ブラック等）
-                                    var texts = [];
-                                    item.querySelectorAll('p, span, div').forEach(function(el) {
-                                        var t = el.textContent.trim();
-                                        if (t && t.length < 20 && !/^[SMLXF0-9\/]/.test(t) &&
-                                            t.indexOf('在庫') === -1 && t.indexOf('カート') === -1 &&
-                                            t.indexOf('サイズ') === -1 && t.indexOf('SOLD') === -1) {
-                                            texts.push(t);
+                                // 顏色縮圖
+                                var thumbImg = dd.querySelector('.p-goods-add-cart-thumbnail img, button[class*="thumbnail"] img');
+                                var colorImage = thumbImg ? (thumbImg.src || '') : '';
+
+                                // 該顏色下的所有尺寸
+                                var sizeItems = dd.querySelectorAll('li.p-goods-add-cart-list__item');
+                                sizeItems.forEach(function(li) {
+                                    var fullText = li.textContent.replace(/\s+/g, ' ').trim();
+
+                                    // 尺寸: "M / 在庫あり" → M
+                                    var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
+                                    if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
+                                    var size = sizeMatch ? sizeMatch[1].trim() : '';
+                                    if (!size) return;
+
+                                    // 庫存
+                                    var inStock = fullText.indexOf('在庫あり') !== -1;
+                                    var soldOut = fullText.indexOf('SOLD') !== -1;
+
+                                    // SKU: form hidden input
+                                    var sku = '';
+                                    var form = li.querySelector('form');
+                                    if (form) {
+                                        form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
+                                            var n = (inp.name || '').toLowerCase();
+                                            if (n === 'did' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                        });
+                                        if (!sku && form.action) {
+                                            var dm = form.action.match(/[?&]did=(\d+)/);
+                                            if (dm) sku = dm[1];
                                         }
-                                    });
-                                    if (texts.length > 0) currentColor = texts[0];
-
-                                    var tImg = thumb.querySelector('img');
-                                    if (tImg) currentColorImg = tImg.src || '';
-                                }
-
-                                // 嘗試從直接子元素找顏色名（非尺寸文字）
-                                if (!currentColor) {
-                                    var possibleColor = fullText.match(/^([ァ-ヶー\u4e00-\u9fff\w]+)\s/);
-                                    if (possibleColor && possibleColor[1].length < 15 &&
-                                        !/^[SMLXF0-9]/.test(possibleColor[1]) &&
-                                        possibleColor[1].indexOf('在庫') === -1) {
-                                        currentColor = possibleColor[1];
                                     }
-                                }
 
-                                // 抓尺寸
-                                var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ)\s*[\/／]/i);
-                                var size = sizeMatch ? sizeMatch[1].trim() : '';
-
-                                // 沒有尺寸 = 這是顏色標題行，不是 variant
-                                if (!size) return;
-
-                                // 庫存
-                                var stockEl = item.querySelector('[class*="stock"]');
-                                var stockText = stockEl ? stockEl.textContent.trim() : fullText;
-                                var inStock = stockText.indexOf('在庫あり') !== -1;
-                                var soldOut = stockText.indexOf('SOLD') !== -1 || fullText.indexOf('SOLD OUT') !== -1;
-
-                                // SKU: 從 form hidden inputs
-                                var sku = '';
-                                var form = item.querySelector('form');
-                                if (form) {
-                                    form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
-                                        var n = (inp.name || '').toLowerCase();
-                                        var v = inp.value || '';
-                                        if (n === 'did' || n === 'detail_id' || n === 'gid') sku = v;
+                                    r.variants.push({
+                                        color: colorName,
+                                        size: size,
+                                        sku: sku,
+                                        price: r.price,
+                                        in_stock: inStock && !soldOut,
+                                        image: colorImage
                                     });
-                                    // fallback: action URL 裡的參數
-                                    if (!sku) {
-                                        var action = form.action || '';
-                                        var dm = action.match(/[?&]did=(\d+)/);
-                                        if (dm) sku = dm[1];
-                                    }
-                                }
-
-                                // 也嘗試從 item 本身的 data 屬性
-                                if (!sku) sku = item.getAttribute('data-did') || item.getAttribute('data-sku') || '';
-
-                                r.variants.push({
-                                    color: currentColor,
-                                    size: size,
-                                    sku: sku,
-                                    price: r.price,
-                                    in_stock: inStock && !soldOut,
-                                    image: currentColorImg
                                 });
                             });
 
-                            r.variant_debug += ' | cart-items: ' + items.length + ' | parsed: ' + r.variants.length;
+                            // 如果沒有 DT/DD 結構（單色商品），fallback 到 li 直接抓
+                            if (r.variants.length === 0) {
+                                var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
+                                items.forEach(function(li) {
+                                    var fullText = li.textContent.replace(/\s+/g, ' ').trim();
+                                    var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
+                                    if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
+                                    var size = sizeMatch ? sizeMatch[1].trim() : '';
+                                    if (!size) return;
 
-                            // Debug: dump parent structure to find color grouping
-                            var parentInfo = [];
-                            items.forEach(function(item, idx) {
-                                if (idx < 3) {
-                                    // 找 parent ul, 再找 parent 的 siblings
-                                    var ul = item.parentElement;
-                                    var container = ul ? ul.parentElement : null;
-                                    if (container && idx === 0) {
-                                        parentInfo.push('container: ' + container.tagName + '.' + (container.className||'').substring(0,50));
-                                        // 找 container 的前面元素
-                                        var prev = container.previousElementSibling;
-                                        if (prev) parentInfo.push('prev: ' + prev.tagName + '.' + (prev.className||'').substring(0,40) + ' txt:' + prev.textContent.trim().substring(0,30));
-                                        // 找 container 裡面除了 ul 之外的元素
-                                        var children = container.children;
-                                        for (var ci = 0; ci < children.length && ci < 5; ci++) {
-                                            var ch = children[ci];
-                                            if (ch !== ul) {
-                                                parentInfo.push('sibling[' + ci + ']: ' + ch.tagName + '.' + (ch.className||'').substring(0,40) + ' txt:' + ch.textContent.trim().substring(0,30));
-                                            }
-                                        }
+                                    var inStock = fullText.indexOf('在庫あり') !== -1;
+                                    var soldOut = fullText.indexOf('SOLD') !== -1;
+                                    var sku = '';
+                                    var form = li.querySelector('form');
+                                    if (form) {
+                                        form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
+                                            var n = (inp.name || '').toLowerCase();
+                                            if (n === 'did' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                        });
                                     }
-                                    // 找 ul 的前面元素（可能是顏色）
-                                    if (ul && idx === 0) {
-                                        var ulPrev = ul.previousElementSibling;
-                                        if (ulPrev) parentInfo.push('ulPrev: ' + ulPrev.tagName + '.' + (ulPrev.className||'').substring(0,40) + ' txt:' + ulPrev.textContent.trim().substring(0,30));
-                                    }
-                                }
-                            });
-                            r.variant_debug += ' | parents: ' + parentInfo.join(' ;; ');
 
-                            // Also find ALL elements with thumbnail class in the cart area
-                            var allThumbs = document.querySelectorAll('[class*="goods-add-cart"] [class*="thumbnail"], [class*="goods-add-cart"] img');
-                            var thumbInfo = [];
-                            allThumbs.forEach(function(th, idx) {
-                                if (idx < 6) {
-                                    var pTag = th.parentElement ? th.parentElement.tagName + '.' + (th.parentElement.className||'').substring(0,30) : '?';
-                                    thumbInfo.push(th.tagName + ' parent:' + pTag);
-                                }
-                            });
-                            r.variant_debug += ' | thumbs(' + allThumbs.length + '): ' + thumbInfo.join('; ');
+                                    r.variants.push({
+                                        color: '',
+                                        size: size,
+                                        sku: sku,
+                                        price: r.price,
+                                        in_stock: inStock && !soldOut,
+                                        image: ''
+                                    });
+                                });
+                            }
+
+                            r.variant_debug += ' | dts: ' + dts.length + ' | parsed: ' + r.variants.length;
                         }
 
                         // === OG fallback ===
