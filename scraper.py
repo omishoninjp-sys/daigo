@@ -194,7 +194,11 @@ class Scraper:
                 if images:
                     product.image_url = images[0]
                     product.extra_images = images[1:9]
-                print(f"[ZOZO] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO] ✅ {product.title[:40]}")
+                # variants
+                variants = data.get("variants", [])
+                if variants:
+                    product.variants = variants
+                print(f"[ZOZO] ✅ {product.title[:40]} / ¥{product.price_jpy:,} / {len(variants)} variants" if product.price_jpy else f"[ZOZO] ✅ {product.title[:40]}")
             else:
                 print("[ZOZO] ⚠️ 未取得資料")
         except Exception as e:
@@ -286,11 +290,13 @@ class Scraper:
                     result = driver.execute_script(r"""
                         var r = {title:'', brand:'', price:0, price_text:'',
                                  original_price:0, original_price_text:'', discount:'',
-                                 images:[], description:'', item_id:'', in_stock:true};
+                                 images:[], description:'', item_id:'', in_stock:true,
+                                 variants:[], variant_debug:''};
 
                         var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
                         if (m) r.item_id = m[1];
 
+                        // === ld+json ===
                         document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
                             try {
                                 var d = JSON.parse(s.textContent);
@@ -304,30 +310,89 @@ class Scraper:
                                     if (typeof img === 'string') img = [img];
                                     r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
                                     var offers = d.offers || {};
-                                    if (Array.isArray(offers)) offers = offers[0] || {};
-                                    if (offers.price) {
-                                        r.price = parseInt(offers.price);
-                                        r.price_text = '\u00a5' + r.price.toLocaleString();
+                                    if (Array.isArray(offers)) {
+                                        // 多個 offers = 多個 variant
+                                        offers.forEach(function(o) {
+                                            if (o.price) {
+                                                if (!r.price) {
+                                                    r.price = parseInt(o.price);
+                                                    r.price_text = '\u00a5' + r.price.toLocaleString();
+                                                }
+                                            }
+                                        });
+                                        offers = offers[0] || {};
+                                    } else {
+                                        if (offers.price) {
+                                            r.price = parseInt(offers.price);
+                                            r.price_text = '\u00a5' + r.price.toLocaleString();
+                                        }
                                     }
                                     if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
                                 }
                             } catch(e) {}
                         });
 
-                        if (!r.title) {
-                            var nd = document.getElementById('__NEXT_DATA__');
-                            if (nd) {
-                                try {
-                                    var props = JSON.parse(nd.textContent).props.pageProps;
-                                    var prod = props.product || props.goods || props.item || {};
-                                    if (prod.name) r.title = prod.name;
-                                    if (prod.brandName) r.brand = prod.brandName;
-                                    if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                    if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
-                                } catch(e) {}
+                        // === __NEXT_DATA__ (variants) ===
+                        var nd = document.getElementById('__NEXT_DATA__');
+                        if (nd) {
+                            try {
+                                var ndata = JSON.parse(nd.textContent);
+                                var props = ndata.props && ndata.props.pageProps ? ndata.props.pageProps : {};
+
+                                // 嘗試找 product 資料
+                                var prod = props.product || props.goods || props.item ||
+                                          (props.initialState && props.initialState.product) || {};
+
+                                if (!r.title && prod.name) r.title = prod.name;
+                                if (!r.brand && prod.brandName) r.brand = prod.brandName;
+                                if (!r.price && prod.price) {
+                                    r.price = parseInt(prod.price);
+                                    r.price_text = '\u00a5' + r.price.toLocaleString();
+                                }
+                                if (r.images.length === 0 && prod.images) {
+                                    r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
+                                }
+
+                                // 找 variants/skus/items
+                                var items = prod.items || prod.skus || prod.variants ||
+                                           prod.colorSizes || prod.detail && prod.detail.items || [];
+
+                                if (items.length > 0) {
+                                    items.forEach(function(item) {
+                                        var v = {
+                                            color: item.colorName || item.color || item.colorLabel || '',
+                                            size: item.sizeName || item.size || item.sizeLabel || '',
+                                            sku: item.skuId || item.id || item.sku || '',
+                                            price: item.price ? parseInt(item.price) : r.price,
+                                            in_stock: item.soldout !== true && item.inStock !== false,
+                                            image: item.imageUrl || item.image || ''
+                                        };
+                                        if (v.color || v.size) r.variants.push(v);
+                                    });
+                                }
+
+                                // Debug: 列出 pageProps 的 top-level keys
+                                r.variant_debug = 'pageProps keys: ' + Object.keys(props).join(',');
+                                if (prod && typeof prod === 'object') {
+                                    r.variant_debug += ' | prod keys: ' + Object.keys(prod).join(',');
+                                }
+                            } catch(e) {
+                                r.variant_debug = 'NEXT_DATA error: ' + e.message;
                             }
                         }
 
+                        // === DOM fallback: variant extraction ===
+                        if (r.variants.length === 0) {
+                            // 嘗試從 DOM 抓取子項資訊
+                            var variantEls = document.querySelectorAll('[class*="variant"], [class*="Variant"], [class*="sku"], [class*="Sku"], [data-test*="size"], [data-test*="color"]');
+                            r.variant_debug += ' | DOM variant els: ' + variantEls.length;
+
+                            // 嘗試找「在庫あり」的項目
+                            var stockEls = document.querySelectorAll('[class*="stock"], [class*="Stock"]');
+                            r.variant_debug += ' | stock els: ' + stockEls.length;
+                        }
+
+                        // === OG fallback ===
                         if (!r.title) {
                             var og = document.querySelector('meta[property="og:title"]');
                             if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
@@ -359,6 +424,14 @@ class Scraper:
 
                         return r;
                     """)
+                    # 印 variant debug 資訊
+                    if result:
+                        vd = result.get('variant_debug', '')
+                        vs = result.get('variants', [])
+                        print(f"[ZOZO] variant_debug: {vd}")
+                        print(f"[ZOZO] variants: {len(vs)} 個")
+                        for v in vs[:6]:
+                            print(f"  - {v.get('color','')} / {v.get('size','')} | stock={v.get('in_stock')} | sku={v.get('sku','')}")
                     return result
 
                 if 'access denied' in (title or '').lower() and i >= 2:
