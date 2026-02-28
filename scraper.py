@@ -466,17 +466,46 @@ class Scraper:
 
                             r.variant_debug += ' | cart-items: ' + items.length + ' | parsed: ' + r.variants.length;
 
-                            // Debug: dump first 6 item texts to understand structure
-                            var itemTexts = [];
+                            // Debug: dump parent structure to find color grouping
+                            var parentInfo = [];
                             items.forEach(function(item, idx) {
-                                if (idx < 6) {
-                                    var t = item.textContent.replace(/\s+/g, ' ').trim().substring(0, 80);
-                                    var hasThumb = item.querySelector('[class*="thumbnail"]') ? 'T' : '-';
-                                    var cls = (item.className || '').substring(0, 40);
-                                    itemTexts.push('[' + idx + hasThumb + '] ' + t);
+                                if (idx < 3) {
+                                    // 找 parent ul, 再找 parent 的 siblings
+                                    var ul = item.parentElement;
+                                    var container = ul ? ul.parentElement : null;
+                                    if (container && idx === 0) {
+                                        parentInfo.push('container: ' + container.tagName + '.' + (container.className||'').substring(0,50));
+                                        // 找 container 的前面元素
+                                        var prev = container.previousElementSibling;
+                                        if (prev) parentInfo.push('prev: ' + prev.tagName + '.' + (prev.className||'').substring(0,40) + ' txt:' + prev.textContent.trim().substring(0,30));
+                                        // 找 container 裡面除了 ul 之外的元素
+                                        var children = container.children;
+                                        for (var ci = 0; ci < children.length && ci < 5; ci++) {
+                                            var ch = children[ci];
+                                            if (ch !== ul) {
+                                                parentInfo.push('sibling[' + ci + ']: ' + ch.tagName + '.' + (ch.className||'').substring(0,40) + ' txt:' + ch.textContent.trim().substring(0,30));
+                                            }
+                                        }
+                                    }
+                                    // 找 ul 的前面元素（可能是顏色）
+                                    if (ul && idx === 0) {
+                                        var ulPrev = ul.previousElementSibling;
+                                        if (ulPrev) parentInfo.push('ulPrev: ' + ulPrev.tagName + '.' + (ulPrev.className||'').substring(0,40) + ' txt:' + ulPrev.textContent.trim().substring(0,30));
+                                    }
                                 }
                             });
-                            r.variant_debug += ' | items: ' + itemTexts.join(' ;; ');
+                            r.variant_debug += ' | parents: ' + parentInfo.join(' ;; ');
+
+                            // Also find ALL elements with thumbnail class in the cart area
+                            var allThumbs = document.querySelectorAll('[class*="goods-add-cart"] [class*="thumbnail"], [class*="goods-add-cart"] img');
+                            var thumbInfo = [];
+                            allThumbs.forEach(function(th, idx) {
+                                if (idx < 6) {
+                                    var pTag = th.parentElement ? th.parentElement.tagName + '.' + (th.parentElement.className||'').substring(0,30) : '?';
+                                    thumbInfo.push(th.tagName + ' parent:' + pTag);
+                                }
+                            });
+                            r.variant_debug += ' | thumbs(' + allThumbs.length + '): ' + thumbInfo.join('; ');
                         }
 
                         // === OG fallback ===
