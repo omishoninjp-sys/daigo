@@ -415,6 +415,36 @@ class Scraper:
             driver.get('about:blank')
             _time.sleep(1)
 
+            # 診斷：透過 proxy 載入 httpbin 確認 IP 白名單生效
+            print("[ZOZO] 診斷：proxy 連通測試...")
+            try:
+                driver.set_page_load_timeout(15)
+                driver.get('http://httpbin.org/ip')
+                _time.sleep(2)
+                diag_html = driver.page_source
+                print(f"[ZOZO] proxy 測試: {diag_html[:200]}")
+            except Exception as e:
+                print(f"[ZOZO] proxy 測試失敗: {e}")
+
+            driver.set_page_load_timeout(45)
+
+            # 診斷：透過 proxy 能不能上網？
+            print("[ZOZO] 診斷：測試 proxy 連線...")
+            try:
+                driver.set_page_load_timeout(15)
+                driver.get('http://httpbin.org/ip')
+                _time.sleep(2)
+                diag_html = driver.page_source
+                print(f"[ZOZO] proxy 診斷: {len(diag_html)} bytes | {diag_html[:200]}")
+                if '103.230' in diag_html:
+                    print("[ZOZO] ✅ proxy 正常，IP 是日本 proxy")
+                elif '"origin"' in diag_html:
+                    print("[ZOZO] ⚠️ proxy 可能沒生效（IP 不是 proxy）")
+                else:
+                    print("[ZOZO] ⚠️ httpbin 沒回傳 IP")
+            except Exception as e:
+                print(f"[ZOZO] ❌ proxy 診斷失敗: {type(e).__name__}: {e}")
+
             driver.set_page_load_timeout(45)
 
             print(f"[ZOZO] 載入: {url}")
