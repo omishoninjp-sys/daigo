@@ -421,20 +421,40 @@ class Scraper:
             try:
                 driver.get('http://httpbin.org/ip')
                 _time.sleep(2)
-                print(f"[ZOZO] ✅ HTTP 正常: {driver.page_source[:100]}")
+                print(f"[ZOZO] ✅ HTTP: {driver.page_source[:80]}")
             except Exception as e:
-                print(f"[ZOZO] ❌ HTTP 失敗: {e}")
+                print(f"[ZOZO] ❌ HTTP: {type(e).__name__}")
 
             try:
                 driver.get('https://httpbin.org/ip')
                 _time.sleep(2)
-                print(f"[ZOZO] ✅ HTTPS 正常: {driver.page_source[:100]}")
+                print(f"[ZOZO] ✅ HTTPS: {driver.page_source[:80]}")
             except Exception as e:
-                print(f"[ZOZO] ❌ HTTPS 失敗: {type(e).__name__}")
-                # 看有沒有錯誤頁面
+                print(f"[ZOZO] ❌ HTTPS: {type(e).__name__}")
+
+            # 測日本網站
+            try:
+                driver.get('https://www.amazon.co.jp')
+                _time.sleep(2)
+                t = driver.title
+                print(f"[ZOZO] ✅ amazon.co.jp: title={t[:40]} | {len(driver.page_source)} bytes")
+            except Exception as e:
+                print(f"[ZOZO] ❌ amazon.co.jp: {type(e).__name__}")
+
+            # 測 zozo.jp 首頁（不是商品頁）
+            driver.set_page_load_timeout(15)
+            try:
+                driver.get('https://zozo.jp/')
+                _time.sleep(3)
+                t = driver.title
+                html = driver.page_source
+                print(f"[ZOZO] zozo.jp 首頁: title={t[:40]} | {len(html)} bytes")
+                print(f"[ZOZO] zozo.jp HTML前200: {html[:200]}")
+            except Exception as e:
+                print(f"[ZOZO] zozo.jp 首頁超時: {type(e).__name__}")
                 try:
                     html = driver.page_source
-                    print(f"[ZOZO] HTTPS 頁面: {html[:200]}")
+                    print(f"[ZOZO] 超時後頁面: {len(html)} bytes | {html[:200]}")
                 except:
                     pass
 
