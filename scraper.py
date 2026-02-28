@@ -376,7 +376,8 @@ class Scraper:
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument(f'--user-data-dir={tmp_dir}')
-            # 禁用背景下載（但不禁用 extensions！）
+            # 禁用背景下載
+            options.add_argument('--disable-extensions')
             options.add_argument('--disable-component-update')
             options.add_argument('--disable-background-networking')
             options.add_argument('--disable-sync')
@@ -384,55 +385,9 @@ class Scraper:
             options.add_argument('--disable-default-apps')
             options.add_argument('--disable-client-side-phishing-detection')
 
-            # Proxy: 用 Chrome extension 處理認證（不需要 tunnel）
+            # Proxy: 暫時停用，先測 Zeabur 直連
             if PROXY_URL:
-                from urllib.parse import urlparse as _urlparse
-                _pp = _urlparse(PROXY_URL)
-
-                # 建立 proxy auth extension
-                ext_dir = os.path.join(tmp_dir, 'proxy_ext')
-                os.makedirs(ext_dir, exist_ok=True)
-
-                manifest = {
-                    "manifest_version": 2,
-                    "name": "Proxy Auth",
-                    "version": "1.0",
-                    "permissions": [
-                        "proxy",
-                        "webRequest",
-                        "webRequestBlocking",
-                        "<all_urls>"
-                    ],
-                    "background": {
-                        "scripts": ["background.js"]
-                    }
-                }
-
-                background_js = f"""
-chrome.webRequest.onAuthRequired.addListener(
-    function(details) {{
-        return {{
-            authCredentials: {{
-                username: "{_pp.username or ''}",
-                password: "{_pp.password or ''}"
-            }}
-        }};
-    }},
-    {{urls: ["<all_urls>"]}},
-    ["blocking"]
-);
-"""
-                import json as _json
-                with open(os.path.join(ext_dir, 'manifest.json'), 'w') as f:
-                    _json.dump(manifest, f)
-                with open(os.path.join(ext_dir, 'background.js'), 'w') as f:
-                    f.write(background_js)
-
-                options.add_argument(f'--load-extension={ext_dir}')
-                options.add_argument(f'--proxy-server=http://{_pp.hostname}:{_pp.port}')
-                # 只讓 zozo.jp 走 proxy
-                options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com')
-                print(f"[ZOZO] proxy extension + {_pp.hostname}:{_pp.port}")
+                print(f"[ZOZO] ⚠️ 暫時跳過 proxy，測試直連")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
