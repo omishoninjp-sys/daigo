@@ -214,127 +214,146 @@ class Scraper:
         return product
 
     async def _fetch_zozo_http(self, url: str) -> ProductInfo | None:
-        """用 curl_cffi 模擬 Chrome TLS 指紋請求 ZOZOTOWN"""
+        """用 Playwright + proxy 載入 ZOZOTOWN（Playwright 原生支援 proxy 帳密認證）"""
         import json, re
         product = ProductInfo(source_url=url)
 
         try:
-            from curl_cffi.requests import AsyncSession
+            from playwright.async_api import async_playwright
+            from urllib.parse import urlparse as _urlparse
 
-            headers = {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
-                'Cache-Control': 'max-age=0',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1',
-            }
+            proxy_config = None
+            if PROXY_URL:
+                _pp = _urlparse(PROXY_URL)
+                proxy_config = {
+                    'server': f'http://{_pp.hostname}:{_pp.port}',
+                }
+                if _pp.username:
+                    proxy_config['username'] = _pp.username
+                if _pp.password:
+                    proxy_config['password'] = _pp.password
+                print(f"[ZOZO-PW] Playwright + proxy: {_pp.hostname}:{_pp.port}")
+            else:
+                print(f"[ZOZO-PW] Playwright 無 proxy")
 
-            proxy = PROXY_URL if PROXY_URL else None
-            proxies = {'http': proxy, 'https': proxy} if proxy else None
-
-            async with AsyncSession(impersonate="chrome131") as session:
-                print(f"[ZOZO-HTTP] curl_cffi 請求: {url}" + (f" (proxy)" if proxy else ""))
-                resp = await session.get(
-                    url,
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=20,
-                    allow_redirects=True,
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--lang=ja-JP",
+                    ],
+                    proxy=proxy_config,
                 )
-                html = resp.text
-                print(f"[ZOZO-HTTP] 回應: {resp.status_code} | {len(html)} bytes")
-
-                if resp.status_code != 200:
-                    print(f"[ZOZO-HTTP] ⚠️ 非 200: {resp.status_code}")
-                    print(f"[ZOZO-HTTP] 內容: {html[:300]}")
-                    return None
-
-                # 解析 ld+json
-                ld_matches = re.findall(
-                    r'<script\s+type=["\']application/ld\+json["\']\s*>(.*?)</script>',
-                    html, re.DOTALL
+                context = await browser.new_context(
+                    locale='ja-JP',
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080},
                 )
-                for ld_text in ld_matches:
-                    try:
-                        ld = json.loads(ld_text)
-                        if isinstance(ld, list):
-                            ld = next((x for x in ld if x.get('@type') == 'Product'), ld[0] if ld else {})
-                        if ld.get('@type') == 'Product':
-                            product.title = ld.get('name', '')
-                            brand = ld.get('brand', '')
-                            product.brand = brand.get('name', '') if isinstance(brand, dict) else str(brand)
-                            product.description = (ld.get('description', '') or '')[:500]
+                page = await context.new_page()
 
-                            images = ld.get('image', [])
-                            if isinstance(images, str):
-                                images = [images]
-                            images = [i for i in images if isinstance(i, str) and 'c.imgz.jp' in i]
-                            if images:
-                                product.image_url = images[0]
-                                product.extra_images = images[1:9]
+                try:
+                    print(f"[ZOZO-PW] 載入: {url}")
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
-                            offers = ld.get('offers', {})
-                            if isinstance(offers, list):
-                                offers = offers[0] if offers else {}
-                            if offers.get('price'):
-                                product.price_jpy = int(offers['price'])
-                            break
-                    except (json.JSONDecodeError, StopIteration):
-                        continue
+                    # 等額外時間讓 JS 渲染
+                    await page.wait_for_timeout(5000)
 
-                # fallback: __NEXT_DATA__
-                if not product.title:
-                    nd_match = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-                    if nd_match:
+                    html = await page.content()
+                    title = await page.title()
+                    print(f"[ZOZO-PW] 頁面: {len(html)} bytes | title={title[:60]}")
+
+                    has_data = ('application/ld+json' in html or
+                               '__NEXT_DATA__' in html or
+                               'og:title' in html)
+
+                    if not has_data:
+                        # 可能需要更多時間（Akamai challenge）
+                        print("[ZOZO-PW] 等待 JS challenge...")
+                        for attempt in range(6):
+                            await page.wait_for_timeout(3000)
+                            html = await page.content()
+                            title = await page.title()
+                            has_data = ('application/ld+json' in html or
+                                       '__NEXT_DATA__' in html or
+                                       'og:title' in html)
+                            print(f"[ZOZO-PW] 嘗試 {attempt+1}: {len(html)} bytes | title={title[:40]} | data={has_data}")
+                            if has_data:
+                                break
+
+                    if not has_data:
+                        print(f"[ZOZO-PW] ⚠️ 無法取得資料")
+                        print(f"[ZOZO-PW] HTML前300: {html[:300]}")
+                        return None
+
+                    # 解析 ld+json
+                    ld_matches = re.findall(
+                        r'<script\s+type=["\']application/ld\+json["\']\s*>(.*?)</script>',
+                        html, re.DOTALL
+                    )
+                    for ld_text in ld_matches:
                         try:
-                            nd = json.loads(nd_match.group(1))
-                            props = nd.get('props', {}).get('pageProps', {})
-                            prod = props.get('product') or props.get('goods') or props.get('item') or {}
-                            if prod.get('name'):
-                                product.title = prod['name']
-                            if prod.get('brandName'):
-                                product.brand = prod['brandName']
-                            if prod.get('price'):
-                                product.price_jpy = int(prod['price'])
-                            imgs = prod.get('images', [])
-                            if imgs:
-                                product.image_url = imgs[0] if isinstance(imgs[0], str) else imgs[0].get('url', '')
-                                product.extra_images = [i if isinstance(i, str) else i.get('url', '') for i in imgs[1:9]]
+                            ld = json.loads(ld_text)
+                            if isinstance(ld, list):
+                                ld = next((x for x in ld if x.get('@type') == 'Product'), ld[0] if ld else {})
+                            if ld.get('@type') == 'Product':
+                                product.title = ld.get('name', '')
+                                brand = ld.get('brand', '')
+                                product.brand = brand.get('name', '') if isinstance(brand, dict) else str(brand)
+                                product.description = (ld.get('description', '') or '')[:500]
+
+                                images = ld.get('image', [])
+                                if isinstance(images, str):
+                                    images = [images]
+                                images = [i for i in images if isinstance(i, str) and 'c.imgz.jp' in i]
+                                if images:
+                                    product.image_url = images[0]
+                                    product.extra_images = images[1:9]
+
+                                offers = ld.get('offers', {})
+                                if isinstance(offers, list):
+                                    offers = offers[0] if offers else {}
+                                if offers.get('price'):
+                                    product.price_jpy = int(offers['price'])
+                                break
                         except:
-                            pass
+                            continue
 
-                # fallback: og tags
-                if not product.title:
-                    og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
-                    if og_match:
-                        product.title = re.sub(r'\s*[-|]\s*ZOZOTOWN.*$', '', og_match.group(1))
+                    # fallback: og tags
+                    if not product.title:
+                        og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
+                        if og_match:
+                            product.title = re.sub(r'\s*[-|]\s*ZOZOTOWN.*$', '', og_match.group(1))
 
-                if not product.image_url:
-                    og_img = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', html)
-                    if og_img:
-                        product.image_url = og_img.group(1)
+                    if not product.image_url:
+                        og_img = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', html)
+                        if og_img:
+                            product.image_url = og_img.group(1)
 
-                if not product.price_jpy:
-                    price_match = re.search(r'[¥￥]([\d,]+)', html)
-                    if price_match:
-                        product.price_jpy = int(price_match.group(1).replace(',', ''))
+                    if not product.price_jpy:
+                        price_match = re.search(r'[¥￥]([\d,]+)', html)
+                        if price_match:
+                            product.price_jpy = int(price_match.group(1).replace(',', ''))
 
-                if product.title:
-                    print(f"[ZOZO-HTTP] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-HTTP] ✅ {product.title[:40]}")
-                    return product
-                else:
-                    print(f"[ZOZO-HTTP] ⚠️ 無法解析")
-                    print(f"[ZOZO-HTTP] HTML前500: {html[:500]}")
+                    if product.title:
+                        print(f"[ZOZO-PW] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-PW] ✅ {product.title[:40]}")
+                        return product
+                    else:
+                        print(f"[ZOZO-PW] ⚠️ 無法解析")
+                        return None
+
+                except Exception as e:
+                    print(f"[ZOZO-PW] 頁面錯誤: {e}")
                     return None
+                finally:
+                    await browser.close()
 
-        except ImportError:
-            print("[ZOZO-HTTP] curl_cffi 未安裝，跳過")
-            return None
         except Exception as e:
-            print(f"[ZOZO-HTTP] ❌ 錯誤: {e}")
+            print(f"[ZOZO-PW] ❌ 錯誤: {e}")
             return None
 
     def _fetch_zozo_uc(self, url: str) -> dict | None:
