@@ -416,7 +416,7 @@ class Scraper:
                                     if (form) {
                                         form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
                                             var n = (inp.name || '').toLowerCase();
-                                            if (n === 'did' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                            if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
                                         });
                                         if (!sku && form.action) {
                                             var dm = form.action.match(/[?&]did=(\d+)/);
@@ -452,7 +452,7 @@ class Scraper:
                                     if (form) {
                                         form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
                                             var n = (inp.name || '').toLowerCase();
-                                            if (n === 'did' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                            if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
                                         });
                                     }
 
@@ -467,7 +467,7 @@ class Scraper:
                                 });
                             }
 
-                            r.variant_debug += ' | dts: ' + dts.length + ' | parsed: ' + r.variants.length;
+                            var dtTexts=[]; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20));}); r.variant_debug += ' | dts: ' + dts.length + '(' + dtTexts.join(',') + ') | parsed: ' + r.variants.length + ' | deduped: ' + r.variants.length;
 
                             // Dump first form for debugging sku
                             var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
@@ -483,7 +483,7 @@ class Scraper:
                             var seen = {};
                             var unique = [];
                             r.variants.forEach(function(v) {
-                                var key = v.color + '|' + v.size;
+                                var key = v.color.replace(/s+/g,'') + '|' + v.size.replace(/s+/g,'');
                                 if (!seen[key]) {
                                     seen[key] = true;
                                     unique.push(v);
