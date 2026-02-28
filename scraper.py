@@ -180,13 +180,18 @@ class Scraper:
     async def _scrape_zozotown(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
 
-        # 如果有外部 product-fetcher，優先用它
+        # 方法 1: 直接 HTTP 請求 + proxy（最快最簡單）
+        result = await self._fetch_zozo_http(url)
+        if result and result.title:
+            return result
+
+        # 方法 2: 外部 product-fetcher（如果有設定）
         if ZOZO_SCRAPER_URL:
             result = await self._scrape_zozo_via_proxy(url)
             if result and result.title:
                 return result
 
-        # 直接用 undetected-chromedriver
+        # 方法 3: undetected-chromedriver（最後手段）
         try:
             data = await asyncio.get_event_loop().run_in_executor(
                 None, self._fetch_zozo_uc, url
@@ -200,13 +205,133 @@ class Scraper:
                 if images:
                     product.image_url = images[0]
                     product.extra_images = images[1:9]
-                print(f"[ZOZO] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else "[ZOZO] ⚠️ 無價格")
+                print(f"[ZOZO] ✅ UC: {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else "[ZOZO] ⚠️ 無價格")
             else:
                 print("[ZOZO] ⚠️ undetected-chromedriver 未取得資料")
         except Exception as e:
-            print(f"[ZOZO] ❌ 錯誤: {e}")
+            print(f"[ZOZO] ❌ UC 錯誤: {e}")
 
         return product
+
+    async def _fetch_zozo_http(self, url: str) -> ProductInfo | None:
+        """直接 HTTP 請求 ZOZOTOWN（透過 proxy 繞過地區限制）"""
+        import json, re
+        product = ProductInfo(source_url=url)
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+
+        proxy_url = PROXY_URL if PROXY_URL else None
+
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy_url,
+                timeout=20,
+                follow_redirects=True,
+            ) as client:
+                print(f"[ZOZO-HTTP] 請求: {url}" + (f" (proxy: {proxy_url.split('@')[-1]})" if proxy_url else ""))
+                resp = await client.get(url, headers=headers)
+                html = resp.text
+                print(f"[ZOZO-HTTP] 回應: {resp.status_code} | {len(html)} bytes")
+
+                if resp.status_code != 200:
+                    print(f"[ZOZO-HTTP] ⚠️ 非 200: {resp.status_code}")
+                    return None
+
+                # 解析 ld+json
+                ld_matches = re.findall(
+                    r'<script\s+type=["\']application/ld\+json["\']\s*>(.*?)</script>',
+                    html, re.DOTALL
+                )
+                for ld_text in ld_matches:
+                    try:
+                        ld = json.loads(ld_text)
+                        if isinstance(ld, list):
+                            ld = next((x for x in ld if x.get('@type') == 'Product'), ld[0] if ld else {})
+                        if ld.get('@type') == 'Product':
+                            product.title = ld.get('name', '')
+                            brand = ld.get('brand', '')
+                            product.brand = brand.get('name', '') if isinstance(brand, dict) else str(brand)
+                            product.description = (ld.get('description', '') or '')[:500]
+
+                            images = ld.get('image', [])
+                            if isinstance(images, str):
+                                images = [images]
+                            images = [i for i in images if isinstance(i, str) and 'c.imgz.jp' in i]
+                            if images:
+                                product.image_url = images[0]
+                                product.extra_images = images[1:9]
+
+                            offers = ld.get('offers', {})
+                            if isinstance(offers, list):
+                                offers = offers[0] if offers else {}
+                            if offers.get('price'):
+                                product.price_jpy = int(offers['price'])
+                            break
+                    except (json.JSONDecodeError, StopIteration):
+                        continue
+
+                # fallback: __NEXT_DATA__
+                if not product.title:
+                    nd_match = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+                    if nd_match:
+                        try:
+                            nd = json.loads(nd_match.group(1))
+                            props = nd.get('props', {}).get('pageProps', {})
+                            prod = props.get('product') or props.get('goods') or props.get('item') or {}
+                            if prod.get('name'):
+                                product.title = prod['name']
+                            if prod.get('brandName'):
+                                product.brand = prod['brandName']
+                            if prod.get('price'):
+                                product.price_jpy = int(prod['price'])
+                            imgs = prod.get('images', [])
+                            if imgs:
+                                product.image_url = imgs[0] if isinstance(imgs[0], str) else imgs[0].get('url', '')
+                                product.extra_images = [i if isinstance(i, str) else i.get('url', '') for i in imgs[1:9]]
+                        except:
+                            pass
+
+                # fallback: og:title
+                if not product.title:
+                    og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
+                    if og_match:
+                        product.title = re.sub(r'\s*[-|]\s*ZOZOTOWN.*$', '', og_match.group(1))
+
+                if not product.image_url:
+                    og_img = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', html)
+                    if og_img:
+                        product.image_url = og_img.group(1)
+
+                # 價格 fallback
+                if not product.price_jpy:
+                    price_match = re.search(r'[¥￥]([\d,]+)', html)
+                    if price_match:
+                        product.price_jpy = int(price_match.group(1).replace(',', ''))
+
+                if product.title:
+                    print(f"[ZOZO-HTTP] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-HTTP] ✅ {product.title[:40]} (無價格)")
+                    return product
+                else:
+                    # Debug: 印出收到什麼
+                    print(f"[ZOZO-HTTP] ⚠️ 無法解析商品資訊")
+                    print(f"[ZOZO-HTTP] HTML前500: {html[:500]}")
+                    return None
+
+        except Exception as e:
+            print(f"[ZOZO-HTTP] ❌ 錯誤: {e}")
+            return None
 
     def _fetch_zozo_uc(self, url: str) -> dict | None:
         """
