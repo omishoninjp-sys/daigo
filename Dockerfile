@@ -27,6 +27,7 @@ COPY . .
 
 ENV PORT=8000
 ENV CHROME_VERSION=0
+ENV DISPLAY=:99
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &  sleep 1 && uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
