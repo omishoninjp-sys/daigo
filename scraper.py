@@ -381,47 +381,98 @@ class Scraper:
                             }
                         }
 
-                        // === DOM fallback: variant extraction ===
+                        // === DOM fallback: variant extraction from ZOZO structure ===
                         if (r.variants.length === 0) {
-                            // Dump: 找所有含「在庫」文字的元素的父結構
-                            var stockTexts = [];
-                            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-                            while (walker.nextNode()) {
-                                var t = walker.currentNode.textContent.trim();
-                                if (t.indexOf('在庫') !== -1 || t.indexOf('カート') !== -1) {
-                                    var el = walker.currentNode.parentElement;
-                                    var path = [];
-                                    var cur = el;
-                                    for (var d = 0; d < 5 && cur; d++) {
-                                        var cn = cur.className ? ('.' + String(cur.className).split(/\s+/).join('.')) : '';
-                                        path.unshift(cur.tagName.toLowerCase() + cn);
-                                        cur = cur.parentElement;
+                            // ZOZO 結構: li.p-goods-add-cart-list__item 包含每個 variant
+                            var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
+                            var currentColor = '';
+
+                            items.forEach(function(item) {
+                                // 檢查是否有顏色標題（縮圖按鈕帶顏色名）
+                                var thumbBtn = item.querySelector('.p-goods-add-cart-thumbnail, [class*="cart-thumbnail"]');
+                                if (thumbBtn) {
+                                    // 顏色名可能在 alt 或附近文字
+                                    var img = thumbBtn.querySelector('img');
+                                    if (img && img.alt) {
+                                        // alt 通常是完整商品名，不是顏色
                                     }
-                                    stockTexts.push(path.join(' > ') + ' :: ' + t.substring(0, 40));
                                 }
-                            }
-                            r.variant_debug += ' | stockTexts(' + stockTexts.length + '): ' + stockTexts.slice(0, 8).join(' ;; ');
 
-                            // Dump: 找 color/size 相關的 data 屬性
-                            var dataEls = document.querySelectorAll('[data-color], [data-size], [data-sku], [data-product-id], [data-item-id]');
-                            r.variant_debug += ' | data-attrs: ' + dataEls.length;
+                                // 顏色名通常在 .p-goods-add-cart-list__item 前面的文字或特定 class
+                                var colorEl = item.querySelector('[class*="color-name"], [class*="colorName"], [class*="cart-color"]');
+                                if (colorEl) currentColor = colorEl.textContent.trim();
 
-                            // Dump: 看看頁面裡有什麼 section/list 結構包含 M/L/XL
-                            var sizeTexts = [];
-                            document.querySelectorAll('li, tr, [role="listitem"], [role="row"]').forEach(function(el) {
-                                var t = el.textContent.trim().substring(0, 80);
-                                if ((t.indexOf('在庫あり') !== -1 || t.indexOf('SOLD') !== -1) &&
-                                    /[SMLXF]\s*\//.test(t) || /[サイズ]/.test(t)) {
-                                    sizeTexts.push(el.tagName + '.' + (el.className||'').split(/\s+/)[0] + ' :: ' + t.substring(0,60));
+                                // 沒有專門 color element 時，嘗試從整個 item 文字解析
+                                var fullText = item.textContent.replace(/\s+/g, ' ').trim();
+
+                                // 抓庫存狀態
+                                var stockEl = item.querySelector('.p-goods-add-cart-stock, [class*="stock"]');
+                                var stockText = stockEl ? stockEl.textContent.trim() : '';
+                                var inStock = stockText.indexOf('在庫あり') !== -1;
+                                var soldOut = stockText.indexOf('SOLD') !== -1 || stockText.indexOf('sold') !== -1 ||
+                                             fullText.indexOf('SOLD') !== -1;
+
+                                // 抓尺寸: "M / 在庫あり" 或 "L / 在庫あり"
+                                var sizeMatch = fullText.match(/^([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
+                                var size = sizeMatch ? sizeMatch[1].trim() : '';
+
+                                // 如果沒匹配到英文尺寸，試日文尺寸
+                                if (!size) {
+                                    var jpSize = fullText.match(/^(フリー|F|ONE SIZE|ワンサイズ)\s*[\/／]/i);
+                                    if (jpSize) size = jpSize[1].trim();
+                                }
+
+                                // 嘗試從 data 屬性取得
+                                var dataColor = item.getAttribute('data-color') || '';
+                                var dataSize = item.getAttribute('data-size') || '';
+                                var dataSku = item.getAttribute('data-sku') || item.getAttribute('data-did') || '';
+
+                                // 也找 form 裡的 hidden input
+                                var form = item.querySelector('form');
+                                if (form) {
+                                    var inputs = form.querySelectorAll('input[type="hidden"]');
+                                    inputs.forEach(function(inp) {
+                                        var n = inp.name || '';
+                                        var v = inp.value || '';
+                                        if (n.indexOf('color') !== -1 && !dataColor) dataColor = v;
+                                        if (n.indexOf('size') !== -1 && !dataSize) dataSize = v;
+                                        if ((n === 'did' || n === 'sku' || n.indexOf('item') !== -1) && !dataSku) dataSku = v;
+                                    });
+                                }
+
+                                if (dataColor) currentColor = dataColor;
+                                if (dataSize && !size) size = dataSize;
+
+                                // 圖片
+                                var thumbImg = item.querySelector('img[class*="thumbnail"], img[src*="c.imgz.jp"]');
+                                var variantImage = thumbImg ? (thumbImg.src || thumbImg.getAttribute('data-src') || '') : '';
+
+                                if (size || currentColor) {
+                                    r.variants.push({
+                                        color: currentColor,
+                                        size: size,
+                                        sku: dataSku,
+                                        price: r.price,
+                                        in_stock: inStock && !soldOut,
+                                        image: variantImage
+                                    });
                                 }
                             });
-                            r.variant_debug += ' | sizeRows(' + sizeTexts.length + '): ' + sizeTexts.slice(0, 6).join(' ;; ');
 
-                            // 嘗試 ZOZO 特有結構：p-goods-add-cart 區域
-                            var cartArea = document.querySelector('[class*="add-cart"], [class*="AddCart"], [class*="addCart"], [id*="cart"]');
-                            if (cartArea) {
-                                r.variant_debug += ' | cartArea: ' + cartArea.tagName + '.' + (cartArea.className||'').substring(0, 60);
-                                r.variant_debug += ' | cartHTML(' + cartArea.innerHTML.length + '): ' + cartArea.innerHTML.substring(0, 200);
+                            r.variant_debug += ' | cart-items: ' + items.length;
+
+                            // 如果上面沒抓到，試 data 屬性元素
+                            if (r.variants.length === 0) {
+                                var dataEls = document.querySelectorAll('[data-color], [data-size]');
+                                r.variant_debug += ' | data-els: ' + dataEls.length;
+                                dataEls.forEach(function(el) {
+                                    var dc = el.getAttribute('data-color') || '';
+                                    var ds = el.getAttribute('data-size') || '';
+                                    if (dc || ds) {
+                                        var txt = el.textContent.trim().substring(0, 30);
+                                        r.variant_debug += ' | [' + dc + '/' + ds + ':' + txt + ']';
+                                    }
+                                });
                             }
                         }
 
