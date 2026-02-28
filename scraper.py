@@ -308,6 +308,11 @@ class Scraper:
                     print(f"[ZOZO] scripts: {scripts[:5]}")
                     metas = _re.findall(r'<meta[^>]*>', html[:5000])
                     print(f"[ZOZO] metas: {metas[:5]}")
+                    # HTML 前 1000 字
+                    print(f"[ZOZO] HTML前1000: {html[:1000]}")
+                    # HTML 中間（跳過前面）
+                    mid = len(html) // 2
+                    print(f"[ZOZO] HTML中間500: {html[mid:mid+500]}")
                     # 看有沒有 Akamai 標記
                     if 'akamai' in html.lower() or 'challenge' in html.lower() or 'captcha' in html.lower():
                         print(f"[ZOZO] ⚠️ 偵測到 Akamai challenge 頁面")
