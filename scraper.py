@@ -235,8 +235,9 @@ class Scraper:
         try:
             with SB(
                 uc=True,
-                xvfb=True,          # 虛擬顯示器（headed Chrome，非 headless）
-                proxy=proxy_arg,    # IP 白名單，不需帳密
+                # Xvfb 已在 CMD 啟動（DISPLAY=:99），不需要 xvfb=True
+                headless=False,     # headed Chrome（在虛擬顯示器裡）
+                proxy=proxy_arg,
                 locale_code='ja',
                 chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run',
             ) as sb:
