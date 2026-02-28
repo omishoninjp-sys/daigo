@@ -237,20 +237,33 @@ class Scraper:
 
             # Proxy: 用 pproxy 起本地轉發，Chrome 連本地（不需認證）
             if PROXY_URL:
+                from urllib.parse import urlparse as _urlparse
                 # 找空閒 port
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.bind(('127.0.0.1', 0))
                 local_port = sock.getsockname()[1]
                 sock.close()
 
-                # pproxy: 本地 HTTP proxy → 轉發到有認證的上游 proxy
+                # pproxy 格式：http://host:port#user#pass（不是標準 URL 格式）
+                _pp = _urlparse(PROXY_URL)
+                if _pp.username and _pp.password:
+                    pproxy_remote = f"http://{_pp.hostname}:{_pp.port}#{_pp.username}#{_pp.password}"
+                else:
+                    pproxy_remote = f"http://{_pp.hostname}:{_pp.port}"
+
                 proxy_proc = subprocess.Popen(
-                    ['python', '-m', 'pproxy', '-l', f'http://127.0.0.1:{local_port}', '-r', PROXY_URL],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    ['python', '-m', 'pproxy', '-l', f'http://127.0.0.1:{local_port}', '-r', pproxy_remote],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
-                _time.sleep(1)  # 等 pproxy 啟動
-                options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
-                print(f"[ZOZO] pproxy 本地轉發 :{local_port} → proxy-cheap")
+                _time.sleep(2)  # 等 pproxy 啟動
+                # 確認 pproxy 沒有立刻掛掉
+                if proxy_proc.poll() is not None:
+                    stderr = proxy_proc.stderr.read().decode() if proxy_proc.stderr else ""
+                    print(f"[ZOZO] ⚠️ pproxy 啟動失敗: {stderr}")
+                    proxy_proc = None
+                else:
+                    options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
+                    print(f"[ZOZO] pproxy 本地轉發 :{local_port} → {_pp.hostname}:{_pp.port}")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
