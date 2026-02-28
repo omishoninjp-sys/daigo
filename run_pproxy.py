@@ -2,7 +2,7 @@
 HTTP proxy 轉發器（純 threading）
 用法: python run_pproxy.py <local_port> <upstream_host> <upstream_port> [username] [password]
 """
-import sys, socket, threading, base64
+import sys, socket, threading, base64, time as _time
 
 def log(msg):
     print(f"[PROXY] {msg}", flush=True)
@@ -24,7 +24,6 @@ def handle_client(client_sock, upstream_host, upstream_port, proxy_auth):
         target = parts[1] if len(parts) > 1 else "?"
         log(f"{method} {target[:60]}")
 
-        # 連線上游 proxy
         upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         upstream.settimeout(15)
         try:
@@ -35,15 +34,12 @@ def handle_client(client_sock, upstream_host, upstream_port, proxy_auth):
             except: pass
             return
 
-        # 注入 Proxy-Authorization
         if proxy_auth:
             idx = request.index(b"\r\n\r\n")
             request = request[:idx] + b"\r\nProxy-Authorization: Basic " + proxy_auth + request[idx:]
 
         if method == "CONNECT":
             upstream.sendall(request)
-
-            # 讀上游回應
             resp = b""
             upstream.settimeout(15)
             while b"\r\n\r\n" not in resp:
@@ -63,27 +59,17 @@ def handle_client(client_sock, upstream_host, upstream_port, proxy_auth):
                 except: pass
                 return
 
-            # 分離 HTTP 回應 和隧道資料
             sep = resp.index(b"\r\n\r\n") + 4
             http_resp = resp[:sep]
-            extra_data = resp[sep:]  # 可能有 TLS 資料粘在後面
+            extra_data = resp[sep:]
 
-            # 只發 HTTP 回應給 Chrome
             client_sock.sendall(http_resp)
-
-            # 如果有粘包資料，先發給 Chrome
             if extra_data:
-                log(f"粘包 {len(extra_data)} bytes → client")
                 client_sock.sendall(extra_data)
 
-            # 雙向隧道
-            _do_tunnel(client_sock, upstream)
+            _do_tunnel(client_sock, upstream, target[:40])
         else:
-            # HTTP 請求
             upstream.sendall(request)
-            # 也要處理 request 中 body 後的粘包
-            sep = request.index(b"\r\n\r\n") + 4
-            # 讀回應
             upstream.settimeout(30)
             while True:
                 try:
@@ -104,47 +90,54 @@ def handle_client(client_sock, upstream_host, upstream_port, proxy_auth):
         except: pass
 
 
-def _do_tunnel(client, upstream):
-    """blocking threading 雙向轉發"""
+def _do_tunnel(client, upstream, label=""):
     done = threading.Event()
-    bytes_cu = [0]  # client → upstream
-    bytes_uc = [0]  # upstream → client
+    stats = {"cu": 0, "uc": 0, "cu_reason": "?", "uc_reason": "?"}
 
-    def forward(src, dst, counter, name):
+    def forward(src, dst, counter_key, reason_key, name):
         try:
-            src.settimeout(5)  # 短超時讓 thread 能檢查 done
+            src.settimeout(30)  # 30 秒無資料才超時
             while not done.is_set():
                 try:
-                    data = src.recv(32768)
+                    data = src.recv(65536)
                     if not data:
+                        stats[reason_key] = "EOF(recv empty)"
                         break
                     dst.sendall(data)
-                    counter[0] += len(data)
+                    stats[counter_key] += len(data)
                 except socket.timeout:
+                    # 30 秒沒資料，繼續等
+                    if done.is_set():
+                        stats[reason_key] = "done_flag"
+                        break
                     continue
-                except OSError:
+                except ConnectionResetError:
+                    stats[reason_key] = "ConnectionReset"
                     break
-        except:
-            pass
+                except BrokenPipeError:
+                    stats[reason_key] = "BrokenPipe"
+                    break
+                except OSError as e:
+                    stats[reason_key] = f"OSError({e.errno})"
+                    break
+        except Exception as e:
+            stats[reason_key] = f"Exception({e})"
         finally:
             done.set()
 
-    t1 = threading.Thread(target=forward, args=(client, upstream, bytes_cu, "C→U"), daemon=True)
-    t2 = threading.Thread(target=forward, args=(upstream, client, bytes_uc, "U→C"), daemon=True)
+    t1 = threading.Thread(target=forward, args=(client, upstream, "cu", "cu_reason", "C→U"), daemon=True)
+    t2 = threading.Thread(target=forward, args=(upstream, client, "uc", "uc_reason", "U→C"), daemon=True)
     t1.start()
     t2.start()
 
-    # 等隧道結束（最多 180 秒）
     done.wait(timeout=180)
 
-    log(f"隧道結束: ↑{bytes_cu[0]} ↓{bytes_uc[0]} bytes")
+    log(f"隧道 {label}: ↑{stats['cu']} ↓{stats['uc']} | C→U:{stats['cu_reason']} U→C:{stats['uc_reason']}")
 
-    # 關閉 sockets 讓另一個 thread 也結束
     try: client.close()
     except: pass
     try: upstream.close()
     except: pass
-
     t1.join(timeout=3)
     t2.join(timeout=3)
 
