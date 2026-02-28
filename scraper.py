@@ -212,13 +212,14 @@ class Scraper:
         """
         用 SeleniumBase UC mode + xvfb 跑 ZOZOTOWN
         - UC mode: 修正 HeadlessChrome user agent, 反偵測
-        - xvfb: 虛擬顯示器，跑 headed Chrome（非 headless）
+        - xvfb: 虛擬顯示器（DISPLAY=:99），跑 headed Chrome
         - Proxy: IP 白名單直連，不需帳密
+        - 用 Driver 格式（不需要 pyautogui/tkinter）
         """
-        import os, tempfile, shutil, time as _time
+        import os, time as _time
 
         try:
-            from seleniumbase import SB
+            from seleniumbase import Driver
         except ImportError:
             print("[ZOZO] seleniumbase 未安裝")
             return None
@@ -228,148 +229,151 @@ class Scraper:
             from urllib.parse import urlparse as _urlparse
             _pp = _urlparse(PROXY_URL)
             proxy_arg = f"{_pp.hostname}:{_pp.port}"
-            print(f"[ZOZO] SeleniumBase UC + xvfb + proxy: {proxy_arg}")
+            print(f"[ZOZO] SeleniumBase UC + proxy: {proxy_arg}")
         else:
-            print(f"[ZOZO] SeleniumBase UC + xvfb（無 proxy）")
+            print(f"[ZOZO] SeleniumBase UC（無 proxy）")
 
+        driver = None
         try:
-            with SB(
+            driver = Driver(
                 uc=True,
-                # Xvfb 已在 CMD 啟動（DISPLAY=:99），不需要 xvfb=True
-                headless=False,     # headed Chrome（在虛擬顯示器裡）
+                headless=False,     # headed Chrome 在 Xvfb 虛擬顯示器裡
                 proxy=proxy_arg,
                 locale_code='ja',
-                chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run',
-            ) as sb:
+                chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run,--no-sandbox,--disable-dev-shm-usage',
+            )
 
-                # 診斷
+            # 診斷
+            try:
+                driver.get('http://httpbin.org/ip')
+                _time.sleep(1)
+                src = driver.page_source
+                if '103.230' in src:
+                    print(f"[ZOZO] ✅ proxy 正常 (IP: 103.230.9.105)")
+                else:
+                    print(f"[ZOZO] proxy IP: {src[:100]}")
+            except Exception as e:
+                print(f"[ZOZO] proxy 測試: {type(e).__name__}")
+
+            # 用 uc_open_with_reconnect 載入（反偵測核心）
+            print(f"[ZOZO] 載入: {url}")
+            try:
+                driver.uc_open_with_reconnect(url, reconnect_time=6)
+            except Exception as e:
+                print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
+
+            # 等待頁面渲染
+            for i in range(12):
+                _time.sleep(3 if i < 3 else 2)
                 try:
-                    sb.open('http://httpbin.org/ip')
-                    _time.sleep(1)
-                    src = sb.get_page_source()
-                    if '103.230' in src:
-                        print(f"[ZOZO] ✅ proxy 正常 (IP: 103.230.9.105)")
-                    else:
-                        print(f"[ZOZO] proxy IP: {src[:100]}")
-                except Exception as e:
-                    print(f"[ZOZO] proxy 測試: {type(e).__name__}")
+                    html = driver.page_source
+                    title = driver.title
+                except:
+                    continue
 
-                # 用 uc_open_with_reconnect 載入（反偵測核心）
-                print(f"[ZOZO] 載入: {url}")
-                try:
-                    sb.uc_open_with_reconnect(url, reconnect_time=6)
-                except Exception as e:
-                    print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
+                has_data = ('application/ld+json' in html or
+                           '__NEXT_DATA__' in html or
+                           'og:title' in html)
 
-                # 等待頁面渲染
-                for i in range(12):
-                    _time.sleep(3 if i < 3 else 2)
-                    try:
-                        html = sb.get_page_source()
-                        title = sb.get_page_title()
-                    except:
-                        continue
+                if i < 2:
+                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:60]} | data={has_data}")
+                    if len(html) < 500:
+                        print(f"[ZOZO] HTML: {html[:300]}")
+                else:
+                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
 
-                    has_data = ('application/ld+json' in html or
-                               '__NEXT_DATA__' in html or
-                               'og:title' in html)
+                if has_data:
+                    result = driver.execute_script(r"""
+                        var r = {title:'', brand:'', price:0, price_text:'',
+                                 original_price:0, original_price_text:'', discount:'',
+                                 images:[], description:'', item_id:'', in_stock:true};
 
-                    if i < 2:
-                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:60]} | data={has_data}")
-                        if len(html) < 500:
-                            print(f"[ZOZO] HTML: {html[:300]}")
-                    else:
-                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+                        var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
+                        if (m) r.item_id = m[1];
 
-                    if has_data:
-                        # 用 JS 提取資料
-                        result = sb.execute_script(r"""
-                            var r = {title:'', brand:'', price:0, price_text:'',
-                                     original_price:0, original_price_text:'', discount:'',
-                                     images:[], description:'', item_id:'', in_stock:true};
+                        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                            try {
+                                var d = JSON.parse(s.textContent);
+                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
+                                if (d && d['@type'] === 'Product') {
+                                    r.title = d.name || '';
+                                    var b = d.brand || '';
+                                    r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
+                                    r.description = d.description || '';
+                                    var img = d.image || [];
+                                    if (typeof img === 'string') img = [img];
+                                    r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
+                                    var offers = d.offers || {};
+                                    if (Array.isArray(offers)) offers = offers[0] || {};
+                                    if (offers.price) {
+                                        r.price = parseInt(offers.price);
+                                        r.price_text = '\u00a5' + r.price.toLocaleString();
+                                    }
+                                    if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
+                                }
+                            } catch(e) {}
+                        });
 
-                            var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
-                            if (m) r.item_id = m[1];
-
-                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                        if (!r.title) {
+                            var nd = document.getElementById('__NEXT_DATA__');
+                            if (nd) {
                                 try {
-                                    var d = JSON.parse(s.textContent);
-                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
-                                    if (d && d['@type'] === 'Product') {
-                                        r.title = d.name || '';
-                                        var b = d.brand || '';
-                                        r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
-                                        r.description = d.description || '';
-                                        var img = d.image || [];
-                                        if (typeof img === 'string') img = [img];
-                                        r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
-                                        var offers = d.offers || {};
-                                        if (Array.isArray(offers)) offers = offers[0] || {};
-                                        if (offers.price) {
-                                            r.price = parseInt(offers.price);
-                                            r.price_text = '\u00a5' + r.price.toLocaleString();
-                                        }
-                                        if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
-                                    }
+                                    var props = JSON.parse(nd.textContent).props.pageProps;
+                                    var prod = props.product || props.goods || props.item || {};
+                                    if (prod.name) r.title = prod.name;
+                                    if (prod.brandName) r.brand = prod.brandName;
+                                    if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                    if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
                                 } catch(e) {}
-                            });
-
-                            if (!r.title) {
-                                var nd = document.getElementById('__NEXT_DATA__');
-                                if (nd) {
-                                    try {
-                                        var props = JSON.parse(nd.textContent).props.pageProps;
-                                        var prod = props.product || props.goods || props.item || {};
-                                        if (prod.name) r.title = prod.name;
-                                        if (prod.brandName) r.brand = prod.brandName;
-                                        if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                        if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
-                                    } catch(e) {}
-                                }
                             }
+                        }
 
-                            if (!r.title) {
-                                var og = document.querySelector('meta[property="og:title"]');
-                                if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
-                            }
-                            if (r.images.length === 0) {
-                                var ogImg = document.querySelector('meta[property="og:image"]');
-                                if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                            }
+                        if (!r.title) {
+                            var og = document.querySelector('meta[property="og:title"]');
+                            if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
+                        }
+                        if (r.images.length === 0) {
+                            var ogImg = document.querySelector('meta[property="og:image"]');
+                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
+                        }
 
-                            if (!r.price) {
-                                document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
-                                    if (!r.price) {
-                                        var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
-                                        if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                    }
-                                });
-                            }
-
-                            var seen = {};
-                            r.images.forEach(function(u){ seen[u] = true; });
-                            document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
-                                var src = img.src || img.getAttribute('data-src') || '';
-                                if (src && !seen[src] && img.naturalWidth > 50) {
-                                    r.images.push(src);
-                                    seen[src] = true;
+                        if (!r.price) {
+                            document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
+                                if (!r.price) {
+                                    var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
+                                    if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
                                 }
                             });
-                            r.images = r.images.slice(0, 20);
+                        }
 
-                            return r;
-                        """)
-                        return result
+                        var seen = {};
+                        r.images.forEach(function(u){ seen[u] = true; });
+                        document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
+                            var src = img.src || img.getAttribute('data-src') || '';
+                            if (src && !seen[src] && img.naturalWidth > 50) {
+                                r.images.push(src);
+                                seen[src] = true;
+                            }
+                        });
+                        r.images = r.images.slice(0, 20);
 
-                    if 'access denied' in (title or '').lower() and i >= 2:
-                        print("[ZOZO] 被 Akamai 擋住")
-                        break
+                        return r;
+                    """)
+                    return result
+
+                if 'access denied' in (title or '').lower() and i >= 2:
+                    print("[ZOZO] 被 Akamai 擋住")
+                    break
 
             print("[ZOZO] ⚠️ 未取得資料")
 
         except Exception as e:
             print(f"[ZOZO] SeleniumBase 錯誤: {e}")
             import traceback; traceback.print_exc()
+        finally:
+            if driver:
+                try: driver.quit()
+                except: pass
 
         return None
 
