@@ -234,6 +234,17 @@ class Scraper:
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument(f'--user-data-dir={tmp_dir}')
+            # 禁用所有自動更新和背景下載（避免塞爆 proxy）
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-component-update')
+            options.add_argument('--disable-background-networking')
+            options.add_argument('--disable-sync')
+            options.add_argument('--no-first-run')
+            options.add_argument('--disable-default-apps')
+            options.add_argument('--disable-background-timer-throttling')
+            options.add_argument('--disable-backgrounding-occluded-windows')
+            options.add_argument('--disable-client-side-phishing-detection')
+            options.add_argument('--disable-hang-monitor')
 
             # Proxy: 用 pproxy 起本地轉發，Chrome 連本地（不需認證）
             if PROXY_URL:
@@ -262,21 +273,6 @@ class Scraper:
                     options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
                     print(f"[ZOZO] proxy 轉發 :{local_port} → {_pp.hostname}:{_pp.port}")
 
-                    # 快速測試 proxy 連通性
-                    try:
-                        import urllib.request
-                        proxy_handler = urllib.request.ProxyHandler({
-                            'http': f'http://127.0.0.1:{local_port}',
-                            'https': f'http://127.0.0.1:{local_port}',
-                        })
-                        opener = urllib.request.build_opener(proxy_handler)
-                        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
-                        resp = opener.open('http://httpbin.org/ip', timeout=10)
-                        ip_info = resp.read().decode()
-                        print(f"[ZOZO] ✅ proxy IP 測試: {ip_info.strip()}")
-                    except Exception as e:
-                        print(f"[ZOZO] ⚠️ proxy 連通測試失敗: {e}")
-
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
             if ver == 0:
@@ -294,9 +290,9 @@ class Scraper:
             use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
             driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
 
-            # 暖機
-            driver.get('https://www.google.com')
-            _time.sleep(2)
+            # 快速暖機（不用 google.com，避免觸發大量背景請求）
+            driver.get('about:blank')
+            _time.sleep(1)
 
             print(f"[ZOZO] 載入: {url}")
             driver.get(url)
