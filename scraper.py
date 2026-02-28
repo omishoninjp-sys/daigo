@@ -251,17 +251,31 @@ class Scraper:
                     [sys.executable, '/app/run_pproxy.py',
                      str(local_port), _pp.hostname, str(_pp.port),
                      _pp.username or '', _pp.password or ''],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdout=None, stderr=None,  # 讓 log 直接輸出到主進程
                 )
-                _time.sleep(2)  # 等 pproxy 啟動
-                # 確認 pproxy 沒有立刻掛掉
+                _time.sleep(2)  # 等 proxy 啟動
+                # 確認沒有立刻掛掉
                 if proxy_proc.poll() is not None:
-                    stderr = proxy_proc.stderr.read().decode() if proxy_proc.stderr else ""
-                    print(f"[ZOZO] ⚠️ proxy 轉發啟動失敗: {stderr}")
+                    print(f"[ZOZO] ⚠️ proxy 轉發啟動失敗 (exit code: {proxy_proc.returncode})")
                     proxy_proc = None
                 else:
                     options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
                     print(f"[ZOZO] proxy 轉發 :{local_port} → {_pp.hostname}:{_pp.port}")
+
+                    # 快速測試 proxy 連通性
+                    try:
+                        import urllib.request
+                        proxy_handler = urllib.request.ProxyHandler({
+                            'http': f'http://127.0.0.1:{local_port}',
+                            'https': f'http://127.0.0.1:{local_port}',
+                        })
+                        opener = urllib.request.build_opener(proxy_handler)
+                        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+                        resp = opener.open('http://httpbin.org/ip', timeout=10)
+                        ip_info = resp.read().decode()
+                        print(f"[ZOZO] ✅ proxy IP 測試: {ip_info.strip()}")
+                    except Exception as e:
+                        print(f"[ZOZO] ⚠️ proxy 連通測試失敗: {e}")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
