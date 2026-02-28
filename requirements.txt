@@ -7,4 +7,3 @@ pydantic==2.10.4
 playwright==1.49.1
 undetected-chromedriver>=3.5
 selenium>=4.0
-curl_cffi>=0.7
