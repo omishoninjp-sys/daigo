@@ -213,7 +213,7 @@ class Scraper:
         用 undetected-chromedriver 跑 ZOZOTOWN
         Proxy 認證方式：pproxy 本地轉發（不需要 extension、不需要 selenium-wire）
         """
-        import os, tempfile, shutil, time as _time, subprocess, socket
+        import os, sys, tempfile, shutil, time as _time, subprocess, socket
 
         try:
             import undetected_chromedriver as uc
@@ -252,7 +252,7 @@ class Scraper:
                     pproxy_remote = f"http://{_pp.hostname}:{_pp.port}"
 
                 proxy_proc = subprocess.Popen(
-                    ['python', '-m', 'pproxy', '-l', f'http://127.0.0.1:{local_port}', '-r', pproxy_remote],
+                    [sys.executable, '/app/run_pproxy.py', '-l', f'http://127.0.0.1:{local_port}', '-r', pproxy_remote],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
                 _time.sleep(2)  # 等 pproxy 啟動
