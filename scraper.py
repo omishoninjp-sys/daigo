@@ -175,12 +175,12 @@ class Scraper:
         return product
 
     # ============================================================
-    # ZOZOTOWN - undetected-chromedriver（繞過 Akamai）
+    # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
     # ============================================================
     async def _scrape_zozotown(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
 
-        # 方法 1: undetected-chromedriver + proxy auth extension
+        # 方法 1: SeleniumBase UC + xvfb + proxy（IP 白名單）
         try:
             data = await asyncio.get_event_loop().run_in_executor(
                 None, self._fetch_zozo_uc, url
@@ -208,407 +208,167 @@ class Scraper:
 
         return product
 
-    async def _fetch_zozo_http(self, url: str) -> ProductInfo | None:
-        """用 Playwright + proxy 載入 ZOZOTOWN（Playwright 原生支援 proxy 帳密認證）"""
-        import json, re
-        product = ProductInfo(source_url=url)
+    def _fetch_zozo_uc(self, url: str) -> dict | None:
+        """
+        用 SeleniumBase UC mode + xvfb 跑 ZOZOTOWN
+        - UC mode: 修正 HeadlessChrome user agent, 反偵測
+        - xvfb: 虛擬顯示器，跑 headed Chrome（非 headless）
+        - Proxy: IP 白名單直連，不需帳密
+        """
+        import os, tempfile, shutil, time as _time
 
         try:
-            from playwright.async_api import async_playwright
+            from seleniumbase import SB
+        except ImportError:
+            print("[ZOZO] seleniumbase 未安裝")
+            return None
+
+        proxy_arg = None
+        if PROXY_URL:
             from urllib.parse import urlparse as _urlparse
+            _pp = _urlparse(PROXY_URL)
+            proxy_arg = f"{_pp.hostname}:{_pp.port}"
+            print(f"[ZOZO] SeleniumBase UC + xvfb + proxy: {proxy_arg}")
+        else:
+            print(f"[ZOZO] SeleniumBase UC + xvfb（無 proxy）")
 
-            proxy_config = None
-            if PROXY_URL:
-                _pp = _urlparse(PROXY_URL)
-                proxy_config = {
-                    'server': f'http://{_pp.hostname}:{_pp.port}',
-                }
-                if _pp.username:
-                    proxy_config['username'] = _pp.username
-                if _pp.password:
-                    proxy_config['password'] = _pp.password
-                print(f"[ZOZO-PW] Playwright + proxy: {_pp.hostname}:{_pp.port}")
-            else:
-                print(f"[ZOZO-PW] Playwright 無 proxy")
+        try:
+            with SB(
+                uc=True,
+                xvfb=True,          # 虛擬顯示器（headed Chrome，非 headless）
+                proxy=proxy_arg,    # IP 白名單，不需帳密
+                locale_code='ja',
+                chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run',
+            ) as sb:
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-extensions",
-                        "--disable-background-networking",
-                        "--lang=ja-JP",
-                    ],
-                    proxy=proxy_config,
-                )
-                context = await browser.new_context(
-                    locale='ja-JP',
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080},
-                )
-                page = await context.new_page()
-
+                # 診斷
                 try:
-                    print(f"[ZOZO-PW] 載入: {url}")
-                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    sb.open('http://httpbin.org/ip')
+                    _time.sleep(1)
+                    src = sb.get_page_source()
+                    if '103.230' in src:
+                        print(f"[ZOZO] ✅ proxy 正常 (IP: 103.230.9.105)")
+                    else:
+                        print(f"[ZOZO] proxy IP: {src[:100]}")
+                except Exception as e:
+                    print(f"[ZOZO] proxy 測試: {type(e).__name__}")
 
-                    # 等額外時間讓 JS 渲染
-                    await page.wait_for_timeout(5000)
+                # 用 uc_open_with_reconnect 載入（反偵測核心）
+                print(f"[ZOZO] 載入: {url}")
+                try:
+                    sb.uc_open_with_reconnect(url, reconnect_time=6)
+                except Exception as e:
+                    print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
 
-                    html = await page.content()
-                    title = await page.title()
-                    print(f"[ZOZO-PW] 頁面: {len(html)} bytes | title={title[:60]}")
+                # 等待頁面渲染
+                for i in range(12):
+                    _time.sleep(3 if i < 3 else 2)
+                    try:
+                        html = sb.get_page_source()
+                        title = sb.get_page_title()
+                    except:
+                        continue
 
                     has_data = ('application/ld+json' in html or
                                '__NEXT_DATA__' in html or
                                'og:title' in html)
 
-                    if not has_data:
-                        # 可能需要更多時間（Akamai challenge）
-                        print("[ZOZO-PW] 等待 JS challenge...")
-                        for attempt in range(6):
-                            await page.wait_for_timeout(3000)
-                            html = await page.content()
-                            title = await page.title()
-                            has_data = ('application/ld+json' in html or
-                                       '__NEXT_DATA__' in html or
-                                       'og:title' in html)
-                            print(f"[ZOZO-PW] 嘗試 {attempt+1}: {len(html)} bytes | title={title[:40]} | data={has_data}")
-                            if has_data:
-                                break
-
-                    if not has_data:
-                        print(f"[ZOZO-PW] ⚠️ 無法取得資料")
-                        print(f"[ZOZO-PW] HTML前300: {html[:300]}")
-                        return None
-
-                    # 解析 ld+json
-                    ld_matches = re.findall(
-                        r'<script\s+type=["\']application/ld\+json["\']\s*>(.*?)</script>',
-                        html, re.DOTALL
-                    )
-                    for ld_text in ld_matches:
-                        try:
-                            ld = json.loads(ld_text)
-                            if isinstance(ld, list):
-                                ld = next((x for x in ld if x.get('@type') == 'Product'), ld[0] if ld else {})
-                            if ld.get('@type') == 'Product':
-                                product.title = ld.get('name', '')
-                                brand = ld.get('brand', '')
-                                product.brand = brand.get('name', '') if isinstance(brand, dict) else str(brand)
-                                product.description = (ld.get('description', '') or '')[:500]
-
-                                images = ld.get('image', [])
-                                if isinstance(images, str):
-                                    images = [images]
-                                images = [i for i in images if isinstance(i, str) and 'c.imgz.jp' in i]
-                                if images:
-                                    product.image_url = images[0]
-                                    product.extra_images = images[1:9]
-
-                                offers = ld.get('offers', {})
-                                if isinstance(offers, list):
-                                    offers = offers[0] if offers else {}
-                                if offers.get('price'):
-                                    product.price_jpy = int(offers['price'])
-                                break
-                        except:
-                            continue
-
-                    # fallback: og tags
-                    if not product.title:
-                        og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
-                        if og_match:
-                            product.title = re.sub(r'\s*[-|]\s*ZOZOTOWN.*$', '', og_match.group(1))
-
-                    if not product.image_url:
-                        og_img = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', html)
-                        if og_img:
-                            product.image_url = og_img.group(1)
-
-                    if not product.price_jpy:
-                        price_match = re.search(r'[¥￥]([\d,]+)', html)
-                        if price_match:
-                            product.price_jpy = int(price_match.group(1).replace(',', ''))
-
-                    if product.title:
-                        print(f"[ZOZO-PW] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO-PW] ✅ {product.title[:40]}")
-                        return product
+                    if i < 2:
+                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:60]} | data={has_data}")
+                        if len(html) < 500:
+                            print(f"[ZOZO] HTML: {html[:300]}")
                     else:
-                        print(f"[ZOZO-PW] ⚠️ 無法解析")
-                        return None
+                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
 
-                except Exception as e:
-                    print(f"[ZOZO-PW] 頁面錯誤: {e}")
-                    return None
-                finally:
-                    await browser.close()
+                    if has_data:
+                        # 用 JS 提取資料
+                        result = sb.execute_script(r"""
+                            var r = {title:'', brand:'', price:0, price_text:'',
+                                     original_price:0, original_price_text:'', discount:'',
+                                     images:[], description:'', item_id:'', in_stock:true};
 
-        except Exception as e:
-            print(f"[ZOZO-PW] ❌ 錯誤: {e}")
-            return None
+                            var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
+                            if (m) r.item_id = m[1];
 
-    def _fetch_zozo_uc(self, url: str) -> dict | None:
-        """
-        用 undetected-chromedriver 跑 ZOZOTOWN
-        Proxy 認證方式：pproxy 本地轉發（不需要 extension、不需要 selenium-wire）
-        """
-        import os, sys, tempfile, shutil, time as _time, subprocess, socket
-
-        try:
-            import undetected_chromedriver as uc
-        except ImportError:
-            print("[ZOZO] undetected-chromedriver 未安裝")
-            return None
-
-        tmp_dir = os.path.join(tempfile.gettempdir(), f'daigo_uc_{int(_time.time() * 1000)}')
-        os.makedirs(tmp_dir, exist_ok=True)
-        driver = None
-
-        try:
-            options = uc.ChromeOptions()
-            options.add_argument('--lang=ja-JP')
-            options.add_argument('--window-size=1920,1080')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-gpu')
-            options.add_argument(f'--user-data-dir={tmp_dir}')
-            # 禁用背景下載
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-component-update')
-            options.add_argument('--disable-background-networking')
-            options.add_argument('--disable-sync')
-            options.add_argument('--no-first-run')
-            options.add_argument('--disable-default-apps')
-            options.add_argument('--disable-client-side-phishing-detection')
-
-            # Proxy: IP 白名單認證，直連不需帳密
-            if PROXY_URL:
-                from urllib.parse import urlparse as _urlparse
-                _pp = _urlparse(PROXY_URL)
-                options.add_argument(f'--proxy-server=http://{_pp.hostname}:{_pp.port}')
-                options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com')
-                print(f"[ZOZO] proxy 直連（IP白名單）: {_pp.hostname}:{_pp.port}")
-
-            # 自動偵測 Chrome 版本
-            ver = int(os.environ.get('CHROME_VERSION', '0'))
-            if ver == 0:
-                try:
-                    import subprocess as _sp
-                    out = _sp.check_output(['google-chrome', '--version'], text=True)
-                    ver = int(out.strip().split()[-1].split('.')[0])
-                    print(f"[ZOZO] 偵測到 Chrome {ver}")
-                except Exception:
-                    pass
-            kwargs = {}
-            if ver > 0:
-                kwargs['version_main'] = ver
-
-            use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
-            driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
-            driver.set_page_load_timeout(45)  # 45 秒（extension proxy 較慢）
-
-            # 快速暖機
-            driver.get('about:blank')
-            _time.sleep(1)
-
-            # 診斷：HTTP vs HTTPS
-            print("[ZOZO] 診斷：HTTP vs HTTPS...")
-            driver.set_page_load_timeout(10)
-            try:
-                driver.get('http://httpbin.org/ip')
-                _time.sleep(2)
-                print(f"[ZOZO] ✅ HTTP: {driver.page_source[:80]}")
-            except Exception as e:
-                print(f"[ZOZO] ❌ HTTP: {type(e).__name__}")
-
-            try:
-                driver.get('https://httpbin.org/ip')
-                _time.sleep(2)
-                print(f"[ZOZO] ✅ HTTPS: {driver.page_source[:80]}")
-            except Exception as e:
-                print(f"[ZOZO] ❌ HTTPS: {type(e).__name__}")
-
-            # 測日本網站
-            try:
-                driver.get('https://www.amazon.co.jp')
-                _time.sleep(2)
-                t = driver.title
-                print(f"[ZOZO] ✅ amazon.co.jp: title={t[:40]} | {len(driver.page_source)} bytes")
-            except Exception as e:
-                print(f"[ZOZO] ❌ amazon.co.jp: {type(e).__name__}")
-
-            # 測 zozo.jp 首頁（不是商品頁）
-            driver.set_page_load_timeout(15)
-            try:
-                driver.get('https://zozo.jp/')
-                _time.sleep(3)
-                t = driver.title
-                html = driver.page_source
-                print(f"[ZOZO] zozo.jp 首頁: title={t[:40]} | {len(html)} bytes")
-                print(f"[ZOZO] zozo.jp HTML前200: {html[:200]}")
-            except Exception as e:
-                print(f"[ZOZO] zozo.jp 首頁超時: {type(e).__name__}")
-                try:
-                    html = driver.page_source
-                    print(f"[ZOZO] 超時後頁面: {len(html)} bytes | {html[:200]}")
-                except:
-                    pass
-
-            driver.set_page_load_timeout(45)
-
-            print(f"[ZOZO] 載入: {url}")
-            try:
-                driver.get(url)
-            except Exception as e:
-                # TimeoutException 表示頁面沒在 30 秒內載完，但 DOM 可能已經有資料
-                print(f"[ZOZO] 頁面載入超時（可能正常）: {type(e).__name__}")
-
-            for i in range(10):
-                _time.sleep(3 if i < 3 else 2)  # 前 3 次多等一點
-                try:
-                    html = driver.page_source
-                    title = driver.title
-                except:
-                    continue
-
-                has_data = ('application/ld+json' in html or
-                           '__NEXT_DATA__' in html or
-                           'og:title' in html)
-
-                # Debug: 前 2 次印頁面資訊
-                if i < 2:
-                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:80]} | data={has_data}")
-                    # 印 <head> 裡有什麼
-                    import re as _re
-                    scripts = _re.findall(r'<script[^>]*>(.{0,50})', html[:5000])
-                    print(f"[ZOZO] scripts: {scripts[:5]}")
-                    metas = _re.findall(r'<meta[^>]*>', html[:5000])
-                    print(f"[ZOZO] metas: {metas[:5]}")
-                    # HTML 前 1000 字
-                    print(f"[ZOZO] HTML前1000: {html[:1000]}")
-                    # HTML 中間（跳過前面）
-                    mid = len(html) // 2
-                    print(f"[ZOZO] HTML中間500: {html[mid:mid+500]}")
-                    # 看有沒有 Akamai 標記
-                    if 'akamai' in html.lower() or 'challenge' in html.lower() or 'captcha' in html.lower():
-                        print(f"[ZOZO] ⚠️ 偵測到 Akamai challenge 頁面")
-                    if 'Access Denied' in html or 'access denied' in title.lower():
-                        print(f"[ZOZO] ⚠️ Access Denied")
-                else:
-                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
-
-                if has_data:
-                    result = driver.execute_script(r"""
-                        var r = {title:'', brand:'', price:0, price_text:'',
-                                 original_price:0, original_price_text:'', discount:'',
-                                 images:[], description:'', item_id:'', in_stock:true};
-
-                        var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
-                        if (m) r.item_id = m[1];
-
-                        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
-                            try {
-                                var d = JSON.parse(s.textContent);
-                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
-                                if (d && d['@type'] === 'Product') {
-                                    r.title = d.name || '';
-                                    var b = d.brand || '';
-                                    r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
-                                    r.description = d.description || '';
-                                    var img = d.image || [];
-                                    if (typeof img === 'string') img = [img];
-                                    r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
-                                    var offers = d.offers || {};
-                                    if (Array.isArray(offers)) offers = offers[0] || {};
-                                    if (offers.price) {
-                                        r.price = parseInt(offers.price);
-                                        r.price_text = '\u00a5' + r.price.toLocaleString();
-                                    }
-                                    if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
-                                }
-                            } catch(e) {}
-                        });
-
-                        if (!r.title) {
-                            var nd = document.getElementById('__NEXT_DATA__');
-                            if (nd) {
+                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
                                 try {
-                                    var props = JSON.parse(nd.textContent).props.pageProps;
-                                    var prod = props.product || props.goods || props.item || {};
-                                    if (prod.name) r.title = prod.name;
-                                    if (prod.brandName) r.brand = prod.brandName;
-                                    if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                    if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
+                                    var d = JSON.parse(s.textContent);
+                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
+                                    if (d && d['@type'] === 'Product') {
+                                        r.title = d.name || '';
+                                        var b = d.brand || '';
+                                        r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
+                                        r.description = d.description || '';
+                                        var img = d.image || [];
+                                        if (typeof img === 'string') img = [img];
+                                        r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
+                                        var offers = d.offers || {};
+                                        if (Array.isArray(offers)) offers = offers[0] || {};
+                                        if (offers.price) {
+                                            r.price = parseInt(offers.price);
+                                            r.price_text = '\u00a5' + r.price.toLocaleString();
+                                        }
+                                        if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
+                                    }
                                 } catch(e) {}
+                            });
+
+                            if (!r.title) {
+                                var nd = document.getElementById('__NEXT_DATA__');
+                                if (nd) {
+                                    try {
+                                        var props = JSON.parse(nd.textContent).props.pageProps;
+                                        var prod = props.product || props.goods || props.item || {};
+                                        if (prod.name) r.title = prod.name;
+                                        if (prod.brandName) r.brand = prod.brandName;
+                                        if (prod.price) { r.price = parseInt(prod.price); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                        if (prod.images) r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
+                                    } catch(e) {}
+                                }
                             }
-                        }
 
-                        if (!r.title) {
-                            var og = document.querySelector('meta[property="og:title"]');
-                            if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
-                        }
-                        if (r.images.length === 0) {
-                            var ogImg = document.querySelector('meta[property="og:image"]');
-                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                        }
+                            if (!r.title) {
+                                var og = document.querySelector('meta[property="og:title"]');
+                                if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
+                            }
+                            if (r.images.length === 0) {
+                                var ogImg = document.querySelector('meta[property="og:image"]');
+                                if (ogImg && ogImg.content) r.images.push(ogImg.content);
+                            }
 
-                        if (!r.price) {
-                            document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
-                                if (!r.price) {
-                                    var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
-                                    if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                            if (!r.price) {
+                                document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
+                                    if (!r.price) {
+                                        var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
+                                        if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                    }
+                                });
+                            }
+
+                            var seen = {};
+                            r.images.forEach(function(u){ seen[u] = true; });
+                            document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
+                                var src = img.src || img.getAttribute('data-src') || '';
+                                if (src && !seen[src] && img.naturalWidth > 50) {
+                                    r.images.push(src);
+                                    seen[src] = true;
                                 }
                             });
-                        }
+                            r.images = r.images.slice(0, 20);
 
-                        var seen = {};
-                        r.images.forEach(function(u){ seen[u] = true; });
-                        document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
-                            var src = img.src || img.getAttribute('data-src') || '';
-                            if (src && !seen[src] && img.naturalWidth > 50) {
-                                r.images.push(src);
-                                seen[src] = true;
-                            }
-                        });
-                        document.querySelectorAll('[srcset*="c.imgz.jp"]').forEach(function(el) {
-                            var parts = (el.getAttribute('srcset') || '').split(',');
-                            parts.forEach(function(p) {
-                                var u = p.trim().split(/\s+/)[0];
-                                if (u && u.indexOf('c.imgz.jp') !== -1 && !seen[u]) {
-                                    r.images.push(u);
-                                    seen[u] = true;
-                                }
-                            });
-                        });
-                        r.images = r.images.slice(0, 20);
+                            return r;
+                        """)
+                        return result
 
-                        return r;
-                    """)
+                    if 'access denied' in (title or '').lower() and i >= 2:
+                        print("[ZOZO] 被 Akamai 擋住")
+                        break
 
-                    try: driver.quit()
-                    except: pass
-                    return result
-
-                if 'access denied' in title.lower() and i >= 2:
-                    print("[ZOZO] 被 Akamai 擋住")
-                    break
-
-            try: driver.quit()
-            except: pass
+            print("[ZOZO] ⚠️ 未取得資料")
 
         except Exception as e:
-            print(f"[ZOZO] uc 錯誤: {e}")
+            print(f"[ZOZO] SeleniumBase 錯誤: {e}")
             import traceback; traceback.print_exc()
-            if driver:
-                try: driver.quit()
-                except: pass
-        finally:
-            try: shutil.rmtree(tmp_dir, ignore_errors=True)
-            except: pass
 
         return None
 
@@ -675,30 +435,18 @@ class Scraper:
         return product
 
     async def _fetch_playwright(self, url: str) -> str:
-        from playwright.async_api import async_playwright
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-            )
-            context = await browser.new_context(
-                user_agent=USER_AGENT,
-                locale="ja-JP",
-                extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"},
-            )
-            page = await context.new_page()
-            try:
-                await page.route("**/*", lambda route: (
-                    route.abort() if route.request.resource_type in ("media", "font") else route.continue_()
-                ))
-                await page.goto(url, wait_until="domcontentloaded", timeout=SCRAPE_TIMEOUT * 1000)
-                await page.wait_for_timeout(2000)
-                return await page.content()
-            finally:
-                await page.close()
-                await context.close()
-                await browser.close()
+        """通用網頁抓取（用 httpx，大部分網站不需要 JS 渲染）"""
+        async with httpx.AsyncClient(
+            timeout=SCRAPE_TIMEOUT,
+            follow_redirects=True,
+            headers={
+                'User-Agent': USER_AGENT,
+                'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+        ) as client:
+            resp = await client.get(url)
+            return resp.text
 
     # ============================================================
     # Extractors（通用解析器）
