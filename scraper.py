@@ -180,18 +180,7 @@ class Scraper:
     async def _scrape_zozotown(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
 
-        # 方法 1: 直接 HTTP 請求 + proxy（最快最簡單）
-        result = await self._fetch_zozo_http(url)
-        if result and result.title:
-            return result
-
-        # 方法 2: 外部 product-fetcher（如果有設定）
-        if ZOZO_SCRAPER_URL:
-            result = await self._scrape_zozo_via_proxy(url)
-            if result and result.title:
-                return result
-
-        # 方法 3: undetected-chromedriver（最後手段）
+        # 方法 1: undetected-chromedriver + proxy auth extension
         try:
             data = await asyncio.get_event_loop().run_in_executor(
                 None, self._fetch_zozo_uc, url
@@ -205,11 +194,17 @@ class Scraper:
                 if images:
                     product.image_url = images[0]
                     product.extra_images = images[1:9]
-                print(f"[ZOZO] ✅ UC: {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else "[ZOZO] ⚠️ 無價格")
+                print(f"[ZOZO] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[ZOZO] ✅ {product.title[:40]}")
             else:
-                print("[ZOZO] ⚠️ undetected-chromedriver 未取得資料")
+                print("[ZOZO] ⚠️ 未取得資料")
         except Exception as e:
-            print(f"[ZOZO] ❌ UC 錯誤: {e}")
+            print(f"[ZOZO] ❌ 錯誤: {e}")
+
+        # 方法 2: 外部 product-fetcher（如有設定）
+        if not product.title and ZOZO_SCRAPER_URL:
+            result = await self._scrape_zozo_via_proxy(url)
+            if result and result.title:
+                return result
 
         return product
 
@@ -372,7 +367,6 @@ class Scraper:
         tmp_dir = os.path.join(tempfile.gettempdir(), f'daigo_uc_{int(_time.time() * 1000)}')
         os.makedirs(tmp_dir, exist_ok=True)
         driver = None
-        proxy_proc = None
 
         try:
             options = uc.ChromeOptions()
@@ -382,46 +376,63 @@ class Scraper:
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             options.add_argument(f'--user-data-dir={tmp_dir}')
-            # 禁用所有自動更新和背景下載（避免塞爆 proxy）
-            options.add_argument('--disable-extensions')
+            # 禁用背景下載（但不禁用 extensions！）
             options.add_argument('--disable-component-update')
             options.add_argument('--disable-background-networking')
             options.add_argument('--disable-sync')
             options.add_argument('--no-first-run')
             options.add_argument('--disable-default-apps')
-            options.add_argument('--disable-background-timer-throttling')
-            options.add_argument('--disable-backgrounding-occluded-windows')
             options.add_argument('--disable-client-side-phishing-detection')
-            options.add_argument('--disable-hang-monitor')
 
-            # Proxy: 用 pproxy 起本地轉發，Chrome 連本地（不需認證）
+            # Proxy: 用 Chrome extension 處理認證（不需要 tunnel）
             if PROXY_URL:
                 from urllib.parse import urlparse as _urlparse
                 _pp = _urlparse(PROXY_URL)
 
-                # 找空閒 port
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(('127.0.0.1', 0))
-                local_port = sock.getsockname()[1]
-                sock.close()
+                # 建立 proxy auth extension
+                ext_dir = os.path.join(tmp_dir, 'proxy_ext')
+                os.makedirs(ext_dir, exist_ok=True)
 
-                # 本地 proxy 轉發（純 threading，不依賴 asyncio）
-                proxy_proc = subprocess.Popen(
-                    [sys.executable, '/app/run_pproxy.py',
-                     str(local_port), _pp.hostname, str(_pp.port),
-                     _pp.username or '', _pp.password or ''],
-                    stdout=None, stderr=None,  # 讓 log 直接輸出到主進程
-                )
-                _time.sleep(2)  # 等 proxy 啟動
-                # 確認沒有立刻掛掉
-                if proxy_proc.poll() is not None:
-                    print(f"[ZOZO] ⚠️ proxy 轉發啟動失敗 (exit code: {proxy_proc.returncode})")
-                    proxy_proc = None
-                else:
-                    options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
-                    # 只讓 zozo.jp 走 proxy，其他直連（避免 Google 背景請求搶頻寬）
-                    options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com;accounts.google.com')
-                    print(f"[ZOZO] proxy 轉發 :{local_port} → {_pp.hostname}:{_pp.port}（僅 zozo.jp）")
+                manifest = {
+                    "manifest_version": 2,
+                    "name": "Proxy Auth",
+                    "version": "1.0",
+                    "permissions": [
+                        "proxy",
+                        "webRequest",
+                        "webRequestBlocking",
+                        "<all_urls>"
+                    ],
+                    "background": {
+                        "scripts": ["background.js"]
+                    }
+                }
+
+                background_js = f"""
+chrome.webRequest.onAuthRequired.addListener(
+    function(details) {{
+        return {{
+            authCredentials: {{
+                username: "{_pp.username or ''}",
+                password: "{_pp.password or ''}"
+            }}
+        }};
+    }},
+    {{urls: ["<all_urls>"]}},
+    ["blocking"]
+);
+"""
+                import json as _json
+                with open(os.path.join(ext_dir, 'manifest.json'), 'w') as f:
+                    _json.dump(manifest, f)
+                with open(os.path.join(ext_dir, 'background.js'), 'w') as f:
+                    f.write(background_js)
+
+                options.add_argument(f'--load-extension={ext_dir}')
+                options.add_argument(f'--proxy-server=http://{_pp.hostname}:{_pp.port}')
+                # 只讓 zozo.jp 走 proxy
+                options.add_argument('--proxy-bypass-list=<-loopback>;*.google.com;*.googleapis.com;*.gstatic.com;*.gvt1.com;*.gvt2.com')
+                print(f"[ZOZO] proxy extension + {_pp.hostname}:{_pp.port}")
 
             # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
@@ -439,7 +450,7 @@ class Scraper:
 
             use_headless = os.environ.get('UC_HEADLESS', 'true').lower() in ('1', 'true', 'yes')
             driver = uc.Chrome(options=options, headless=use_headless, **kwargs)
-            driver.set_page_load_timeout(30)  # 最多等 30 秒載入頁面
+            driver.set_page_load_timeout(45)  # 45 秒（extension proxy 較慢）
 
             # 快速暖機
             driver.get('about:blank')
@@ -592,9 +603,6 @@ class Scraper:
                 try: driver.quit()
                 except: pass
         finally:
-            if proxy_proc:
-                try: proxy_proc.terminate()
-                except: pass
             try: shutil.rmtree(tmp_dir, ignore_errors=True)
             except: pass
 
