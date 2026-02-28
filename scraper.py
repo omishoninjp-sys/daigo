@@ -252,8 +252,16 @@ class Scraper:
                 options.add_argument(f'--proxy-server=http://127.0.0.1:{local_port}')
                 print(f"[ZOZO] pproxy 本地轉發 :{local_port} → proxy-cheap")
 
-            # Chrome 版本
+            # 自動偵測 Chrome 版本
             ver = int(os.environ.get('CHROME_VERSION', '0'))
+            if ver == 0:
+                try:
+                    import subprocess as _sp
+                    out = _sp.check_output(['google-chrome', '--version'], text=True)
+                    ver = int(out.strip().split()[-1].split('.')[0])
+                    print(f"[ZOZO] 偵測到 Chrome {ver}")
+                except Exception:
+                    pass
             kwargs = {}
             if ver > 0:
                 kwargs['version_main'] = ver
