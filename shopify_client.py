@@ -27,7 +27,6 @@ class ShopifyClient:
             if has_size:
                 options.append({"name": "サイズ"})
 
-            # 收集每個顏色的圖片
             for v in variants:
                 color = v.get("color", "")
                 img = v.get("image", "")
@@ -85,24 +84,19 @@ class ShopifyClient:
         if brand:
             product_data["product"]["tags"].append(brand)
 
-        # === 圖片：主圖 + 顏色圖片（去重）+ 額外圖片 ===
+        # === 圖片：先只放主圖和額外圖（不放顏色圖片，之後用 variant_ids 綁定）===
         images = []
         added_urls = set()
+        color_img_urls = set(color_image_map.values())
 
         if image_url:
             images.append({"src": image_url, "position": 1})
             added_urls.add(image_url)
 
-        pos = len(images) + 1
-        for color, img_url in color_image_map.items():
-            if img_url and img_url not in added_urls:
-                images.append({"src": img_url, "position": pos})
-                added_urls.add(img_url)
-                pos += 1
-
         if extra_images:
+            pos = 2
             for img in extra_images[:9]:
-                if img and img not in added_urls:
+                if img and img not in added_urls and img not in color_img_urls:
                     images.append({"src": img, "position": pos})
                     added_urls.add(img)
                     pos += 1
@@ -120,12 +114,11 @@ class ShopifyClient:
             product_id = product["id"]
             handle = product["handle"]
             created_variants = product.get("variants", [])
-            created_images = product.get("images", [])
-            print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(shopify_variants)} / images: {len(created_images)}")
+            print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(created_variants)}")
 
-        # === Variant-Image 連動 ===
-        if color_image_map and created_variants and created_images:
-            await self._link_variant_images(product_id, created_variants, created_images, color_image_map)
+        # === 用 variant_ids 上傳顏色圖片並直接綁定 ===
+        if color_image_map and created_variants:
+            await self._upload_color_images(product_id, created_variants, color_image_map)
 
         # === 加入 Collection ===
         if DAIGO_COLLECTION_ID:
@@ -140,58 +133,49 @@ class ShopifyClient:
             "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
         }
 
-    async def _link_variant_images(self, product_id, created_variants, created_images, color_image_map):
-        """把每個顏色的圖片綁定到對應的 variant，讓 Shopify 前台選色時自動切圖"""
+    async def _upload_color_images(self, product_id, created_variants, color_image_map):
+        """每個顏色上傳圖片，用 variant_ids 直接綁定到對應的 variants"""
         try:
-            # Shopify CDN 會改 URL，用檔名做比對
-            def get_filename(url):
-                if not url:
-                    return ""
-                return url.split("?")[0].rsplit("/", 1)[-1]
+            # 建立 color → [variant_id, ...] 對照表
+            color_to_variant_ids = {}
+            for var in created_variants:
+                color = var.get("option1", "")
+                if color and color in color_image_map:
+                    color_to_variant_ids.setdefault(color, []).append(var["id"])
 
-            # 建立 filename → image_id
-            fname_to_id = {}
-            for img in created_images:
-                fname = get_filename(img.get("src", ""))
-                if fname:
-                    fname_to_id[fname] = img["id"]
-
-            # 建立 color → image_id
-            color_to_image_id = {}
-            for color, original_url in color_image_map.items():
-                fname = get_filename(original_url)
-                if fname and fname in fname_to_id:
-                    color_to_image_id[color] = fname_to_id[fname]
-
-            if not color_to_image_id:
-                print(f"[Shopify] ⚠️ 無法匹配顏色圖片（檔名不符），跳過連動")
+            if not color_to_variant_ids:
+                print(f"[Shopify] ⚠️ 無顏色需要綁定圖片")
                 return
 
-            print(f"[Shopify] 連動 {len(color_to_image_id)} 個顏色圖片...")
+            print(f"[Shopify] 上傳 {len(color_to_variant_ids)} 個顏色圖片...")
 
             async with httpx.AsyncClient(timeout=30) as client:
                 linked = 0
-                for var in created_variants:
-                    color = var.get("option1", "")
-                    image_id = color_to_image_id.get(color)
-                    if not image_id:
-                        continue
+                for color, variant_ids in color_to_variant_ids.items():
+                    img_url = color_image_map[color]
 
-                    variant_id = var["id"]
-                    resp = await client.put(
-                        f"{self.base_url}/variants/{variant_id}.json",
+                    # POST /products/{id}/images.json 帶 variant_ids → 上傳 + 綁定一步完成
+                    resp = await client.post(
+                        f"{self.base_url}/products/{product_id}/images.json",
                         headers=self.headers,
-                        json={"variant": {"id": variant_id, "image_id": image_id}},
+                        json={
+                            "image": {
+                                "src": img_url,
+                                "variant_ids": variant_ids,
+                            }
+                        },
                     )
                     if resp.status_code in (200, 201):
                         linked += 1
+                        img_data = resp.json().get("image", {})
+                        print(f"[Shopify]   ✅ {color}: image_id={img_data.get('id')} → {len(variant_ids)} variants")
                     else:
-                        print(f"[Shopify] ⚠️ variant {variant_id} 圖片連動失敗: {resp.status_code}")
+                        print(f"[Shopify]   ⚠️ {color} 上傳失敗 ({resp.status_code}): {resp.text[:100]}")
 
-                print(f"[Shopify] ✅ 圖片連動完成: {linked}/{len(created_variants)} variants")
+                print(f"[Shopify] ✅ 顏色圖片連動完成: {linked}/{len(color_to_variant_ids)} 顏色")
 
         except Exception as e:
-            print(f"[Shopify] 圖片連動錯誤: {e}")
+            print(f"[Shopify] 顏色圖片連動錯誤: {e}")
 
     async def _add_to_collection(self, product_id):
         try:
