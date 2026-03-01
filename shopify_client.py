@@ -65,10 +65,11 @@ class ShopifyClient:
                 "tags": ["代購", "daigo"],
                 "status": "active",
                 "variants": shopify_variants,
-                "metafields": [
-                    {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"},
+                "metafields": [mf for mf in [
+                    {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
                     {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
-                ],
+                    {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
+                ] if mf is not None],
             }
         }
 
