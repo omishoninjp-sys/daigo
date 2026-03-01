@@ -109,11 +109,15 @@ class ShopifyClient:
     async def _add_to_collection(self, product_id):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                await client.post(
+                resp = await client.post(
                     f"{self.base_url}/collects.json",
                     headers=self.headers,
                     json={"collect": {"product_id": product_id, "collection_id": int(DAIGO_COLLECTION_ID)}},
                 )
+                if resp.status_code in (200, 201):
+                    print(f"[Shopify] ✅ 已加入 Collection {DAIGO_COLLECTION_ID}")
+                else:
+                    print(f"[Shopify] ⚠️ Collection 加入失敗 ({resp.status_code}): {resp.text[:200]}")
         except Exception as e:
             print(f"[Shopify] Collection error: {e}")
 
