@@ -95,9 +95,13 @@ class ShopifyClient:
             product = result["product"]
             product_id = product["id"]
             handle = product["handle"]
+            print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(shopify_variants)}")
 
         if DAIGO_COLLECTION_ID:
+            print(f"[Shopify] 加入 Collection: {DAIGO_COLLECTION_ID}")
             await self._add_to_collection(product_id)
+        else:
+            print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定，跳過 collection")
 
         return {
             "product_id": product_id,
