@@ -9,10 +9,12 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL
+from config import API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID
 from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
+
+print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 
 app = FastAPI(title="GOYOUTATI DAIGO API", version="3.0.0")
 
