@@ -12,7 +12,50 @@ class ShopifyClient:
         }
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
-                                    source_url="", original_price_jpy=0, brand="", extra_images=None):
+                                    source_url="", original_price_jpy=0, brand="", extra_images=None,
+                                    variants=None):
+        # 建立 Shopify variants
+        shopify_variants = []
+        options = []
+
+        if variants and len(variants) > 0:
+            # 判斷有哪些 option 維度
+            has_color = any(v.get("color") for v in variants)
+            has_size = any(v.get("size") for v in variants)
+
+            if has_color:
+                options.append({"name": "カラー"})
+            if has_size:
+                options.append({"name": "サイズ"})
+
+            for v in variants:
+                sv = {
+                    "price": str(price_jpy),
+                    "inventory_management": None,
+                    "inventory_policy": "continue",
+                    "requires_shipping": True,
+                }
+                if has_color and has_size:
+                    sv["option1"] = v.get("color", "")
+                    sv["option2"] = v.get("size", "")
+                elif has_color:
+                    sv["option1"] = v.get("color", "")
+                elif has_size:
+                    sv["option1"] = v.get("size", "")
+
+                if v.get("sku"):
+                    sv["sku"] = str(v["sku"])
+
+                shopify_variants.append(sv)
+        
+        if not shopify_variants:
+            shopify_variants = [{
+                "price": str(price_jpy),
+                "inventory_management": None,
+                "inventory_policy": "continue",
+                "requires_shipping": True,
+            }]
+
         product_data = {
             "product": {
                 "title": title,
@@ -21,18 +64,16 @@ class ShopifyClient:
                 "product_type": "代購",
                 "tags": ["代購", "daigo"],
                 "status": "active",
-                "variants": [{
-                    "price": str(price_jpy),
-                    "inventory_management": None,
-                    "inventory_policy": "continue",
-                    "requires_shipping": True,
-                }],
+                "variants": shopify_variants,
                 "metafields": [
                     {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"},
                     {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
                 ],
             }
         }
+
+        if options:
+            product_data["product"]["options"] = options
 
         if brand:
             product_data["product"]["tags"].append(brand)
