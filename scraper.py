@@ -392,16 +392,22 @@ class Scraper:
                                 if (!dd) return;
 
                                 // 顏色縮圖
-                                // 顏色縮圖 - 多種 selector
-                                var thumbImg = dd.querySelector('.p-goods-add-cart-thumbnail img, button[class*="thumbnail"] img, [class*="thumbnail"] img, [class*="color"] img, dd img');
+                                // 顏色縮圖 - 在 DL（DT的父元素）裡面找 img
+                                var dlParent = dt.parentElement; // DL.p-goods-information-action
+                                var thumbImg = null;
+                                if (dlParent) {
+                                    thumbImg = dlParent.querySelector('img[src*="imgz.jp"], img[src*="zozo"]');
+                                }
+                                if (!thumbImg && dd) {
+                                    thumbImg = dd.querySelector('img');
+                                }
                                 var colorImage = '';
                                 if (thumbImg) {
                                     colorImage = thumbImg.src || thumbImg.getAttribute('data-src') || '';
-                                }
-                                // fallback: 用顏色名找對應的商品圖片
-                                if (!colorImage) {
-                                    var allImgs = document.querySelectorAll('img[src*="c.imgz.jp"]');
-                                    // 不做 fallback，留空讓後續處理
+                                    // 把縮圖 URL 換成較大尺寸
+                                    if (colorImage.indexOf('_35.') !== -1) {
+                                        colorImage = colorImage.replace(/_35\./, '_500.');
+                                    }
                                 }
 
                                 // 該顏色下的所有尺寸
