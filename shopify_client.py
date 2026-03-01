@@ -128,6 +128,9 @@ class ShopifyClient:
         else:
             print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定，跳過 collection")
 
+        # === 發布到所有銷售管道 ===
+        await self._publish_to_all_channels(product_id)
+
         return {
             "product_id": product_id,
             "handle": handle,
@@ -178,6 +181,61 @@ class ShopifyClient:
 
         except Exception as e:
             print(f"[Shopify] 顏色圖片連動錯誤: {e}")
+
+    async def _publish_to_all_channels(self, product_id):
+        """發布商品到所有銷售管道（GraphQL）"""
+        try:
+            graphql_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+            gql_headers = {
+                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+                "Content-Type": "application/json",
+            }
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                # 1. 取得所有 publication
+                resp = await client.post(graphql_url, headers=gql_headers, json={
+                    "query": "{ publications(first:20){ edges{ node{ id name }}}}"
+                })
+                if resp.status_code != 200:
+                    print(f"[Shopify] ⚠️ 無法取得銷售管道: {resp.status_code}")
+                    return
+
+                pubs = resp.json().get("data", {}).get("publications", {}).get("edges", [])
+                if not pubs:
+                    print(f"[Shopify] ⚠️ 沒有找到銷售管道")
+                    return
+
+                # 去重
+                seen = set()
+                unique_pubs = []
+                for p in pubs:
+                    name = p["node"]["name"]
+                    if name not in seen:
+                        seen.add(name)
+                        unique_pubs.append(p["node"])
+
+                # 2. 發布到所有管道
+                mutation = """mutation publishablePublish($id:ID!,$input:[PublicationInput!]!){
+                    publishablePublish(id:$id,input:$input){
+                        userErrors{field message}
+                    }
+                }"""
+                resp = await client.post(graphql_url, headers=gql_headers, json={
+                    "query": mutation,
+                    "variables": {
+                        "id": f"gid://shopify/Product/{product_id}",
+                        "input": [{"publicationId": p["id"]} for p in unique_pubs],
+                    }
+                })
+
+                errors = resp.json().get("data", {}).get("publishablePublish", {}).get("userErrors", [])
+                if errors:
+                    print(f"[Shopify] ⚠️ 發布部分失敗: {errors}")
+                else:
+                    print(f"[Shopify] ✅ 已發布到 {len(unique_pubs)} 個銷售管道")
+
+        except Exception as e:
+            print(f"[Shopify] 發布銷售管道錯誤: {e}")
 
     async def _add_to_collection(self, product_id):
         try:
