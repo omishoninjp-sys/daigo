@@ -392,8 +392,17 @@ class Scraper:
                                 if (!dd) return;
 
                                 // 顏色縮圖
-                                var thumbImg = dd.querySelector('.p-goods-add-cart-thumbnail img, button[class*="thumbnail"] img');
-                                var colorImage = thumbImg ? (thumbImg.src || '') : '';
+                                // 顏色縮圖 - 多種 selector
+                                var thumbImg = dd.querySelector('.p-goods-add-cart-thumbnail img, button[class*="thumbnail"] img, [class*="thumbnail"] img, [class*="color"] img, dd img');
+                                var colorImage = '';
+                                if (thumbImg) {
+                                    colorImage = thumbImg.src || thumbImg.getAttribute('data-src') || '';
+                                }
+                                // fallback: 用顏色名找對應的商品圖片
+                                if (!colorImage) {
+                                    var allImgs = document.querySelectorAll('img[src*="c.imgz.jp"]');
+                                    // 不做 fallback，留空讓後續處理
+                                }
 
                                 // 該顏色下的所有尺寸
                                 var sizeItems = dd.querySelectorAll('li.p-goods-add-cart-list__item');
@@ -467,7 +476,7 @@ class Scraper:
                                 });
                             }
 
-                            var dtTexts=[]; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20));}); r.variant_debug += ' | dts: ' + dts.length + '(' + dtTexts.join(',') + ') | parsed: ' + r.variants.length + ' | deduped: ' + r.variants.length;
+                            var dtTexts=[]; var ddImgDebug=''; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20)); if(i===0){var dd=dt.nextElementSibling; if(dd){var imgs=dd.querySelectorAll('img'); ddImgDebug='dd0_imgs:'+imgs.length; if(imgs.length>0){ddImgDebug+='('+imgs[0].src.substring(0,60)+')';} var classes=[]; dd.querySelectorAll('[class]').forEach(function(el){if(el.querySelector('img')){classes.push(el.className.substring(0,40));}}); if(classes.length>0) ddImgDebug+=' classes:'+classes.join('|');}}}); r.variant_debug += ' | dts: ' + dts.length + '(' + dtTexts.join(',') + ') | ' + ddImgDebug + ' | parsed: ' + r.variants.length + ' | deduped: ' + r.variants.length;
 
                             // Dump first form for debugging sku
                             var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
@@ -531,7 +540,7 @@ class Scraper:
                         print(f"[ZOZO] variant_debug: {vd}")
                         print(f"[ZOZO] variants: {len(vs)} 個")
                         for v in vs[:6]:
-                            print(f"  - {v.get('color','')} / {v.get('size','')} | stock={v.get('in_stock')} | sku={v.get('sku','')}")
+                            print(f"  - {v.get('color','')} / {v.get('size','')} | stock={v.get('in_stock')} | sku={v.get('sku','')} | img={v.get('image','')[:60]}")
                     return result
 
                 if 'access denied' in (title or '').lower() and i >= 2:
