@@ -476,7 +476,48 @@ class Scraper:
                                 });
                             }
 
-                            var dtTexts=[]; var ddImgDebug=''; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20)); if(i===0){var dd=dt.nextElementSibling; if(dd){var imgs=dd.querySelectorAll('img'); ddImgDebug='dd0_imgs:'+imgs.length; if(imgs.length>0){ddImgDebug+='('+imgs[0].src.substring(0,60)+')';} var classes=[]; dd.querySelectorAll('[class]').forEach(function(el){if(el.querySelector('img')){classes.push(el.className.substring(0,40));}}); if(classes.length>0) ddImgDebug+=' classes:'+classes.join('|');}}}); r.variant_debug += ' | dts: ' + dts.length + '(' + dtTexts.join(',') + ') | ' + ddImgDebug + ' | parsed: ' + r.variants.length + ' | deduped: ' + r.variants.length;
+                            var dtTexts=[]; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20));}); 
+                            // 全面搜尋顏色圖片位置
+                            var colorImgDebug = '';
+                            // 1. 找所有含 color/thumb/swatch 的 class
+                            var colorEls = document.querySelectorAll('[class*="color"] img, [class*="thumb"] img, [class*="swatch"] img, [class*="Color"] img, [class*="Thumb"] img');
+                            colorImgDebug += 'colorEls:' + colorEls.length;
+                            if (colorEls.length > 0) { colorImgDebug += '(' + colorEls[0].src.substring(0, 80) + ')'; }
+                            // 2. 找 DT 的父元素有沒有圖片
+                            if (dts.length > 0) {
+                                var parent = dts[0].parentElement;
+                                if (parent) {
+                                    var parentImgs = parent.querySelectorAll('img');
+                                    colorImgDebug += ' | parent_imgs:' + parentImgs.length;
+                                    // 往上再找一層
+                                    var grandparent = parent.parentElement;
+                                    if (grandparent) {
+                                        var gpImgs = grandparent.querySelectorAll('img');
+                                        colorImgDebug += ' | gp_imgs:' + gpImgs.length;
+                                        if (gpImgs.length > 0) { colorImgDebug += '(' + gpImgs[0].src.substring(0, 80) + ')'; }
+                                    }
+                                }
+                            }
+                            // 3. 找 button 裡的 img（可能是顏色按鈕）
+                            var btnImgs = document.querySelectorAll('button img[src*="imgz.jp"], button img[src*="zozo"]');
+                            colorImgDebug += ' | btn_imgs:' + btnImgs.length;
+                            if (btnImgs.length > 0) { colorImgDebug += '(' + btnImgs[0].src.substring(0, 80) + ')'; }
+                            // 4. 找所有小圖（可能是色票）
+                            var smallImgs = document.querySelectorAll('img[width], img[class*="small"], img[class*="chip"]');
+                            colorImgDebug += ' | small_imgs:' + smallImgs.length;
+                            // 5. dump DT 附近的 HTML 結構
+                            if (dts.length > 0) {
+                                var dtParent = dts[0].closest('dl') || dts[0].parentElement;
+                                if (dtParent && dtParent.parentElement) {
+                                    var sibHtml = '';
+                                    var sibs = dtParent.parentElement.children;
+                                    for (var si = 0; si < Math.min(sibs.length, 5); si++) {
+                                        sibHtml += sibs[si].tagName + '.' + (sibs[si].className || '').substring(0, 40) + ' ';
+                                    }
+                                    colorImgDebug += ' | siblings:' + sibHtml.trim();
+                                }
+                            }
+                            r.variant_debug += ' | dts:' + dts.length + '(' + dtTexts.join(',') + ') | ' + colorImgDebug + ' | parsed:' + r.variants.length;
 
                             // Dump first form for debugging sku
                             var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
