@@ -61,6 +61,8 @@ class ShopifyClient:
                 "requires_shipping": True,
             }]
 
+        title = f"客製化代購 {title}"
+
         product_data = {
             "product": {
                 "title": title,
