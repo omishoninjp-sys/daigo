@@ -263,5 +263,5 @@ class ShopifyClient:
         if source_url:
             parts.append(f'<p style="margin:0;"><a href="{source_url}" target="_blank" rel="nofollow">查看原始商品頁面 →</a></p>')
         parts.append("</div>")
-        parts.append('<p style="margin-top:12px;font-size:13px;color:#666;">※ 本商品為日本代購，下單後約 7-14 個工作天到貨。國際運費 ¥1,250/kg，貨到後另行請款。</p>')
+        parts.append('<p style="margin-top:12px;font-size:13px;color:#666;">※ 本商品為日本代購，下單後約 7-14 個工作天到貨。國際運費 ¥1,000/kg（0.5kg 區間），包稅、不收材積，貨到後另行請款。</p>')
         return "\n".join(parts)
