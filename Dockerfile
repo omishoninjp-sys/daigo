@@ -23,6 +23,10 @@ RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 預裝 chromedriver（避免每次啟動重新下載）
+RUN python -c "from seleniumbase import drivers; import subprocess; subprocess.run(['sbase', 'get', 'chromedriver', '--path'], capture_output=True)" || true
+RUN sbase get uc_driver || true
+
 COPY . .
 
 ENV PORT=8000

@@ -1,9 +1,9 @@
 """
-GOYOUTATI DAIGO 代購系統 API v3
-- Amazon: requests（快速）
-- ZOZOTOWN: 代理到本機 product-fetcher
-- 其他網站: Playwright
+GOYOUTATI DAIGO 代購系統 API v3.1
+- 快取 scrape 結果，create-order 不重複爬取
+- 常駐 Chrome 實例
 """
+import time
 import traceback
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +16,7 @@ from shopify_client import ShopifyClient
 
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 
-app = FastAPI(title="GOYOUTATI DAIGO API", version="3.0.0")
+app = FastAPI(title="GOYOUTATI DAIGO API", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +28,29 @@ app.add_middleware(
 
 scraper = Scraper()
 shopify = ShopifyClient()
+
+# === 快取 ===
+CACHE_TTL = 600  # 10 分鐘
+_scrape_cache: dict[str, tuple[ProductInfo, float]] = {}
+
+
+def cache_get(url: str) -> ProductInfo | None:
+    if url in _scrape_cache:
+        product, ts = _scrape_cache[url]
+        if time.time() - ts < CACHE_TTL:
+            print(f"[Cache] ✅ 命中快取: {url[:60]}")
+            return product
+        else:
+            del _scrape_cache[url]
+    return None
+
+
+def cache_set(url: str, product: ProductInfo):
+    _scrape_cache[url] = (product, time.time())
+    now = time.time()
+    expired = [k for k, (_, ts) in _scrape_cache.items() if now - ts > CACHE_TTL]
+    for k in expired:
+        del _scrape_cache[k]
 
 
 async def verify_api_key(x_api_key: str = Header(default="")):
@@ -69,15 +92,13 @@ class CreateOrderResponse(BaseModel):
 
 @app.get("/api/health")
 async def health():
+    driver_status = scraper.get_driver_status()
     return {
         "status": "ok",
         "service": "daigo-api",
-        "version": "3.0.0",
-        "scrapers": {
-            "amazon": "requests (direct)",
-            "zozotown": f"external ({ZOZO_SCRAPER_URL})" if ZOZO_SCRAPER_URL else "undetected-chromedriver (built-in)",
-            "generic": "playwright",
-        },
+        "version": "3.1.0",
+        "cache_size": len(_scrape_cache),
+        "driver": driver_status,
     }
 
 
@@ -94,12 +115,12 @@ async def get_rate():
 async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
-
         product: ProductInfo = await scraper.scrape(url)
 
         if not product.title:
             return ScrapeResponse(success=False, error="無法從此連結抓取商品資訊")
 
+        cache_set(url, product)
         pricing = calculate_selling_price(product.price_jpy) if product.price_jpy else None
         return ScrapeResponse(success=True, product=product.to_dict(), pricing=pricing)
 
@@ -112,7 +133,12 @@ async def scrape_product(req: ScrapeRequest):
 async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
-        product: ProductInfo = await scraper.scrape(url)
+
+        # 先查快取
+        product = cache_get(url)
+        if not product:
+            print(f"[Cache] ❌ 未命中，重新爬取: {url[:60]}")
+            product: ProductInfo = await scraper.scrape(url)
 
         if not product.title:
             return CreateOrderResponse(success=False, error="無法抓取商品資訊")
