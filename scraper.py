@@ -54,7 +54,79 @@ def detect_platform(url: str) -> str:
 
 class Scraper:
     def __init__(self):
-        pass
+        import threading
+        self._driver = None
+        self._driver_lock = threading.Lock()
+        self._driver_use_count = 0
+        self._driver_max_uses = 50  # 每 50 次請求重建 driver
+        self._proxy_verified = False
+
+    def get_driver_status(self) -> dict:
+        return {
+            "alive": self._driver is not None,
+            "use_count": self._driver_use_count,
+            "max_uses": self._driver_max_uses,
+        }
+
+    def _create_driver(self):
+        """建立或重建 Chrome driver"""
+        import os, time as _time
+        try:
+            from seleniumbase import Driver
+        except ImportError:
+            print("[Driver] seleniumbase 未安裝")
+            return None
+
+        # 先關閉舊的
+        if self._driver:
+            try:
+                self._driver.quit()
+            except:
+                pass
+            self._driver = None
+
+        proxy_arg = None
+        if PROXY_URL:
+            from urllib.parse import urlparse as _urlparse
+            _pp = _urlparse(PROXY_URL)
+            proxy_arg = f"{_pp.hostname}:{_pp.port}"
+            print(f"[Driver] 建立 Chrome UC + proxy: {proxy_arg}")
+        else:
+            print(f"[Driver] 建立 Chrome UC（無 proxy）")
+
+        self._driver = Driver(
+            uc=True,
+            headless=False,
+            proxy=proxy_arg,
+            locale_code='ja',
+            chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run,--no-sandbox,--disable-dev-shm-usage',
+        )
+        self._driver_use_count = 0
+        self._proxy_verified = False
+        print(f"[Driver] ✅ Chrome 已啟動")
+        return self._driver
+
+    def _ensure_driver(self):
+        """確保 driver 存活，必要時重建"""
+        need_recreate = False
+
+        if self._driver is None:
+            need_recreate = True
+        elif self._driver_use_count >= self._driver_max_uses:
+            print(f"[Driver] 已使用 {self._driver_use_count} 次，重建中...")
+            need_recreate = True
+        else:
+            # 測試 driver 是否還活著
+            try:
+                _ = self._driver.title
+            except:
+                print(f"[Driver] Chrome 已斷線，重建中...")
+                need_recreate = True
+
+        if need_recreate:
+            self._create_driver()
+
+        return self._driver
 
     async def scrape(self, url: str) -> ProductInfo:
         platform = detect_platform(url)
@@ -214,397 +286,394 @@ class Scraper:
 
     def _fetch_zozo_uc(self, url: str) -> dict | None:
         """
-        用 SeleniumBase UC mode + xvfb 跑 ZOZOTOWN
-        - UC mode: 修正 HeadlessChrome user agent, 反偵測
-        - xvfb: 虛擬顯示器（DISPLAY=:99），跑 headed Chrome
-        - Proxy: IP 白名單直連，不需帳密
-        - 用 Driver 格式（不需要 pyautogui/tkinter）
+        用常駐 SeleniumBase UC mode Chrome 爬 ZOZOTOWN
+        - 重用 driver，不每次建立/關閉
+        - threading.Lock 防止並發
         """
         import os, time as _time
 
-        try:
-            from seleniumbase import Driver
-        except ImportError:
-            print("[ZOZO] seleniumbase 未安裝")
-            return None
-
-        proxy_arg = None
-        if PROXY_URL:
-            from urllib.parse import urlparse as _urlparse
-            _pp = _urlparse(PROXY_URL)
-            proxy_arg = f"{_pp.hostname}:{_pp.port}"
-            print(f"[ZOZO] SeleniumBase UC + proxy: {proxy_arg}")
-        else:
-            print(f"[ZOZO] SeleniumBase UC（無 proxy）")
-
-        driver = None
-        try:
-            driver = Driver(
-                uc=True,
-                headless=False,     # headed Chrome 在 Xvfb 虛擬顯示器裡
-                proxy=proxy_arg,
-                locale_code='ja',
-                chromium_arg='--lang=ja-JP,--disable-component-update,--disable-background-networking,--disable-sync,--no-first-run,--no-sandbox,--disable-dev-shm-usage',
-            )
-
-            # 診斷
+        with self._driver_lock:
             try:
-                driver.get('http://httpbin.org/ip')
-                _time.sleep(1)
-                src = driver.page_source
-                if '103.230' in src:
-                    print(f"[ZOZO] ✅ proxy 正常 (IP: 103.230.9.105)")
-                else:
-                    print(f"[ZOZO] proxy IP: {src[:100]}")
-            except Exception as e:
-                print(f"[ZOZO] proxy 測試: {type(e).__name__}")
+                driver = self._ensure_driver()
+                if not driver:
+                    return None
 
-            # 用 uc_open_with_reconnect 載入（反偵測核心）
-            print(f"[ZOZO] 載入: {url}")
-            try:
-                driver.uc_open_with_reconnect(url, reconnect_time=6)
-            except Exception as e:
-                print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
+                # 首次驗證 proxy
+                if not self._proxy_verified and PROXY_URL:
+                    try:
+                        driver.get('http://httpbin.org/ip')
+                        _time.sleep(1)
+                        src = driver.page_source
+                        if '103.230' in src:
+                            print(f"[ZOZO] ✅ proxy 正常 (IP: 103.230.9.105)")
+                        else:
+                            print(f"[ZOZO] proxy IP: {src[:100]}")
+                        self._proxy_verified = True
+                    except Exception as e:
+                        print(f"[ZOZO] proxy 測試: {type(e).__name__}")
 
-            # 等待頁面渲染
-            for i in range(12):
-                _time.sleep(3 if i < 3 else 2)
+                # 清理：關閉多餘 tab，清 cookies
                 try:
-                    html = driver.page_source
-                    title = driver.title
+                    handles = driver.window_handles
+                    if len(handles) > 1:
+                        for h in handles[1:]:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        driver.switch_to.window(handles[0])
+                    driver.delete_all_cookies()
                 except:
-                    continue
+                    pass
 
-                has_data = ('application/ld+json' in html or
-                           '__NEXT_DATA__' in html or
-                           'og:title' in html)
+                self._driver_use_count += 1
 
-                if i < 2:
-                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:60]} | data={has_data}")
-                    if len(html) < 500:
-                        print(f"[ZOZO] HTML: {html[:300]}")
-                else:
-                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+                # 用 uc_open_with_reconnect 載入（反偵測核心）
+                print(f"[ZOZO] 載入: {url}")
+                try:
+                    driver.uc_open_with_reconnect(url, reconnect_time=6)
+                except Exception as e:
+                    print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
 
-                if has_data:
-                    result = driver.execute_script(r"""
-                        var r = {title:'', brand:'', price:0, price_text:'',
-                                 original_price:0, original_price_text:'', discount:'',
-                                 images:[], description:'', item_id:'', in_stock:true,
-                                 variants:[], variant_debug:''};
+                # 等待頁面渲染
+                for i in range(12):
+                    _time.sleep(3 if i < 3 else 2)
+                    try:
+                        html = driver.page_source
+                        title = driver.title
+                    except:
+                        continue
 
-                        var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
-                        if (m) r.item_id = m[1];
+                    has_data = ('application/ld+json' in html or
+                               '__NEXT_DATA__' in html or
+                               'og:title' in html)
 
-                        // === ld+json ===
-                        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
-                            try {
-                                var d = JSON.parse(s.textContent);
-                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
-                                if (d && d['@type'] === 'Product') {
-                                    r.title = d.name || '';
-                                    var b = d.brand || '';
-                                    r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
-                                    r.description = d.description || '';
-                                    var img = d.image || [];
-                                    if (typeof img === 'string') img = [img];
-                                    r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
-                                    var offers = d.offers || {};
-                                    if (Array.isArray(offers)) {
-                                        // 多個 offers = 多個 variant
-                                        offers.forEach(function(o) {
-                                            if (o.price) {
-                                                if (!r.price) {
-                                                    r.price = parseInt(o.price);
-                                                    r.price_text = '\u00a5' + r.price.toLocaleString();
+                    if i < 2:
+                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | title={title[:60]} | data={has_data}")
+                        if len(html) < 500:
+                            print(f"[ZOZO] HTML: {html[:300]}")
+                    else:
+                        print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+
+                    if has_data:
+                        result = driver.execute_script(r"""
+                            var r = {title:'', brand:'', price:0, price_text:'',
+                                     original_price:0, original_price_text:'', discount:'',
+                                     images:[], description:'', item_id:'', in_stock:true,
+                                     variants:[], variant_debug:''};
+
+                            var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
+                            if (m) r.item_id = m[1];
+
+                            // === ld+json ===
+                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                                try {
+                                    var d = JSON.parse(s.textContent);
+                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
+                                    if (d && d['@type'] === 'Product') {
+                                        r.title = d.name || '';
+                                        var b = d.brand || '';
+                                        r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
+                                        r.description = d.description || '';
+                                        var img = d.image || [];
+                                        if (typeof img === 'string') img = [img];
+                                        r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
+                                        var offers = d.offers || {};
+                                        if (Array.isArray(offers)) {
+                                            // 多個 offers = 多個 variant
+                                            offers.forEach(function(o) {
+                                                if (o.price) {
+                                                    if (!r.price) {
+                                                        r.price = parseInt(o.price);
+                                                        r.price_text = '\u00a5' + r.price.toLocaleString();
+                                                    }
                                                 }
+                                            });
+                                            offers = offers[0] || {};
+                                        } else {
+                                            if (offers.price) {
+                                                r.price = parseInt(offers.price);
+                                                r.price_text = '\u00a5' + r.price.toLocaleString();
                                             }
-                                        });
-                                        offers = offers[0] || {};
-                                    } else {
-                                        if (offers.price) {
-                                            r.price = parseInt(offers.price);
-                                            r.price_text = '\u00a5' + r.price.toLocaleString();
                                         }
+                                        if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
                                     }
-                                    if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
-                                }
-                            } catch(e) {}
-                        });
-
-                        // === __NEXT_DATA__ (variants) ===
-                        var nd = document.getElementById('__NEXT_DATA__');
-                        if (nd) {
-                            try {
-                                var ndata = JSON.parse(nd.textContent);
-                                var props = ndata.props && ndata.props.pageProps ? ndata.props.pageProps : {};
-
-                                // 嘗試找 product 資料
-                                var prod = props.product || props.goods || props.item ||
-                                          (props.initialState && props.initialState.product) || {};
-
-                                if (!r.title && prod.name) r.title = prod.name;
-                                if (!r.brand && prod.brandName) r.brand = prod.brandName;
-                                if (!r.price && prod.price) {
-                                    r.price = parseInt(prod.price);
-                                    r.price_text = '\u00a5' + r.price.toLocaleString();
-                                }
-                                if (r.images.length === 0 && prod.images) {
-                                    r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
-                                }
-
-                                // 找 variants/skus/items
-                                var items = prod.items || prod.skus || prod.variants ||
-                                           prod.colorSizes || prod.detail && prod.detail.items || [];
-
-                                if (items.length > 0) {
-                                    items.forEach(function(item) {
-                                        var v = {
-                                            color: item.colorName || item.color || item.colorLabel || '',
-                                            size: item.sizeName || item.size || item.sizeLabel || '',
-                                            sku: item.skuId || item.id || item.sku || '',
-                                            price: item.price ? parseInt(item.price) : r.price,
-                                            in_stock: item.soldout !== true && item.inStock !== false,
-                                            image: item.imageUrl || item.image || ''
-                                        };
-                                        if (v.color || v.size) r.variants.push(v);
-                                    });
-                                }
-
-                                // Debug: 列出 pageProps 的 top-level keys
-                                r.variant_debug = 'pageProps keys: ' + Object.keys(props).join(',');
-                                if (prod && typeof prod === 'object') {
-                                    r.variant_debug += ' | prod keys: ' + Object.keys(prod).join(',');
-                                }
-                            } catch(e) {
-                                r.variant_debug = 'NEXT_DATA error: ' + e.message;
-                            }
-                        }
-
-                        // === DOM: variant extraction from ZOZO DT/DD structure ===
-                        if (r.variants.length === 0) {
-                            // ZOZO 結構: <dl> → <dt>顏色名</dt><dd>含 ul>li 尺寸列表</dd>
-                            var dts = document.querySelectorAll('dt.p-goods-information-action__term');
-
-                            dts.forEach(function(dt) {
-                                var colorName = dt.textContent.trim();
-                                var dd = dt.nextElementSibling; // 對應的 <dd>
-                                if (!dd) return;
-
-                                // 顏色縮圖
-                                // 顏色縮圖 - 在 DL（DT的父元素）裡面找 img
-                                var dlParent = dt.parentElement; // DL.p-goods-information-action
-                                var thumbImg = null;
-                                if (dlParent) {
-                                    thumbImg = dlParent.querySelector('img[src*="imgz.jp"], img[src*="zozo"]');
-                                }
-                                if (!thumbImg && dd) {
-                                    thumbImg = dd.querySelector('img');
-                                }
-                                var colorImage = '';
-                                if (thumbImg) {
-                                    colorImage = thumbImg.src || thumbImg.getAttribute('data-src') || '';
-                                    // 把縮圖 URL 換成較大尺寸
-                                    if (colorImage.indexOf('_35.') !== -1) {
-                                        colorImage = colorImage.replace(/_35\./, '_500.');
-                                    }
-                                }
-
-                                // 該顏色下的所有尺寸
-                                var sizeItems = dd.querySelectorAll('li.p-goods-add-cart-list__item');
-                                sizeItems.forEach(function(li) {
-                                    var fullText = li.textContent.replace(/\s+/g, ' ').trim();
-
-                                    // 尺寸: "M / 在庫あり" → M
-                                    var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                    if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
-                                    var size = sizeMatch ? sizeMatch[1].trim() : '';
-                                    if (!size) return;
-
-                                    // 庫存
-                                    var inStock = fullText.indexOf('在庫あり') !== -1;
-                                    var soldOut = fullText.indexOf('SOLD') !== -1;
-
-                                    // SKU: form hidden input
-                                    var sku = '';
-                                    var form = li.querySelector('form');
-                                    if (form) {
-                                        form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
-                                            var n = (inp.name || '').toLowerCase();
-                                            if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
-                                        });
-                                        if (!sku && form.action) {
-                                            var dm = form.action.match(/[?&]did=(\d+)/);
-                                            if (dm) sku = dm[1];
-                                        }
-                                    }
-
-                                    r.variants.push({
-                                        color: colorName,
-                                        size: size,
-                                        sku: sku,
-                                        price: r.price,
-                                        in_stock: inStock && !soldOut,
-                                        image: colorImage
-                                    });
-                                });
+                                } catch(e) {}
                             });
 
-                            // 如果沒有 DT/DD 結構（單色商品），fallback 到 li 直接抓
+                            // === __NEXT_DATA__ (variants) ===
+                            var nd = document.getElementById('__NEXT_DATA__');
+                            if (nd) {
+                                try {
+                                    var ndata = JSON.parse(nd.textContent);
+                                    var props = ndata.props && ndata.props.pageProps ? ndata.props.pageProps : {};
+
+                                    // 嘗試找 product 資料
+                                    var prod = props.product || props.goods || props.item ||
+                                              (props.initialState && props.initialState.product) || {};
+
+                                    if (!r.title && prod.name) r.title = prod.name;
+                                    if (!r.brand && prod.brandName) r.brand = prod.brandName;
+                                    if (!r.price && prod.price) {
+                                        r.price = parseInt(prod.price);
+                                        r.price_text = '\u00a5' + r.price.toLocaleString();
+                                    }
+                                    if (r.images.length === 0 && prod.images) {
+                                        r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
+                                    }
+
+                                    // 找 variants/skus/items
+                                    var items = prod.items || prod.skus || prod.variants ||
+                                               prod.colorSizes || prod.detail && prod.detail.items || [];
+
+                                    if (items.length > 0) {
+                                        items.forEach(function(item) {
+                                            var v = {
+                                                color: item.colorName || item.color || item.colorLabel || '',
+                                                size: item.sizeName || item.size || item.sizeLabel || '',
+                                                sku: item.skuId || item.id || item.sku || '',
+                                                price: item.price ? parseInt(item.price) : r.price,
+                                                in_stock: item.soldout !== true && item.inStock !== false,
+                                                image: item.imageUrl || item.image || ''
+                                            };
+                                            if (v.color || v.size) r.variants.push(v);
+                                        });
+                                    }
+
+                                    // Debug: 列出 pageProps 的 top-level keys
+                                    r.variant_debug = 'pageProps keys: ' + Object.keys(props).join(',');
+                                    if (prod && typeof prod === 'object') {
+                                        r.variant_debug += ' | prod keys: ' + Object.keys(prod).join(',');
+                                    }
+                                } catch(e) {
+                                    r.variant_debug = 'NEXT_DATA error: ' + e.message;
+                                }
+                            }
+
+                            // === DOM: variant extraction from ZOZO DT/DD structure ===
                             if (r.variants.length === 0) {
-                                var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
-                                items.forEach(function(li) {
-                                    var fullText = li.textContent.replace(/\s+/g, ' ').trim();
-                                    var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                    if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
-                                    var size = sizeMatch ? sizeMatch[1].trim() : '';
-                                    if (!size) return;
+                                // ZOZO 結構: <dl> → <dt>顏色名</dt><dd>含 ul>li 尺寸列表</dd>
+                                var dts = document.querySelectorAll('dt.p-goods-information-action__term');
 
-                                    var inStock = fullText.indexOf('在庫あり') !== -1;
-                                    var soldOut = fullText.indexOf('SOLD') !== -1;
-                                    var sku = '';
-                                    var form = li.querySelector('form');
-                                    if (form) {
-                                        form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
-                                            var n = (inp.name || '').toLowerCase();
-                                            if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
-                                        });
+                                dts.forEach(function(dt) {
+                                    var colorName = dt.textContent.trim();
+                                    var dd = dt.nextElementSibling; // 對應的 <dd>
+                                    if (!dd) return;
+
+                                    // 顏色縮圖
+                                    // 顏色縮圖 - 在 DL（DT的父元素）裡面找 img
+                                    var dlParent = dt.parentElement; // DL.p-goods-information-action
+                                    var thumbImg = null;
+                                    if (dlParent) {
+                                        thumbImg = dlParent.querySelector('img[src*="imgz.jp"], img[src*="zozo"]');
+                                    }
+                                    if (!thumbImg && dd) {
+                                        thumbImg = dd.querySelector('img');
+                                    }
+                                    var colorImage = '';
+                                    if (thumbImg) {
+                                        colorImage = thumbImg.src || thumbImg.getAttribute('data-src') || '';
+                                        // 把縮圖 URL 換成較大尺寸
+                                        if (colorImage.indexOf('_35.') !== -1) {
+                                            colorImage = colorImage.replace(/_35\./, '_500.');
+                                        }
                                     }
 
-                                    r.variants.push({
-                                        color: '',
-                                        size: size,
-                                        sku: sku,
-                                        price: r.price,
-                                        in_stock: inStock && !soldOut,
-                                        image: ''
+                                    // 該顏色下的所有尺寸
+                                    var sizeItems = dd.querySelectorAll('li.p-goods-add-cart-list__item');
+                                    sizeItems.forEach(function(li) {
+                                        var fullText = li.textContent.replace(/\s+/g, ' ').trim();
+
+                                        // 尺寸: "M / 在庫あり" → M
+                                        var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
+                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
+                                        var size = sizeMatch ? sizeMatch[1].trim() : '';
+                                        if (!size) return;
+
+                                        // 庫存
+                                        var inStock = fullText.indexOf('在庫あり') !== -1;
+                                        var soldOut = fullText.indexOf('SOLD') !== -1;
+
+                                        // SKU: form hidden input
+                                        var sku = '';
+                                        var form = li.querySelector('form');
+                                        if (form) {
+                                            form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
+                                                var n = (inp.name || '').toLowerCase();
+                                                if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                            });
+                                            if (!sku && form.action) {
+                                                var dm = form.action.match(/[?&]did=(\d+)/);
+                                                if (dm) sku = dm[1];
+                                            }
+                                        }
+
+                                        r.variants.push({
+                                            color: colorName,
+                                            size: size,
+                                            sku: sku,
+                                            price: r.price,
+                                            in_stock: inStock && !soldOut,
+                                            image: colorImage
+                                        });
                                     });
                                 });
-                            }
 
-                            var dtTexts=[]; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20));}); 
-                            // 全面搜尋顏色圖片位置
-                            var colorImgDebug = '';
-                            // 1. 找所有含 color/thumb/swatch 的 class
-                            var colorEls = document.querySelectorAll('[class*="color"] img, [class*="thumb"] img, [class*="swatch"] img, [class*="Color"] img, [class*="Thumb"] img');
-                            colorImgDebug += 'colorEls:' + colorEls.length;
-                            if (colorEls.length > 0) { colorImgDebug += '(' + colorEls[0].src.substring(0, 80) + ')'; }
-                            // 2. 找 DT 的父元素有沒有圖片
-                            if (dts.length > 0) {
-                                var parent = dts[0].parentElement;
-                                if (parent) {
-                                    var parentImgs = parent.querySelectorAll('img');
-                                    colorImgDebug += ' | parent_imgs:' + parentImgs.length;
-                                    // 往上再找一層
-                                    var grandparent = parent.parentElement;
-                                    if (grandparent) {
-                                        var gpImgs = grandparent.querySelectorAll('img');
-                                        colorImgDebug += ' | gp_imgs:' + gpImgs.length;
-                                        if (gpImgs.length > 0) { colorImgDebug += '(' + gpImgs[0].src.substring(0, 80) + ')'; }
+                                // 如果沒有 DT/DD 結構（單色商品），fallback 到 li 直接抓
+                                if (r.variants.length === 0) {
+                                    var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
+                                    items.forEach(function(li) {
+                                        var fullText = li.textContent.replace(/\s+/g, ' ').trim();
+                                        var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
+                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
+                                        var size = sizeMatch ? sizeMatch[1].trim() : '';
+                                        if (!size) return;
+
+                                        var inStock = fullText.indexOf('在庫あり') !== -1;
+                                        var soldOut = fullText.indexOf('SOLD') !== -1;
+                                        var sku = '';
+                                        var form = li.querySelector('form');
+                                        if (form) {
+                                            form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
+                                                var n = (inp.name || '').toLowerCase();
+                                                if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
+                                            });
+                                        }
+
+                                        r.variants.push({
+                                            color: '',
+                                            size: size,
+                                            sku: sku,
+                                            price: r.price,
+                                            in_stock: inStock && !soldOut,
+                                            image: ''
+                                        });
+                                    });
+                                }
+
+                                var dtTexts=[]; dts.forEach(function(dt,i){dtTexts.push(dt.textContent.trim().substring(0,20));}); 
+                                // 全面搜尋顏色圖片位置
+                                var colorImgDebug = '';
+                                // 1. 找所有含 color/thumb/swatch 的 class
+                                var colorEls = document.querySelectorAll('[class*="color"] img, [class*="thumb"] img, [class*="swatch"] img, [class*="Color"] img, [class*="Thumb"] img');
+                                colorImgDebug += 'colorEls:' + colorEls.length;
+                                if (colorEls.length > 0) { colorImgDebug += '(' + colorEls[0].src.substring(0, 80) + ')'; }
+                                // 2. 找 DT 的父元素有沒有圖片
+                                if (dts.length > 0) {
+                                    var parent = dts[0].parentElement;
+                                    if (parent) {
+                                        var parentImgs = parent.querySelectorAll('img');
+                                        colorImgDebug += ' | parent_imgs:' + parentImgs.length;
+                                        // 往上再找一層
+                                        var grandparent = parent.parentElement;
+                                        if (grandparent) {
+                                            var gpImgs = grandparent.querySelectorAll('img');
+                                            colorImgDebug += ' | gp_imgs:' + gpImgs.length;
+                                            if (gpImgs.length > 0) { colorImgDebug += '(' + gpImgs[0].src.substring(0, 80) + ')'; }
+                                        }
                                     }
                                 }
-                            }
-                            // 3. 找 button 裡的 img（可能是顏色按鈕）
-                            var btnImgs = document.querySelectorAll('button img[src*="imgz.jp"], button img[src*="zozo"]');
-                            colorImgDebug += ' | btn_imgs:' + btnImgs.length;
-                            if (btnImgs.length > 0) { colorImgDebug += '(' + btnImgs[0].src.substring(0, 80) + ')'; }
-                            // 4. 找所有小圖（可能是色票）
-                            var smallImgs = document.querySelectorAll('img[width], img[class*="small"], img[class*="chip"]');
-                            colorImgDebug += ' | small_imgs:' + smallImgs.length;
-                            // 5. dump DT 附近的 HTML 結構
-                            if (dts.length > 0) {
-                                var dtParent = dts[0].closest('dl') || dts[0].parentElement;
-                                if (dtParent && dtParent.parentElement) {
-                                    var sibHtml = '';
-                                    var sibs = dtParent.parentElement.children;
-                                    for (var si = 0; si < Math.min(sibs.length, 5); si++) {
-                                        sibHtml += sibs[si].tagName + '.' + (sibs[si].className || '').substring(0, 40) + ' ';
+                                // 3. 找 button 裡的 img（可能是顏色按鈕）
+                                var btnImgs = document.querySelectorAll('button img[src*="imgz.jp"], button img[src*="zozo"]');
+                                colorImgDebug += ' | btn_imgs:' + btnImgs.length;
+                                if (btnImgs.length > 0) { colorImgDebug += '(' + btnImgs[0].src.substring(0, 80) + ')'; }
+                                // 4. 找所有小圖（可能是色票）
+                                var smallImgs = document.querySelectorAll('img[width], img[class*="small"], img[class*="chip"]');
+                                colorImgDebug += ' | small_imgs:' + smallImgs.length;
+                                // 5. dump DT 附近的 HTML 結構
+                                if (dts.length > 0) {
+                                    var dtParent = dts[0].closest('dl') || dts[0].parentElement;
+                                    if (dtParent && dtParent.parentElement) {
+                                        var sibHtml = '';
+                                        var sibs = dtParent.parentElement.children;
+                                        for (var si = 0; si < Math.min(sibs.length, 5); si++) {
+                                            sibHtml += sibs[si].tagName + '.' + (sibs[si].className || '').substring(0, 40) + ' ';
+                                        }
+                                        colorImgDebug += ' | siblings:' + sibHtml.trim();
                                     }
-                                    colorImgDebug += ' | siblings:' + sibHtml.trim();
                                 }
-                            }
-                            r.variant_debug += ' | dts:' + dts.length + '(' + dtTexts.join(',') + ') | ' + colorImgDebug + ' | parsed:' + r.variants.length;
+                                r.variant_debug += ' | dts:' + dts.length + '(' + dtTexts.join(',') + ') | ' + colorImgDebug + ' | parsed:' + r.variants.length;
 
-                            // Dump first form for debugging sku
-                            var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
-                            if (firstForm) {
-                                var formInfo = 'action:' + (firstForm.action||'').substring(0, 60);
-                                firstForm.querySelectorAll('input').forEach(function(inp) {
-                                    formInfo += ' | ' + (inp.name||inp.type) + '=' + (inp.value||'').substring(0, 30);
+                                // Dump first form for debugging sku
+                                var firstForm = document.querySelector('li.p-goods-add-cart-list__item form');
+                                if (firstForm) {
+                                    var formInfo = 'action:' + (firstForm.action||'').substring(0, 60);
+                                    firstForm.querySelectorAll('input').forEach(function(inp) {
+                                        formInfo += ' | ' + (inp.name||inp.type) + '=' + (inp.value||'').substring(0, 30);
+                                    });
+                                    r.variant_debug += ' | form: ' + formInfo;
+                                }
+
+                                // Dedup: 同色同尺寸只留一個
+                                var seen = {};
+                                var unique = [];
+                                r.variants.forEach(function(v) {
+                                    var key = v.color.replace(/s+/g,'') + '|' + v.size.replace(/s+/g,'');
+                                    if (!seen[key]) {
+                                        seen[key] = true;
+                                        unique.push(v);
+                                    }
                                 });
-                                r.variant_debug += ' | form: ' + formInfo;
+                                r.variants = unique;
                             }
 
-                            // Dedup: 同色同尺寸只留一個
+                            // === OG fallback ===
+                            if (!r.title) {
+                                var og = document.querySelector('meta[property="og:title"]');
+                                if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
+                            }
+                            if (r.images.length === 0) {
+                                var ogImg = document.querySelector('meta[property="og:image"]');
+                                if (ogImg && ogImg.content) r.images.push(ogImg.content);
+                            }
+
+                            if (!r.price) {
+                                document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
+                                    if (!r.price) {
+                                        var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
+                                        if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
+                                    }
+                                });
+                            }
+
                             var seen = {};
-                            var unique = [];
-                            r.variants.forEach(function(v) {
-                                var key = v.color.replace(/s+/g,'') + '|' + v.size.replace(/s+/g,'');
-                                if (!seen[key]) {
-                                    seen[key] = true;
-                                    unique.push(v);
+                            r.images.forEach(function(u){ seen[u] = true; });
+                            document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
+                                var src = img.src || img.getAttribute('data-src') || '';
+                                if (src && !seen[src] && img.naturalWidth > 50) {
+                                    r.images.push(src);
+                                    seen[src] = true;
                                 }
                             });
-                            r.variants = unique;
-                        }
+                            r.images = r.images.slice(0, 20);
 
-                        // === OG fallback ===
-                        if (!r.title) {
-                            var og = document.querySelector('meta[property="og:title"]');
-                            if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
-                        }
-                        if (r.images.length === 0) {
-                            var ogImg = document.querySelector('meta[property="og:image"]');
-                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                        }
+                            return r;
+                        """)
+                        # 印 variant debug 資訊
+                        if result:
+                            vd = result.get('variant_debug', '')
+                            vs = result.get('variants', [])
+                            print(f"[ZOZO] variant_debug: {vd}")
+                            print(f"[ZOZO] variants: {len(vs)} 個")
+                            for v in vs[:6]:
+                                print(f"  - {v.get('color','')} / {v.get('size','')} | stock={v.get('in_stock')} | sku={v.get('sku','')} | img={v.get('image','')[:60]}")
+                        return result
 
-                        if (!r.price) {
-                            document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
-                                if (!r.price) {
-                                    var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
-                                    if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                }
-                            });
-                        }
+                    if 'access denied' in (title or '').lower() and i >= 2:
+                        print("[ZOZO] 被 Akamai 擋住")
+                        break
 
-                        var seen = {};
-                        r.images.forEach(function(u){ seen[u] = true; });
-                        document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
-                            var src = img.src || img.getAttribute('data-src') || '';
-                            if (src && !seen[src] && img.naturalWidth > 50) {
-                                r.images.push(src);
-                                seen[src] = true;
-                            }
-                        });
-                        r.images = r.images.slice(0, 20);
+                print("[ZOZO] ⚠️ 未取得資料")
 
-                        return r;
-                    """)
-                    # 印 variant debug 資訊
-                    if result:
-                        vd = result.get('variant_debug', '')
-                        vs = result.get('variants', [])
-                        print(f"[ZOZO] variant_debug: {vd}")
-                        print(f"[ZOZO] variants: {len(vs)} 個")
-                        for v in vs[:6]:
-                            print(f"  - {v.get('color','')} / {v.get('size','')} | stock={v.get('in_stock')} | sku={v.get('sku','')} | img={v.get('image','')[:60]}")
-                    return result
+            except Exception as e:
+                print(f"[ZOZO] SeleniumBase 錯誤: {e}")
+                import traceback; traceback.print_exc()
+                # driver 可能壞了，標記重建
+                try:
+                    self._driver.quit()
+                except:
+                    pass
+                self._driver = None
 
-                if 'access denied' in (title or '').lower() and i >= 2:
-                    print("[ZOZO] 被 Akamai 擋住")
-                    break
-
-            print("[ZOZO] ⚠️ 未取得資料")
-
-        except Exception as e:
-            print(f"[ZOZO] SeleniumBase 錯誤: {e}")
-            import traceback; traceback.print_exc()
-        finally:
-            if driver:
-                try: driver.quit()
-                except: pass
-
-        return None
+            return None
 
     async def _scrape_zozo_via_proxy(self, url: str) -> ProductInfo | None:
         """備用：代理到外部 product-fetcher"""
