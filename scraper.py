@@ -1032,6 +1032,7 @@ class Scraper:
         import time as _time, base64
 
         with self._driver_lock:
+          for attempt in range(2):  # 最多重試 1 次
             try:
                 driver = self._ensure_driver()
                 if not driver:
@@ -1052,20 +1053,31 @@ class Scraper:
                 except:
                     pass
 
-                print(f"[MUJI] Chrome UC 載入: {url}")
+                print(f"[MUJI] Chrome UC 載入 (attempt {attempt+1}): {url}")
                 try:
                     driver.uc_open_with_reconnect(url, reconnect_time=6)
                 except Exception as e:
-                    print(f"[MUJI] uc_open: {type(e).__name__}: {e}")
+                    err_name = type(e).__name__
+                    print(f"[MUJI] uc_open: {err_name}: {e}")
+                    if "InvalidSession" in err_name or "invalid session" in str(e).lower():
+                        print(f"[MUJI] Session 已死，重建 driver...")
+                        self._driver = None
+                        self._create_driver()
+                        continue  # 重試
+                    # 其他錯誤繼續嘗試等待
 
                 # 等待渲染
                 html = ""
+                session_dead = False
                 for i in range(8):
                     _time.sleep(2)
                     try:
                         html = driver.page_source
                         title = driver.title
-                    except:
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__:
+                            session_dead = True
+                            break
                         continue
 
                     has_data = (
@@ -1079,6 +1091,12 @@ class Scraper:
                     if i >= 1 and has_data:
                         print(f"[MUJI] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes, title: {title[:40]})")
                         break
+
+                if session_dead:
+                    print(f"[MUJI] Session 死了，重建 driver...")
+                    self._driver = None
+                    self._create_driver()
+                    continue  # 重試
 
                 if not html or len(html) < 5000:
                     print(f"[MUJI] Chrome 頁面載入失敗 ({len(html)} bytes)")
@@ -1191,8 +1209,16 @@ class Scraper:
                 return bool(product.price_jpy)
 
             except Exception as e:
-                print(f"[MUJI] Chrome 錯誤: {type(e).__name__}: {e}")
+                err_name = type(e).__name__
+                print(f"[MUJI] Chrome 錯誤 (attempt {attempt+1}): {err_name}: {e}")
+                if "InvalidSession" in err_name and attempt == 0:
+                    print(f"[MUJI] 重建 driver 後重試...")
+                    self._driver = None
+                    self._create_driver()
+                    continue  # 重試
                 return False
+          # for loop 結束（兩次都失敗）
+          return False
 
     def _extract_muji_variants_from_html(self, driver, soup, product: ProductInfo, jan_code: str):
         """從 MUJI 渲染後的 HTML 提取尺寸/顏色 variants"""
