@@ -1458,56 +1458,35 @@ class Scraper:
             }
 
             html = None
-            for attempt in range(3):
-                # attempt 0: 直連; attempt 1: proxy; attempt 2: proxy + 更長 timeout
-                use_proxy = attempt >= 1 and PROXY_URL
-                try:
-                    timeout_val = 30.0 if attempt == 0 else 60.0
-                    client_kwargs = {
-                        "timeout": httpx.Timeout(timeout_val, connect=15.0),
-                        "follow_redirects": True,
-                    }
-                    if use_proxy:
-                        client_kwargs["proxy"] = PROXY_URL
-                        print(f"[BEAMS] attempt {attempt+1}: 使用 proxy ({PROXY_URL[:30]}...)")
-                    else:
-                        print(f"[BEAMS] attempt {attempt+1}: 直連 (timeout={timeout_val}s)")
-
-                    async with httpx.AsyncClient(**client_kwargs) as client:
-                        resp = await client.get(url, headers=headers)
-                        if resp.status_code != 200:
-                            print(f"[BEAMS] HTTP {resp.status_code} (attempt {attempt+1})")
-                            if attempt < 2:
-                                await asyncio.sleep(2)
-                                continue
-                            return product
+            # 先快速嘗試 httpx 直連（大部分網站能用）
+            try:
+                print(f"[BEAMS] httpx 直連嘗試 (timeout=20s)")
+                client_kwargs = {
+                    "timeout": httpx.Timeout(20.0, connect=10.0),
+                    "follow_redirects": True,
+                }
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
                         html = resp.text
-                        mode = "proxy" if use_proxy else "直連"
-                        print(f"[BEAMS] 頁面取得成功 ({mode}, {len(html)} bytes, attempt {attempt+1})")
-                        break
-                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as te:
-                    print(f"[BEAMS] {type(te).__name__} (attempt {attempt+1}/3, {'proxy' if use_proxy else '直連'})")
-                    if attempt < 2:
-                        await asyncio.sleep(2)
-                        continue
-                    raise
+                        print(f"[BEAMS] ✅ httpx 直連成功 ({len(html)} bytes)")
+                    else:
+                        print(f"[BEAMS] httpx HTTP {resp.status_code}")
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as te:
+                print(f"[BEAMS] httpx {type(te).__name__}，切換 Chrome UC...")
 
             if not html:
                 # httpx 全部失敗，用 Chrome UC fallback
-                if PROXY_URL:
-                    print(f"[BEAMS] httpx 全部 timeout，嘗試 Chrome UC...")
-                    try:
-                        html = await self._beams_chrome_fallback(url)
-                        if html:
-                            print(f"[BEAMS] ✅ Chrome UC 成功 ({len(html)} bytes)")
-                        else:
-                            print(f"[BEAMS] ❌ Chrome UC 也失敗")
-                            return product
-                    except Exception as e:
-                        print(f"[BEAMS] Chrome UC 錯誤: {type(e).__name__}: {e}")
+                print(f"[BEAMS] httpx 全部 timeout，嘗試 Chrome UC...")
+                try:
+                    html = await self._beams_chrome_fallback(url)
+                    if html:
+                        print(f"[BEAMS] ✅ Chrome UC 成功 ({len(html)} bytes)")
+                    else:
+                        print(f"[BEAMS] ❌ Chrome UC 也失敗")
                         return product
-                else:
-                    print(f"[BEAMS] ❌ 無法取得頁面（無 proxy 可用）")
+                except Exception as e:
+                    print(f"[BEAMS] Chrome UC 錯誤: {type(e).__name__}: {e}")
                     return product
 
             soup = BeautifulSoup(html, "html.parser")
