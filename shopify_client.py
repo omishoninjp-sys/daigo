@@ -13,7 +13,7 @@ class ShopifyClient:
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
-                                    variants=None):
+                                    variants=None, image_base64=""):
         shopify_variants = []
         options = []
         color_image_map = {}  # { "ブラウン": "https://..." }
@@ -91,7 +91,11 @@ class ShopifyClient:
         added_urls = set()
         color_img_urls = set(color_image_map.values())
 
-        if image_url:
+        if image_base64:
+            # MUJI 等被封鎖的網站：用 base64 上傳（Shopify 無法直接下載）
+            images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
+            print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
+        elif image_url:
             images.append({"src": image_url, "position": 1})
             added_urls.add(image_url)
 
