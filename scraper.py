@@ -55,6 +55,8 @@ def detect_platform(url: str) -> str:
         return "uniqlo"
     if "muji.com" in host:
         return "muji"
+    if "beams.co.jp" in host:
+        return "beams"
     if "rakuten.co.jp" in host:
         return "rakuten"
     return "generic"
@@ -172,6 +174,8 @@ class Scraper:
             product = await self._scrape_uniqlo(url)
         elif platform == "muji":
             product = await self._scrape_muji(url)
+        elif platform == "beams":
+            product = await self._scrape_beams(url)
         else:
             product = await self._scrape_with_playwright(url)
 
@@ -1432,6 +1436,188 @@ class Scraper:
 
         except Exception as e:
             print(f"[MUJI] variant 提取錯誤: {type(e).__name__}: {e}")
+
+    # ============================================================
+    # BEAMS - httpx + BeautifulSoup（SSR，不需要 JS）
+    # ============================================================
+    async def _scrape_beams(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+        try:
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja-JP,ja;q=0.9",
+                "Referer": "https://www.beams.co.jp/",
+            }
+
+            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    print(f"[BEAMS] HTTP {resp.status_code}")
+                    return product
+                html = resp.text
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # === 標題 ===
+            # 麵包屑最後一個 or 頁面內的商品名
+            breadcrumbs = soup.select("a")
+            for a in reversed(breadcrumbs):
+                href = a.get("href", "")
+                if "/item/" in href and a.get_text(strip=True):
+                    product.title = a.get_text(strip=True)
+                    break
+
+            if not product.title:
+                t = soup.find("title")
+                if t:
+                    txt = t.get_text(strip=True)
+                    # "BEAMS HEART（ビームス ハート）フィルム ライト フーディー..."
+                    # 取括號後的部分
+                    m = re.search(r'[）\)]\s*(.+?)(?:（|通販)', txt)
+                    if m:
+                        product.title = m.group(1).strip()
+                    else:
+                        product.title = txt.split("通販")[0].strip()
+
+            # === 品牌 ===
+            # 找 label link
+            for a in soup.find_all("a"):
+                href = a.get("href", "")
+                if re.match(r'^/[a-z]+$', href) and a.get_text(strip=True):
+                    brand = a.get_text(strip=True)
+                    if brand and "BEAMS" in brand.upper() and len(brand) < 40:
+                        product.brand = brand
+                        break
+            if not product.brand:
+                product.brand = "BEAMS"
+
+            # === 價格 ===
+            page_text = soup.get_text(" ", strip=True)
+            # ￥10,780（税込）or ¥10,780
+            for pat in [r'[￥¥]\s*([\d,]+)\s*[（(]税込', r'[￥¥]\s*([\d,]+)']:
+                pm = re.search(pat, page_text)
+                if pm:
+                    try:
+                        p = int(pm.group(1).replace(",", ""))
+                        if 100 < p < 500000:
+                            product.price_jpy = p
+                            break
+                    except:
+                        pass
+
+            # === 圖片 ===
+            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg (color image)
+            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_D_N.jpg (detail images)
+            images = []
+            for img in soup.find_all("img"):
+                src = img.get("src", "")
+                if "cdn.beams.co.jp/img/goods" in src:
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    if src not in images:
+                        images.append(src)
+
+            if images:
+                # 優先用 _C_ (color) 圖片當主圖
+                color_imgs = [i for i in images if "_C_" in i]
+                detail_imgs = [i for i in images if "_D_" in i]
+
+                if color_imgs:
+                    product.image_url = color_imgs[0]
+                    # 額外圖片：其他 color + 前幾張 detail
+                    product.extra_images = (color_imgs[1:] + detail_imgs[:5])
+                elif detail_imgs:
+                    product.image_url = detail_imgs[0]
+                    product.extra_images = detail_imgs[1:6]
+                else:
+                    product.image_url = images[0]
+                    product.extra_images = images[1:6]
+
+            # === Variants（顏色 × 尺寸） ===
+            colors = []
+            sizes = []
+
+            # 找顏色：h4 標籤 "BLACK", "NAVY" 等
+            for h4 in soup.find_all("h4"):
+                text = h4.get_text(strip=True)
+                if text and len(text) < 20 and re.match(r'^[A-Z\s]+$', text):
+                    colors.append(text)
+
+            # 找尺寸：從 "S／在庫あり", "M／在庫あり" 等
+            size_stock_pattern = re.findall(r'([A-Z0-9]+)／(在庫あり|在庫なし|残りわずか)', page_text)
+            seen_sizes = set()
+            for size, stock in size_stock_pattern:
+                if size in self._VALID_SIZES and size not in seen_sizes:
+                    sizes.append(size)
+                    seen_sizes.add(size)
+
+            if colors or sizes:
+                if not colors:
+                    colors = [""]
+                if not sizes:
+                    sizes = [""]
+
+                # 從文字裡建構 variant + 庫存
+                for color in colors:
+                    # 找這個顏色下面的 size+stock
+                    color_section = re.search(
+                        re.escape(color) + r'(.+?)(?:' + '|'.join(re.escape(c) for c in colors if c != color) + r'|店舗在庫|$)',
+                        page_text, re.DOTALL
+                    ) if color else None
+
+                    section_text = color_section.group(1) if color_section else page_text
+
+                    for size in sizes:
+                        stock_match = re.search(re.escape(size) + r'／(在庫あり|在庫なし|残りわずか)', section_text)
+                        in_stock = True
+                        if stock_match:
+                            in_stock = stock_match.group(1) != "在庫なし"
+
+                        # 找顏色對應的圖片
+                        color_img = ""
+                        if color:
+                            for img_url in images:
+                                if "_C_" in img_url:
+                                    # 第一張 _C_ 給第一個顏色，第二張給第二個
+                                    idx = colors.index(color)
+                                    c_imgs = [i for i in images if "_C_" in i]
+                                    if idx < len(c_imgs):
+                                        color_img = c_imgs[idx]
+                                    break
+
+                        label_parts = [p for p in [color, size] if p]
+                        variant = {
+                            "color": color,
+                            "size": size,
+                            "sku": f"beams-{'-'.join(label_parts)}" if label_parts else "beams",
+                            "price": product.price_jpy or 0,
+                            "in_stock": in_stock,
+                            "image": color_img,
+                        }
+                        product.variants.append(variant)
+
+                print(f"[BEAMS] ✅ {len(product.variants)} variants (colors={colors}, sizes={sizes})")
+            else:
+                print(f"[BEAMS] 未找到 variants")
+
+            # === 說明 ===
+            desc_parts = []
+            for text_block in page_text.split("■"):
+                if text_block.startswith("デザイン") or text_block.startswith("コーディネート") or text_block.startswith("素材"):
+                    desc_parts.append("■" + text_block[:200])
+            if desc_parts:
+                product.description = "\n".join(desc_parts)[:500]
+
+            if product.price_jpy:
+                print(f"[BEAMS] ✅ {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants")
+            else:
+                print(f"[BEAMS] ⚠️ 價格未找到")
+
+        except Exception as e:
+            print(f"[BEAMS] ❌ 錯誤: {type(e).__name__}: {e}")
+
+        return product
 
     # ============================================================
     # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
