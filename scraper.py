@@ -2328,13 +2328,21 @@ class Scraper:
                         
                         options = prod.get("options", [])
                         
+                        # 建立 image_id → src 對照表
+                        image_id_map = {}
+                        for img in images:
+                            image_id_map[img.get("id")] = img.get("src", "")
+                        
+                        # 建立 color → image 對照（從第一個出現的 variant 取）
+                        color_image_seen = {}
+                        
                         for v in variants:
                             option1 = v.get("option1", "") or ""
                             option2 = v.get("option2", "") or ""
                             option3 = v.get("option3", "") or ""
                             available = v.get("available", True)
                             
-                            variant_info = {"color": "", "size": "", "in_stock": available}
+                            variant_info = {"color": "", "size": "", "in_stock": available, "image": ""}
                             
                             for opt in options:
                                 opt_name = (opt.get("name", "") or "").lower()
@@ -2359,9 +2367,31 @@ class Scraper:
                                 else:
                                     variant_info["color"] = title
                             
+                            # 從 variant 的 image_id 或 featured_image 取得圖片
+                            v_image_id = v.get("image_id")
+                            featured = v.get("featured_image", {}) or {}
+                            
+                            img_src = ""
+                            if v_image_id and v_image_id in image_id_map:
+                                img_src = image_id_map[v_image_id]
+                            elif featured and featured.get("src"):
+                                img_src = featured["src"]
+                            
+                            color = variant_info["color"]
+                            if img_src and color and color not in color_image_seen:
+                                color_image_seen[color] = img_src
+                            
+                            # 每個 variant 都帶上對應顏色的圖片
+                            if color and color in color_image_seen:
+                                variant_info["image"] = color_image_seen[color]
+                            elif img_src:
+                                variant_info["image"] = img_src
+                            
                             product.variants.append(variant_info)
                     
-                    print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants" if product.price_jpy else f"[Shopify] ✅ {product.title[:40]}")
+                    color_count = len(set(v.get("color", "") for v in product.variants if v.get("color")))
+                    img_count = len(set(v.get("image", "") for v in product.variants if v.get("image")))
+                    print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants / {color_count} 顏色 / {img_count} 圖片" if product.price_jpy else f"[Shopify] ✅ {product.title[:40]}")
                     return product
                 else:
                     print(f"[Shopify] JSON API 回應 {resp.status_code}，fallback HTML")
