@@ -1548,8 +1548,8 @@ class Scraper:
                         pass
 
             # === 圖片 ===
-            # BEAMS CDN: /S1/ = 600x720, /S2/ = 小縮圖
-            # 嘗試 /L1/ 大圖，Shopify 上傳失敗再 fallback /S1/
+            # BEAMS CDN 尺寸: /S1/ = 60x72, /S2/ = 250x300, /L/ = 600x720, /O/ = 原圖(900+)
+            # 優先用 /O/ 原圖
             
             # 從 URL 提取商品 ID
             item_id_match = re.search(r'/(\d{10,})/?$', url.rstrip("/"))
@@ -1557,8 +1557,10 @@ class Scraper:
             
             images = []
             img_by_filename = {}
+            
+            # 優先掃 data-original（modal slideshow 的 /O/ 大圖）
             for img in soup.find_all("img"):
-                for attr in ["src", "data-src", "data-original", "data-lazy"]:
+                for attr in ["data-original", "src", "data-src", "data-lazy"]:
                     src = img.get(attr, "")
                     if not src or "cdn.beams.co.jp/img/goods" not in src:
                         continue
@@ -1566,58 +1568,32 @@ class Scraper:
                         src = "https:" + src
                     if item_id and item_id not in src:
                         continue
-                    # 排除 S2/S3 縮圖
-                    if "/S2/" in src or "/S3/" in src:
-                        continue
                     filename = src.split("/")[-1]
                     if not re.match(r'\d+_[CD]_\d+\.jpg', filename):
                         continue
-                    img_by_filename[filename] = src
-            
-            # 也掃 srcset
-            for img in soup.find_all("img", srcset=True):
-                for part in img.get("srcset", "").split(","):
-                    src = part.strip().split(" ")[0]
-                    if "cdn.beams.co.jp/img/goods" not in src:
-                        continue
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    if item_id and item_id not in src:
-                        continue
-                    filename = src.split("/")[-1]
-                    if filename in img_by_filename:
-                        continue
-                    img_by_filename[filename] = src
+                    # 優先度: /O/ > /L/ > /S1/ > /S2/
+                    def _size_priority(u):
+                        if "/O/" in u: return 4
+                        if "/L/" in u: return 3
+                        if "/S1/" in u: return 1
+                        if "/S2/" in u: return 0
+                        return 2
+                    
+                    if filename not in img_by_filename or _size_priority(src) > _size_priority(img_by_filename[filename]):
+                        img_by_filename[filename] = src
             
             images = list(img_by_filename.values())
             
-            # 如果沒有圖片，用 item_id 建構
+            # 如果只找到 /S1/，用 item_id 建構 /O/ URL
+            if images and all("/S1/" in img for img in images) and item_id:
+                images = [img.replace("/S1/", "/O/") for img in images]
+                print(f"[BEAMS] 圖片升級 S1 → O")
+            
+            # 如果完全沒圖，用 item_id 建構 /O/
             if not images and item_id:
-                base = f"https://cdn.beams.co.jp/img/goods/{item_id}/S1/{item_id}"
+                base = f"https://cdn.beams.co.jp/img/goods/{item_id}/O/{item_id}"
                 images = [f"{base}_C_1.jpg", f"{base}_C_2.jpg"]
-                print(f"[BEAMS] 圖片從 item_id 建構: {len(images)} 張")
-            
-            # 檢查 og:image（只用非 S2 的）
-            og_img = soup.find("meta", property="og:image")
-            if og_img and og_img.get("content"):
-                og_src = og_img["content"]
-                if og_src.startswith("//"):
-                    og_src = "https:" + og_src
-                if item_id and item_id in og_src and "/S2/" not in og_src and og_src not in images:
-                    print(f"[BEAMS] og:image 發現（非 S2）: {og_src}")
-                    images.insert(0, og_src)
-            
-            # 檢查 <source> / <picture> 元素
-            for source in soup.find_all("source"):
-                srcset = source.get("srcset", "")
-                if "cdn.beams.co.jp/img/goods" in srcset and item_id in srcset:
-                    for part in srcset.split(","):
-                        src = part.strip().split(" ")[0]
-                        if src.startswith("//"):
-                            src = "https:" + src
-                        filename = src.split("/")[-1]
-                        if src not in images and re.match(r'\d+_[CD]_\d+\.jpg', filename):
-                            images.append(src)
+                print(f"[BEAMS] 圖片從 item_id 建構 /O/: {len(images)} 張")
             
             print(f"[BEAMS] 圖片收集完成: {len(images)} 張, URLs: {[u.split('/')[-2] + '/' + u.split('/')[-1] for u in images[:5]]}")
 
@@ -1788,122 +1764,17 @@ class Scraper:
                     if i >= 1 and has_data and len(html) > 10000:
                         print(f"[BEAMS] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes)")
                         
-                        # 用 JS 完整偵測圖片 URL 和可用尺寸
+                        # 滾動頁面觸發 lazy loading（讓 modal slideshow 的 /O/ 圖載入）
                         try:
-                            # Step 1: 滾動整個頁面觸發 lazy loading
                             driver.execute_script("""
-                                (function() {
-                                    var h = document.body.scrollHeight;
-                                    for (var i = 0; i <= h; i += 300) {
-                                        window.scrollTo(0, i);
-                                    }
-                                    window.scrollTo(0, 0);
-                                })();
+                                window.scrollTo(0, document.body.scrollHeight / 3);
                             """)
-                            _time.sleep(3)
-                            
-                            # Step 2: 搜集所有 CDN 圖片 URL（包含 JS 變數、data 屬性）
-                            discovery_js = """
-                            var results = {};
-                            
-                            // 1. 搜全頁 HTML 找 CDN URL（含 JS 變數）
-                            var html = document.documentElement.innerHTML;
-                            var re = /cdn\\.beams\\.co\\.jp\\/img\\/goods\\/\\d+\\/([^/]+)\\/\\d+_[CD]_\\d+\\.jpg/g;
-                            var m;
-                            while (m = re.exec(html)) {
-                                var prefix = m[1];
-                                results['html_' + prefix] = (results['html_' + prefix] || 0) + 1;
-                            }
-                            
-                            // 2. 搜全部 img 的所有屬性
-                            var imgs = document.querySelectorAll('img');
-                            imgs.forEach(function(img) {
-                                for (var i = 0; i < img.attributes.length; i++) {
-                                    var val = img.attributes[i].value;
-                                    if (val.indexOf('cdn.beams.co.jp/img/goods') !== -1) {
-                                        var m2 = val.match(/\\/([A-Z0-9]+)\\/(\\d+_[CD]_\\d+\\.jpg)/);
-                                        if (m2) {
-                                            var key = 'attr_' + m2[1];
-                                            results[key] = (results[key] || 0) + 1;
-                                            if (!results['sample_' + m2[1]]) {
-                                                results['sample_' + m2[1]] = val.substring(0, 120);
-                                            }
-                                        }
-                                    }
-                                }
-                                // naturalWidth
-                                if (img.src && img.src.indexOf('cdn.beams.co.jp') !== -1 && img.naturalWidth > 0) {
-                                    var m3 = img.src.match(/\\/([A-Z0-9]+)\\/(\\d+_[CD]_\\d+\\.jpg)/);
-                                    if (m3) {
-                                        results['size_' + m3[1]] = img.naturalWidth + 'x' + img.naturalHeight;
-                                    }
-                                }
-                            });
-                            
-                            // 3. 搜 script 標籤
-                            var scripts = document.querySelectorAll('script');
-                            scripts.forEach(function(s) {
-                                var text = s.textContent || '';
-                                var re2 = /cdn\\.beams\\.co\\.jp\\/img\\/goods\\/\\d+\\/([^/'"]+)\\//g;
-                                var m4;
-                                while (m4 = re2.exec(text)) {
-                                    results['script_' + m4[1]] = (results['script_' + m4[1]] || 0) + 1;
-                                }
-                            });
-                            
-                            // 4. 測試不同 size prefix
-                            var itemId = window.location.pathname.match(/\\/(\\d{10,})\\/?$/);
-                            if (itemId) {
-                                results['item_id'] = itemId[1];
-                                var prefixes = ['S1','S2','M1','L1','O','B1','XL'];
-                                var testBase = 'https://cdn.beams.co.jp/img/goods/' + itemId[1] + '/';
-                                var testFile = itemId[1] + '_C_1.jpg';
-                                
-                                prefixes.forEach(function(p) {
-                                    var testImg = new Image();
-                                    testImg.src = testBase + p + '/' + testFile;
-                                    results['test_' + p] = testImg.src;
-                                });
-                            }
-                            
-                            return JSON.stringify(results);
-                            """
-                            js_result = driver.execute_script(discovery_js)
-                            print(f"[BEAMS] CDN 偵測結果: {js_result[:500]}")
-                            
-                            # Step 3: 等一下讓測試圖片載入
-                            _time.sleep(2)
-                            
-                            # Step 4: 檢查測試圖片的 naturalWidth
-                            size_test_js = """
-                            var results = {};
-                            var itemId = window.location.pathname.match(/\\/(\\d{10,})\\/?$/);
-                            if (itemId) {
-                                var prefixes = ['S1','S2','M1','L1','O','B1'];
-                                var testBase = 'https://cdn.beams.co.jp/img/goods/' + itemId[1] + '/';
-                                var testFile = itemId[1] + '_C_1.jpg';
-                                var promises = [];
-                                
-                                prefixes.forEach(function(p) {
-                                    var img = new Image();
-                                    img.src = testBase + p + '/' + testFile;
-                                    // 同步检查
-                                    if (img.complete && img.naturalWidth > 0) {
-                                        results[p] = img.naturalWidth + 'x' + img.naturalHeight;
-                                    } else {
-                                        results[p] = 'not_loaded';
-                                    }
-                                });
-                            }
-                            return JSON.stringify(results);
-                            """
-                            size_result = driver.execute_script(size_test_js)
-                            print(f"[BEAMS] 尺寸測試: {size_result}")
-                            
-                            # 重新取得含 lazy-loaded 圖片的 HTML
+                            _time.sleep(1)
+                            driver.execute_script("window.scrollTo(0, 0);")
+                            _time.sleep(1)
                             html = driver.page_source
                         except Exception as js_e:
-                            print(f"[BEAMS] JS 偵測: {type(js_e).__name__}: {js_e}")
+                            print(f"[BEAMS] JS 滾動: {type(js_e).__name__}")
                         
                         return html
 
