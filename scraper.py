@@ -1220,55 +1220,66 @@ class Scraper:
           # for loop 結束（兩次都失敗）
           return False
 
+    # 合法尺寸白名單（用來過濾 DOM 抓到的按鈕文字）
+    _VALID_SIZES = {
+        "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "5XL",
+        "F", "フリー", "FREE",
+        # 數字尺寸（褲子/鞋子等）
+        *[str(n) for n in range(19, 32)],  # 19-31 (鞋)
+        *[str(n) for n in range(55, 120, 5)],  # 55-115 (腰圍)
+    }
+
     def _extract_muji_variants_from_html(self, driver, soup, product: ProductInfo, jan_code: str):
         """從 MUJI 渲染後的 HTML 提取尺寸/顏色 variants"""
         try:
-            # 方法 1: 用 JS 從頁面元素抓取（最可靠）
-            variants_js = driver.execute_script("""
-                var results = {sizes: [], colors: []};
+            # === 用白名單過濾，避免抓到「カートに入れる」等按鈕 ===
+            valid_sizes_js = json.dumps(list(self._VALID_SIZES))
 
-                // 找尺寸按鈕/選項
-                var sizeEls = document.querySelectorAll(
-                    '[data-size], [class*="size"] button, [class*="size"] a, ' +
+            variants_js = driver.execute_script(f"""
+                var validSizes = new Set({valid_sizes_js});
+                var results = {{sizes: [], colors: []}};
+
+                // 找所有按鈕/連結文字，用白名單過濾出尺寸
+                var allBtns = document.querySelectorAll(
+                    '[class*="size"] button, [class*="size"] a, ' +
                     '[class*="Size"] button, [class*="Size"] a, ' +
-                    'button[class*="size"], .cmdty-size-list button, ' +
-                    '.cmdty-size-list a, .size-selector button, ' +
-                    '[aria-label*="サイズ"], [aria-label*="size"]'
+                    '.cmdty-size-list button, .cmdty-size-list a'
                 );
-                sizeEls.forEach(function(el) {
+                allBtns.forEach(function(el) {{
                     var text = el.textContent.trim();
-                    if (text && text.length < 10 && !results.sizes.includes(text)) {
+                    if (validSizes.has(text) && !results.sizes.includes(text)) {{
                         results.sizes.push(text);
-                    }
-                });
+                    }}
+                }});
 
-                // 找顏色按鈕/選項
+                // 找顏色：MUJI 用色塊按鈕，通常有 aria-label 或 title 包含顏色名
                 var colorEls = document.querySelectorAll(
-                    '[data-color], [class*="color"] button, [class*="color"] a, ' +
-                    '[class*="Color"] button, [class*="Color"] a, ' +
-                    '.cmdty-color-list button, .color-selector button, ' +
-                    '[aria-label*="カラー"], [aria-label*="color"]'
+                    '[class*="color"] button, [class*="Color"] button, ' +
+                    '.cmdty-color-list button, [aria-label*="カラー"]'
                 );
-                colorEls.forEach(function(el) {
-                    var text = el.textContent.trim();
-                    if (text && text.length < 20 && !results.colors.includes(text)) {
+                colorEls.forEach(function(el) {{
+                    var text = (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent).trim();
+                    // 過濾掉太長或包含動作文字的
+                    if (text && text.length < 15 && !text.includes('カート') && 
+                        !text.includes('閉じる') && !text.includes('確認') &&
+                        !results.colors.includes(text)) {{
                         results.colors.push(text);
-                    }
-                });
+                    }}
+                }});
 
-                // 方法 2: 從 select 元素
-                document.querySelectorAll('select').forEach(function(sel) {
+                // 從 select 元素
+                document.querySelectorAll('select').forEach(function(sel) {{
                     var label = (sel.getAttribute('aria-label') || sel.name || '').toLowerCase();
-                    sel.querySelectorAll('option').forEach(function(opt) {
+                    sel.querySelectorAll('option').forEach(function(opt) {{
                         var val = opt.textContent.trim();
                         if (!val || val.includes('選択') || val.includes('選んで')) return;
-                        if (label.includes('size') || label.includes('サイズ')) {
-                            if (!results.sizes.includes(val)) results.sizes.push(val);
-                        } else if (label.includes('color') || label.includes('カラー')) {
+                        if (label.includes('size') || label.includes('サイズ')) {{
+                            if (validSizes.has(val) && !results.sizes.includes(val)) results.sizes.push(val);
+                        }} else if (label.includes('color') || label.includes('カラー')) {{
                             if (!results.colors.includes(val)) results.colors.push(val);
-                        }
-                    });
-                });
+                        }}
+                    }});
+                }});
 
                 return results;
             """)
@@ -1278,10 +1289,9 @@ class Scraper:
 
             print(f"[MUJI] JS variants: sizes={sizes}, colors={colors}")
 
-            # 方法 2: 從 HTML 文字找尺寸 pattern（fallback）
+            # fallback: 從 HTML 文字找尺寸 pattern
             if not sizes:
                 page_text = soup.get_text(" ", strip=True)
-                # 常見尺寸：XS S M L XL XXL 或數字尺寸
                 size_section = re.search(r'サイズ[：:\s]*(?:[\w・]+\s*)?((?:(?:XS|S|M|L|XL|XXL|3XL|4XL|F|フリー)\s*[/／・]?\s*)+)', page_text)
                 if size_section:
                     sizes = re.findall(r'\b(XS|S|M|L|XL|XXL|3XL|4XL|F|フリー)\b', size_section.group(1))
