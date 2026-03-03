@@ -1566,11 +1566,11 @@ class Scraper:
                         src = "https:" + src
                     if item_id and item_id not in src:
                         continue
+                    # 排除 S2/S3 縮圖
+                    if "/S2/" in src or "/S3/" in src:
+                        continue
                     filename = src.split("/")[-1]
                     if not re.match(r'\d+_[CD]_\d+\.jpg', filename):
-                        continue
-                    # 同檔名只保留一個，優先大圖
-                    if "/S2/" in src and filename in img_by_filename:
                         continue
                     img_by_filename[filename] = src
             
@@ -1597,15 +1597,14 @@ class Scraper:
                 images = [f"{base}_C_1.jpg", f"{base}_C_2.jpg"]
                 print(f"[BEAMS] 圖片從 item_id 建構: {len(images)} 張")
             
-            # 檢查 og:image（通常是高解析度）
+            # 檢查 og:image（只用非 S2 的）
             og_img = soup.find("meta", property="og:image")
             if og_img and og_img.get("content"):
                 og_src = og_img["content"]
                 if og_src.startswith("//"):
                     og_src = "https:" + og_src
-                if item_id and item_id in og_src and og_src not in images:
-                    print(f"[BEAMS] og:image 發現: {og_src}")
-                    # og:image 通常是更大的圖，放到最前面
+                if item_id and item_id in og_src and "/S2/" not in og_src and og_src not in images:
+                    print(f"[BEAMS] og:image 發現（非 S2）: {og_src}")
                     images.insert(0, og_src)
             
             # 檢查 <source> / <picture> 元素
@@ -1624,8 +1623,8 @@ class Scraper:
 
             if images:
                 # _C_ = 顏色主圖（每色一張），_D_ = 模特兒細節照（很多張）
-                color_imgs = [i for i in images if "_C_" in i]
-                detail_imgs = [i for i in images if "_D_" in i]
+                color_imgs = sorted([i for i in images if "_C_" in i], key=lambda x: x.split("/")[-1])
+                detail_imgs = sorted([i for i in images if "_D_" in i], key=lambda x: x.split("/")[-1])
 
                 if color_imgs:
                     product.image_url = color_imgs[0]
