@@ -1445,17 +1445,49 @@ class Scraper:
         try:
             headers = {
                 "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ja-JP,ja;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br",
                 "Referer": "https://www.beams.co.jp/",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Cache-Control": "max-age=0",
+                "Connection": "keep-alive",
             }
 
-            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code != 200:
-                    print(f"[BEAMS] HTTP {resp.status_code}")
-                    return product
-                html = resp.text
+            html = None
+            for attempt in range(3):
+                try:
+                    client_kwargs = {
+                        "timeout": httpx.Timeout(45.0, connect=15.0),
+                        "follow_redirects": True,
+                    }
+                    if PROXY_URL:
+                        client_kwargs["proxy"] = PROXY_URL
+
+                    async with httpx.AsyncClient(**client_kwargs) as client:
+                        resp = await client.get(url, headers=headers)
+                        if resp.status_code != 200:
+                            print(f"[BEAMS] HTTP {resp.status_code} (attempt {attempt+1})")
+                            if attempt < 2:
+                                await asyncio.sleep(2)
+                                continue
+                            return product
+                        html = resp.text
+                        print(f"[BEAMS] 頁面取得成功 ({len(html)} bytes, attempt {attempt+1})")
+                        break
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as te:
+                    print(f"[BEAMS] {type(te).__name__} (attempt {attempt+1}/3)")
+                    if attempt < 2:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    raise
+
+            if not html:
+                print(f"[BEAMS] ❌ 無法取得頁面")
+                return product
 
             soup = BeautifulSoup(html, "html.parser")
 
