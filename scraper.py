@@ -31,6 +31,7 @@ class ProductInfo:
     extra_images: list = field(default_factory=list)
     variants: list = field(default_factory=list)
     image_base64: str = ""  # 當 Shopify 無法直接下載圖片時，用 base64 上傳
+    is_adult: bool = False   # 成人商品標記
 
     def to_dict(self):
         d = asdict(self)
@@ -137,19 +138,48 @@ class Scraper:
 
         return self._driver
 
+    # 成人商品關鍵字（日文 + 中文 + 英文）
+    _ADULT_KEYWORDS = [
+        # 日文
+        "オナホ", "オナニー", "バイブ", "ローター", "アダルト",
+        "大人のおもちゃ", "性具", "ラブグッズ", "コンドーム",
+        "潤滑", "ローション", "電動マッサージ", "アダルトグッズ",
+        "セクシーランジェリー", "セクシー下着", "ボディストッキング",
+        "SM", "拘束", "エッチ", "18禁", "R-18", "R18",
+        # 英文
+        "masturbat", "vibrator", "dildo", "adult toy", "sex toy",
+        "fleshlight", "onahole", "tenga", "lube ", "lubricant",
+        "bondage", "fetish",
+    ]
+
+    def _detect_adult(self, product: ProductInfo) -> bool:
+        """偵測是否為成人商品"""
+        text = f"{product.title} {product.description} {product.source_url}".lower()
+        for kw in self._ADULT_KEYWORDS:
+            if kw.lower() in text:
+                print(f"[Adult] ⚠️ 偵測到成人商品關鍵字: '{kw}'")
+                return True
+        return False
+
     async def scrape(self, url: str) -> ProductInfo:
         platform = detect_platform(url)
 
         if platform == "zozotown":
-            return await self._scrape_zozotown(url)
+            product = await self._scrape_zozotown(url)
         elif platform == "amazon":
-            return await self._scrape_amazon(url)
+            product = await self._scrape_amazon(url)
         elif platform == "uniqlo":
-            return await self._scrape_uniqlo(url)
+            product = await self._scrape_uniqlo(url)
         elif platform == "muji":
-            return await self._scrape_muji(url)
+            product = await self._scrape_muji(url)
         else:
-            return await self._scrape_with_playwright(url)
+            product = await self._scrape_with_playwright(url)
+
+        # 成人商品偵測
+        if product.title and self._detect_adult(product):
+            product.is_adult = True
+
+        return product
 
     # ============================================================
     # Amazon.co.jp - requests（不需要瀏覽器，速度快）
@@ -208,6 +238,7 @@ class Scraper:
 
                 if is_age_gate:
                     print(f"[Amazon] 偵測到年齡確認頁面 (url: {final_url[:80]})")
+                    product.is_adult = True  # age gate 本身就是成人指標
                     age_soup = BeautifulSoup(html, "html.parser")
 
                     # 方法 1: 找確認表單 (form POST)

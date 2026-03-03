@@ -13,7 +13,7 @@ class ShopifyClient:
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
-                                    variants=None, image_base64=""):
+                                    variants=None, image_base64="", extra_tags=None):
         shopify_variants = []
         options = []
         color_image_map = {}  # { "ブラウン": "https://..." }
@@ -85,6 +85,9 @@ class ShopifyClient:
 
         if brand:
             product_data["product"]["tags"].append(brand)
+
+        if extra_tags:
+            product_data["product"]["tags"].extend(extra_tags)
 
         # === 圖片：先只放主圖和額外圖（不放顏色圖片，之後用 variant_ids 綁定）===
         images = []
