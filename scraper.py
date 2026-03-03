@@ -59,6 +59,9 @@ def detect_platform(url: str) -> str:
         return "beams"
     if "rakuten.co.jp" in host:
         return "rakuten"
+    # Shopify 日本商店
+    if "nanouniverse" in host or "store.nanouniverse.jp" in host:
+        return "shopify_jp"
     return "generic"
 
 
@@ -176,6 +179,8 @@ class Scraper:
             product = await self._scrape_muji(url)
         elif platform == "beams":
             product = await self._scrape_beams(url)
+        elif platform == "shopify_jp":
+            product = await self._scrape_shopify_jp(url)
         else:
             product = await self._scrape_with_playwright(url)
 
@@ -2261,12 +2266,126 @@ class Scraper:
             return None
 
     # ============================================================
+    # ============================================================
+    # Shopify 日本商店（nano universe 等）- 用 product.json API
+    # ============================================================
+    async def _scrape_shopify_jp(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+        parsed = urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.hostname}"
+        
+        # 從 URL 取得 product handle（/products/{handle}）
+        path_parts = parsed.path.strip("/").split("/")
+        if "products" in path_parts:
+            idx = path_parts.index("products")
+            handle = path_parts[idx + 1] if idx + 1 < len(path_parts) else ""
+        else:
+            handle = ""
+        
+        if not handle:
+            print(f"[Shopify] ❌ 無法從 URL 取得 product handle")
+            return await self._scrape_with_playwright(url)
+        
+        # 嘗試 Shopify JSON API
+        json_url = f"{base_url}/products/{handle}.json"
+        print(f"[Shopify] 嘗試 JSON API: {json_url}")
+        
+        try:
+            async with httpx.AsyncClient(
+                timeout=SCRAPE_TIMEOUT,
+                follow_redirects=True,
+                headers={
+                    'User-Agent': USER_AGENT,
+                    'Accept': 'application/json',
+                    'Accept-Language': 'ja,en-US;q=0.9',
+                },
+            ) as client:
+                resp = await client.get(json_url)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    prod = data.get("product", {})
+                    
+                    # 基本資訊
+                    product.title = prod.get("title", "")
+                    product.brand = prod.get("vendor", "")
+                    product.description = (prod.get("body_html") or "")[:500]
+                    if product.description:
+                        product.description = re.sub(r'<[^>]+>', '', product.description).strip()
+                    
+                    # 圖片
+                    images = prod.get("images", [])
+                    if images:
+                        product.image_url = images[0].get("src", "")
+                        product.extra_images = [img.get("src", "") for img in images[1:5] if img.get("src")]
+                    
+                    # Variants
+                    variants = prod.get("variants", [])
+                    if variants:
+                        first_price = variants[0].get("price", "")
+                        if first_price:
+                            product.price_jpy = self._normalize_price(first_price)
+                        
+                        options = prod.get("options", [])
+                        
+                        for v in variants:
+                            option1 = v.get("option1", "") or ""
+                            option2 = v.get("option2", "") or ""
+                            option3 = v.get("option3", "") or ""
+                            available = v.get("available", True)
+                            
+                            variant_info = {"color": "", "size": "", "in_stock": available}
+                            
+                            for opt in options:
+                                opt_name = (opt.get("name", "") or "").lower()
+                                opt_pos = opt.get("position", 0)
+                                val = ""
+                                if opt_pos == 1: val = option1
+                                elif opt_pos == 2: val = option2
+                                elif opt_pos == 3: val = option3
+                                
+                                if any(k in opt_name for k in ["色", "color", "カラー", "colour"]):
+                                    variant_info["color"] = val
+                                elif any(k in opt_name for k in ["サイズ", "size", "寸"]):
+                                    variant_info["size"] = val
+                                elif not variant_info["color"]:
+                                    variant_info["color"] = val
+                            
+                            # 只有一個 option 時判斷顏色/尺寸
+                            title = v.get("title", "")
+                            if not variant_info["color"] and not variant_info["size"] and title:
+                                if re.match(r'^[XSML0-9]+$', title.upper().strip()):
+                                    variant_info["size"] = title
+                                else:
+                                    variant_info["color"] = title
+                            
+                            product.variants.append(variant_info)
+                    
+                    print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants" if product.price_jpy else f"[Shopify] ✅ {product.title[:40]}")
+                    return product
+                else:
+                    print(f"[Shopify] JSON API 回應 {resp.status_code}，fallback HTML")
+        except Exception as e:
+            print(f"[Shopify] JSON API 失敗: {type(e).__name__}: {e}")
+        
+        # Fallback: 用通用 HTML 解析
+        return await self._scrape_with_playwright(url)
+
     # 通用 - Playwright（其他日本網站）
     # ============================================================
     async def _scrape_with_playwright(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
         try:
             html = await self._fetch_playwright(url)
+            
+            # 自動偵測 Shopify 商店 → 用 JSON API 抓 variants
+            if 'Shopify.shop' in html or '"shopify"' in html.lower() or 'cdn.shopify.com' in html:
+                print(f"[Generic] 偵測到 Shopify 商店，嘗試 JSON API")
+                shopify_product = await self._scrape_shopify_jp(url)
+                if shopify_product.title and shopify_product.variants:
+                    return shopify_product
+                print(f"[Generic] Shopify JSON 失敗，fallback HTML 解析")
+            
             soup = BeautifulSoup(html, "html.parser")
 
             # JSON-LD
