@@ -1548,48 +1548,79 @@ class Scraper:
                         pass
 
             # === 圖片 ===
-            # BEAMS CDN 路徑格式:
-            #   cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg  → 小圖 (600x720)
-            #   cdn.beams.co.jp/img/goods/{id}/L1/{id}_C_1.jpg  → 大圖
-            #   cdn.beams.co.jp/img/goods/{id}/{id}_C_1.jpg     → 原圖
-            # _C_N = 第 N 個顏色, _D_N = 第 N 張細節照
+            # BEAMS CDN: /S1/ = 600x720, /S2/ = 小縮圖
+            # 嘗試 /L1/ 大圖，Shopify 上傳失敗再 fallback /S1/
             
             # 從 URL 提取商品 ID
             item_id_match = re.search(r'/(\d{10,})/?$', url.rstrip("/"))
             item_id = item_id_match.group(1) if item_id_match else ""
             
-            def _beams_hires(img_url):
-                """保留 S1 路徑（確認可用），不冒險換路徑"""
-                return img_url
-            
             images = []
-            seen_filenames = set()
+            img_by_filename = {}
             for img in soup.find_all("img"):
-                src = img.get("src", "") or img.get("data-src", "")
-                if not src or "cdn.beams.co.jp/img/goods" not in src:
-                    continue
-                if src.startswith("//"):
-                    src = "https:" + src
-                # 只抓當前商品的圖片
-                if item_id and item_id not in src:
-                    continue
-                # 取檔名去重（不同 size prefix 的同一張圖）
-                filename = src.split("/")[-1]
-                if filename in seen_filenames:
-                    continue
-                seen_filenames.add(filename)
-                # 升級為高解析度
-                src = _beams_hires(src)
-                if src not in images:
-                    images.append(src)
+                for attr in ["src", "data-src", "data-original", "data-lazy"]:
+                    src = img.get(attr, "")
+                    if not src or "cdn.beams.co.jp/img/goods" not in src:
+                        continue
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    if item_id and item_id not in src:
+                        continue
+                    filename = src.split("/")[-1]
+                    if not re.match(r'\d+_[CD]_\d+\.jpg', filename):
+                        continue
+                    # 同檔名只保留一個，優先大圖
+                    if "/S2/" in src and filename in img_by_filename:
+                        continue
+                    img_by_filename[filename] = src
             
-            # 如果 HTML 中沒找到圖片（lazy loading），用 item_id 直接建構
+            # 也掃 srcset
+            for img in soup.find_all("img", srcset=True):
+                for part in img.get("srcset", "").split(","):
+                    src = part.strip().split(" ")[0]
+                    if "cdn.beams.co.jp/img/goods" not in src:
+                        continue
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    if item_id and item_id not in src:
+                        continue
+                    filename = src.split("/")[-1]
+                    if filename in img_by_filename:
+                        continue
+                    img_by_filename[filename] = src
+            
+            images = list(img_by_filename.values())
+            
+            # 如果沒有圖片，用 item_id 建構
             if not images and item_id:
-                base = f"https://cdn.beams.co.jp/img/goods/{item_id}/{item_id}"
-                images = [f"{base}_C_1.jpg"]  # 至少第一個顏色
-                # 嘗試第二個顏色
-                images.append(f"{base}_C_2.jpg")
+                base = f"https://cdn.beams.co.jp/img/goods/{item_id}/S1/{item_id}"
+                images = [f"{base}_C_1.jpg", f"{base}_C_2.jpg"]
                 print(f"[BEAMS] 圖片從 item_id 建構: {len(images)} 張")
+            
+            # 檢查 og:image（通常是高解析度）
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content"):
+                og_src = og_img["content"]
+                if og_src.startswith("//"):
+                    og_src = "https:" + og_src
+                if item_id and item_id in og_src and og_src not in images:
+                    print(f"[BEAMS] og:image 發現: {og_src}")
+                    # og:image 通常是更大的圖，放到最前面
+                    images.insert(0, og_src)
+            
+            # 檢查 <source> / <picture> 元素
+            for source in soup.find_all("source"):
+                srcset = source.get("srcset", "")
+                if "cdn.beams.co.jp/img/goods" in srcset and item_id in srcset:
+                    for part in srcset.split(","):
+                        src = part.strip().split(" ")[0]
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        filename = src.split("/")[-1]
+                        if src not in images and re.match(r'\d+_[CD]_\d+\.jpg', filename):
+                            images.append(src)
+            
+            print(f"[BEAMS] 圖片收集完成: {len(images)} 張, URLs: {[u.split('/')[-2] + '/' + u.split('/')[-1] for u in images[:5]]}")
 
             if images:
                 # _C_ = 顏色主圖（每色一張），_D_ = 模特兒細節照（很多張）
@@ -1757,6 +1788,43 @@ class Scraper:
 
                     if i >= 1 and has_data and len(html) > 10000:
                         print(f"[BEAMS] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes)")
+                        
+                        # 用 JS 滾動頁面 + 測試大圖 URL
+                        try:
+                            # 滾動觸發 lazy loading
+                            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+                            _time.sleep(1)
+                            driver.execute_script("window.scrollTo(0, 0);")
+                            _time.sleep(0.5)
+                            
+                            # 重新取得含 lazy-loaded 圖片的 HTML
+                            html = driver.page_source
+                            
+                            # 測試 L1 大圖是否存在
+                            test_js = """
+                            var results = [];
+                            var imgs = document.querySelectorAll('img[src*="cdn.beams.co.jp/img/goods"]');
+                            imgs.forEach(function(img) {
+                                var src = img.src || '';
+                                if (src && src.indexOf('/S1/') === -1 && src.indexOf('/S2/') === -1) {
+                                    results.push(src);
+                                }
+                                // check naturalWidth
+                                if (img.naturalWidth > 0) {
+                                    results.push('SIZE:' + src + ':' + img.naturalWidth + 'x' + img.naturalHeight);
+                                }
+                            });
+                            // check og:image
+                            var og = document.querySelector('meta[property="og:image"]');
+                            if (og && og.content) results.push('OG:' + og.content);
+                            return results.join('|||');
+                            """
+                            js_result = driver.execute_script(test_js)
+                            if js_result:
+                                print(f"[BEAMS] JS 圖片資訊: {js_result[:300]}")
+                        except Exception as js_e:
+                            print(f"[BEAMS] JS 執行: {type(js_e).__name__}")
+                        
                         return html
 
                 if session_dead:
