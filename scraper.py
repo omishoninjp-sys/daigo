@@ -1491,26 +1491,35 @@ class Scraper:
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # === 標題 ===
-            # 麵包屑最後一個 or 頁面內的商品名
-            breadcrumbs = soup.select("a")
-            for a in reversed(breadcrumbs):
-                href = a.get("href", "")
-                if "/item/" in href and a.get_text(strip=True):
-                    product.title = a.get_text(strip=True)
-                    break
+            # 從 URL 提取商品路徑用於匹配
+            url_path = url.rstrip("/").split("/item/")[-1] if "/item/" in url else ""
 
-            if not product.title:
-                t = soup.find("title")
-                if t:
-                    txt = t.get_text(strip=True)
-                    # "BEAMS HEART（ビームス ハート）フィルム ライト フーディー..."
-                    # 取括號後的部分
-                    m = re.search(r'[）\)]\s*(.+?)(?:（|通販)', txt)
-                    if m:
-                        product.title = m.group(1).strip()
-                    else:
-                        product.title = txt.split("通販")[0].strip()
+            # === 標題 ===
+            # 方法 1: <title> tag（最可靠）
+            # 格式: "BEAMS HEART（ビームス ハート）フィルム ライト フーディー（防風・撥水加工）（ブルゾン ブルゾン）通販｜BEAMS"
+            t = soup.find("title")
+            if t:
+                txt = t.get_text(strip=True)
+                # 去掉 "通販｜BEAMS" 後綴
+                txt = re.split(r'通販[｜|]', txt)[0].strip()
+                # 去掉最後的（カテゴリ カテゴリ）
+                txt = re.sub(r'（[^）]*）\s*$', '', txt).strip()
+                # 去掉品牌名（日文括號部分）: "BEAMS HEART（ビームス ハート）" → "BEAMS HEART "
+                txt = re.sub(r'（[ァ-ヶー\s・]+）', ' ', txt).strip()
+                # 清理多餘空白
+                txt = re.sub(r'\s+', ' ', txt)
+                if txt:
+                    product.title = txt
+
+            # 方法 2: 麵包屑 — 只匹配當前商品 URL
+            if not product.title and url_path:
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href", "")
+                    if url_path in href and a.get_text(strip=True):
+                        candidate = a.get_text(strip=True)
+                        if len(candidate) > 3 and len(candidate) < 200:
+                            product.title = candidate
+                            break
 
             # === 品牌 ===
             # 找 label link
@@ -1539,16 +1548,29 @@ class Scraper:
                         pass
 
             # === 圖片 ===
-            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg (color image)
-            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_D_N.jpg (detail images)
+            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg (color, large)
+            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_D_N.jpg (detail, large)
+            # cdn.beams.co.jp/img/goods/{id}/S2/{id}_C_1.jpg (thumbnail, skip)
+            
+            # 從 URL 提取商品 ID
+            item_id_match = re.search(r'/(\d{10,})/?$', url.rstrip("/"))
+            item_id = item_id_match.group(1) if item_id_match else ""
+            
             images = []
             for img in soup.find_all("img"):
-                src = img.get("src", "")
-                if "cdn.beams.co.jp/img/goods" in src:
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    if src not in images:
-                        images.append(src)
+                src = img.get("src", "") or img.get("data-src", "")
+                if not src or "cdn.beams.co.jp/img/goods" not in src:
+                    continue
+                if src.startswith("//"):
+                    src = "https:" + src
+                # 只抓當前商品的圖片
+                if item_id and item_id not in src:
+                    continue
+                # 只要 S1（大圖），排除 S2 等縮圖
+                if "/S2/" in src or "/S3/" in src:
+                    continue
+                if src not in images:
+                    images.append(src)
 
             if images:
                 # 優先用 _C_ (color) 圖片當主圖
