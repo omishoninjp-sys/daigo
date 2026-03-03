@@ -178,13 +178,91 @@ class Scraper:
                 "Upgrade-Insecure-Requests": "1",
             }
 
-            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=True, cookies={
+                "session-id": "355-0769823-1641625",  # 假 session
+                "i18n-prefs": "JPY",
+                "lc-acbjp": "ja_JP",
+                "sp-cdn": '"L5Z9:JP"',
+            }) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code != 200:
+                    print(f"[Amazon] HTTP {resp.status_code}")
                     return product
                 if "captcha" in str(resp.url).lower():
+                    print(f"[Amazon] CAPTCHA 偵測到")
                     return product
                 html = resp.text
+                final_url = str(resp.url)
+
+                # === 年齡確認頁面（成人商品） ===
+                html_lower = html.lower()
+                url_lower = final_url.lower()
+                age_gate_indicators = [
+                    "black_curtain", "age_verification", "年齢確認",
+                    "18歳以上", "アダルト", "over18", "adult-verification",
+                ]
+                is_age_gate = any(ind in html_lower or ind in url_lower for ind in age_gate_indicators)
+                # 也檢查：沒有 productTitle 但有確認類按鈕
+                if not is_age_gate and "productTitle" not in html and ("はい" in html or "確認" in html):
+                    is_age_gate = True
+
+                if is_age_gate:
+                    print(f"[Amazon] 偵測到年齡確認頁面 (url: {final_url[:80]})")
+                    age_soup = BeautifulSoup(html, "html.parser")
+
+                    # 方法 1: 找確認表單 (form POST)
+                    age_form = age_soup.find("form")
+                    if age_form:
+                        action = age_form.get("action", "")
+                        if not action.startswith("http"):
+                            action = f"https://www.amazon.co.jp{action}"
+                        # 收集隱藏欄位
+                        form_data = {}
+                        for inp in age_form.find_all("input"):
+                            name = inp.get("name")
+                            if name:
+                                form_data[name] = inp.get("value", "")
+                        try:
+                            resp2 = await client.post(action, data=form_data, headers=headers)
+                            if resp2.status_code == 200:
+                                html = resp2.text
+                                print(f"[Amazon] 年齡確認 POST 成功")
+                        except:
+                            pass
+
+                    # 方法 2: 找確認連結 (GET redirect)
+                    if "productTitle" not in html:
+                        for a in age_soup.find_all("a", href=True):
+                            href = a.get("href", "")
+                            text = a.get_text(strip=True)
+                            if ("はい" in text or "18" in text or "yes" in text.lower()) and href:
+                                if not href.startswith("http"):
+                                    href = f"https://www.amazon.co.jp{href}"
+                                try:
+                                    resp3 = await client.get(href, headers=headers)
+                                    if resp3.status_code == 200:
+                                        html = resp3.text
+                                        print(f"[Amazon] 年齡確認 GET 成功")
+                                except:
+                                    pass
+                                break
+
+                    # 方法 3: 直接用 ASIN 短連結重試（帶 session cookies）
+                    asin = am.group(1)
+                    if "productTitle" not in html:
+                        try:
+                            resp4 = await client.get(
+                                f"https://www.amazon.co.jp/dp/{asin}",
+                                headers=headers,
+                            )
+                            if resp4.status_code == 200 and "productTitle" in resp4.text:
+                                html = resp4.text
+                                print(f"[Amazon] 重試 dp/{asin} 成功")
+                        except:
+                            pass
+
+                    if "productTitle" not in html:
+                        print(f"[Amazon] ⚠️ 年齡確認繞過失敗，HTML 前200字: {html[:200]}")
 
             soup = BeautifulSoup(html, "html.parser")
 
