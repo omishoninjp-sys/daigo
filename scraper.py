@@ -62,6 +62,9 @@ def detect_platform(url: str) -> str:
     # Shopify 日本商店
     if "nanouniverse" in host or "store.nanouniverse.jp" in host:
         return "shopify_jp"
+    # Mercari
+    if "mercari.com" in host or "jp.mercari.com" in host:
+        return "mercari"
     return "generic"
 
 
@@ -181,6 +184,8 @@ class Scraper:
             product = await self._scrape_beams(url)
         elif platform == "shopify_jp":
             product = await self._scrape_shopify_jp(url)
+        elif platform == "mercari":
+            product = await self._scrape_mercari(url)
         else:
             product = await self._scrape_with_playwright(url)
 
@@ -2266,6 +2271,354 @@ class Scraper:
             return None
 
     # ============================================================
+    # Mercari（C2C 二手市場）- Chrome UC 渲染 SPA
+    # ============================================================
+    async def _scrape_mercari(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+        
+        # 從 URL 提取 item_id
+        m = re.search(r'/item/(m\d+)', url)
+        item_id = m.group(1) if m else ""
+        
+        try:
+            # === 方法 1: 嘗試用 __NEXT_DATA__ 或 API（快速） ===
+            html = None
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(15.0, connect=8.0),
+                    follow_redirects=True,
+                    headers={
+                        'User-Agent': USER_AGENT,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'ja,en-US;q=0.9',
+                    },
+                ) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        html = resp.text
+                        print(f"[Mercari] httpx 取得 HTML ({len(html)} bytes)")
+                        
+                        # 嘗試從 __NEXT_DATA__ 提取
+                        if self._extract_mercari_next_data(html, product):
+                            print(f"[Mercari] ✅ __NEXT_DATA__ 解析成功")
+                            return product
+                        
+                        # 嘗試 JSON-LD / OG tags
+                        soup = BeautifulSoup(html, "html.parser")
+                        self._extract_json_ld(soup, product)
+                        self._extract_og_tags(soup, product)
+                        if product.title and product.price_jpy:
+                            print(f"[Mercari] ✅ OG/JSON-LD 解析成功")
+                            return product
+            except Exception as e:
+                print(f"[Mercari] httpx 失敗: {type(e).__name__}: {e}")
+            
+            # === 方法 2: Chrome UC 渲染 ===
+            print(f"[Mercari] SPA 需要 Chrome UC 渲染...")
+            chrome_data = await self._mercari_chrome_extract(url)
+            
+            if chrome_data:
+                if chrome_data.get("title"):
+                    product.title = chrome_data["title"]
+                if chrome_data.get("price"):
+                    product.price_jpy = self._normalize_price(chrome_data["price"])
+                if chrome_data.get("image"):
+                    product.image_url = chrome_data["image"]
+                if chrome_data.get("extra_images"):
+                    product.extra_images = chrome_data["extra_images"][:4]
+                if chrome_data.get("description"):
+                    product.description = chrome_data["description"][:500]
+                if chrome_data.get("brand"):
+                    product.brand = chrome_data["brand"]
+                
+                # Mercari 是 C2C 二手，通常沒有 variants
+                # 但如果有商品狀態，可以放在 description 裡
+                condition = chrome_data.get("condition", "")
+                if condition and product.description:
+                    product.description = f"【{condition}】\n{product.description}"
+                elif condition:
+                    product.description = f"【{condition}】"
+            
+            if product.title and product.price_jpy:
+                print(f"[Mercari] ✅ {product.title[:40]} / ¥{product.price_jpy:,}")
+            else:
+                print(f"[Mercari] ⚠️ 解析不完整: title={bool(product.title)}, price={product.price_jpy}")
+                
+        except Exception as e:
+            print(f"[Mercari] ❌ 錯誤: {type(e).__name__}: {e}")
+        
+        return product
+
+    def _extract_mercari_next_data(self, html: str, product: ProductInfo) -> bool:
+        """嘗試從 Mercari SPA 的 __NEXT_DATA__ 或內嵌 JSON 提取商品資料"""
+        try:
+            # __NEXT_DATA__
+            m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+            if not m:
+                return False
+            
+            data = json.loads(m.group(1))
+            
+            # 遍歷 props 找商品資料
+            def find_item(obj, depth=0):
+                if depth > 8 or not isinstance(obj, dict):
+                    return None
+                # 常見的 Mercari 商品欄位
+                if obj.get("name") and obj.get("price") and (obj.get("photos") or obj.get("thumbnails") or obj.get("imageUrls")):
+                    return obj
+                if obj.get("item") and isinstance(obj["item"], dict):
+                    return find_item(obj["item"], depth + 1)
+                for v in obj.values():
+                    if isinstance(v, dict):
+                        result = find_item(v, depth + 1)
+                        if result:
+                            return result
+                    elif isinstance(v, list):
+                        for item in v[:5]:
+                            if isinstance(item, dict):
+                                result = find_item(item, depth + 1)
+                                if result:
+                                    return result
+                return None
+            
+            item = find_item(data)
+            if not item:
+                return False
+            
+            product.title = item.get("name", "") or item.get("productName", "")
+            price = item.get("price", 0)
+            if price:
+                product.price_jpy = self._normalize_price(price)
+            product.description = (item.get("description", "") or "")[:500]
+            
+            # 圖片
+            photos = item.get("photos") or item.get("thumbnails") or item.get("imageUrls") or []
+            if isinstance(photos, list) and photos:
+                if isinstance(photos[0], dict):
+                    urls = [p.get("url") or p.get("imageUrl") or p.get("src", "") for p in photos]
+                else:
+                    urls = [str(p) for p in photos]
+                urls = [u for u in urls if u]
+                if urls:
+                    product.image_url = urls[0]
+                    product.extra_images = urls[1:5]
+            
+            # 品牌
+            brand = item.get("brand", {})
+            if isinstance(brand, dict):
+                product.brand = brand.get("name", "")
+            elif isinstance(brand, str):
+                product.brand = brand
+            
+            return bool(product.title and product.price_jpy)
+            
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return False
+
+    async def _mercari_chrome_extract(self, url: str) -> dict | None:
+        """用 Chrome UC 渲染 Mercari SPA 頁面並用 JS 提取商品資料"""
+        import time as _time
+        
+        with self._driver_lock:
+          for attempt in range(2):
+            try:
+                driver = self._ensure_driver()
+                if not driver:
+                    print(f"[Mercari] Chrome driver 無法建立")
+                    return None
+                
+                self._driver_use_count += 1
+                
+                # 清理
+                try:
+                    handles = driver.window_handles
+                    if len(handles) > 1:
+                        for h in handles[1:]:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        driver.switch_to.window(handles[0])
+                    driver.delete_all_cookies()
+                except:
+                    pass
+                
+                print(f"[Mercari] Chrome UC 載入 (attempt {attempt+1}): {url[:60]}")
+                try:
+                    driver.uc_open_with_reconnect(url, reconnect_time=8)
+                except Exception as e:
+                    err_name = type(e).__name__
+                    print(f"[Mercari] uc_open: {err_name}: {e}")
+                    if "InvalidSession" in err_name or "invalid session" in str(e).lower():
+                        self._driver = None
+                        self._create_driver()
+                        continue
+                
+                # 等待 SPA 渲染
+                result = None
+                for i in range(8):
+                    _time.sleep(2)
+                    try:
+                        result = driver.execute_script("""
+                            var r = {title:'', price:'', image:'', extra_images:[], 
+                                     description:'', brand:'', condition:'', debug:''};
+                            
+                            // === __NEXT_DATA__ ===
+                            try {
+                                var nd = document.getElementById('__NEXT_DATA__');
+                                if (nd) {
+                                    var data = JSON.parse(nd.textContent);
+                                    // 深度搜尋商品資料
+                                    function findItem(obj, depth) {
+                                        if (depth > 8 || !obj || typeof obj !== 'object') return null;
+                                        if (obj.name && obj.price && (obj.photos || obj.thumbnails || obj.imageUrls)) return obj;
+                                        if (obj.item && typeof obj.item === 'object') {
+                                            var found = findItem(obj.item, depth+1);
+                                            if (found) return found;
+                                        }
+                                        for (var k in obj) {
+                                            if (typeof obj[k] === 'object') {
+                                                var found = findItem(obj[k], depth+1);
+                                                if (found) return found;
+                                            }
+                                        }
+                                        return null;
+                                    }
+                                    var item = findItem(data, 0);
+                                    if (item) {
+                                        r.title = item.name || item.productName || '';
+                                        r.price = String(item.price || '');
+                                        r.description = (item.description || '').substring(0, 500);
+                                        var brand = item.brand;
+                                        if (brand && typeof brand === 'object') r.brand = brand.name || '';
+                                        else if (typeof brand === 'string') r.brand = brand;
+                                        
+                                        var photos = item.photos || item.thumbnails || item.imageUrls || [];
+                                        if (photos.length > 0) {
+                                            var urls = photos.map(function(p) {
+                                                return (typeof p === 'object') ? (p.url || p.imageUrl || p.src || '') : String(p);
+                                            }).filter(function(u) { return u; });
+                                            if (urls.length > 0) {
+                                                r.image = urls[0];
+                                                r.extra_images = urls.slice(1, 5);
+                                            }
+                                        }
+                                        r.debug += 'next_data_ok';
+                                    }
+                                }
+                            } catch(e) { r.debug += 'next_err:' + e.message + ' '; }
+                            
+                            // === DOM fallback ===
+                            if (!r.title) {
+                                // Mercari 商品標題
+                                var h1 = document.querySelector('h1');
+                                if (h1) r.title = h1.textContent.trim();
+                                
+                                // OG title
+                                if (!r.title) {
+                                    var og = document.querySelector('meta[property="og:title"]');
+                                    if (og) r.title = og.content || '';
+                                }
+                                r.debug += ' dom_title';
+                            }
+                            
+                            if (!r.price) {
+                                // 價格：找含 ¥ 的元素
+                                var priceEls = document.querySelectorAll('[class*="price"], [class*="Price"], [data-testid*="price"]');
+                                for (var i = 0; i < priceEls.length; i++) {
+                                    var txt = priceEls[i].textContent;
+                                    var m = txt.match(/[¥￥]\\s*([\\d,]+)/);
+                                    if (m) { r.price = m[1].replace(/,/g, ''); break; }
+                                }
+                                // 全頁搜尋
+                                if (!r.price) {
+                                    var allText = document.body.innerText;
+                                    var pm = allText.match(/[¥￥]\\s*([\\d,]+)/);
+                                    if (pm) r.price = pm[1].replace(/,/g, '');
+                                }
+                                r.debug += ' dom_price';
+                            }
+                            
+                            if (!r.image) {
+                                // OG image
+                                var ogImg = document.querySelector('meta[property="og:image"]');
+                                if (ogImg && ogImg.content) r.image = ogImg.content;
+                                
+                                // 商品圖片（通常是大圖）
+                                if (!r.image) {
+                                    var imgs = document.querySelectorAll('img[src*="static.mercdn.net"]');
+                                    var goodImgs = [];
+                                    for (var i = 0; i < imgs.length; i++) {
+                                        var src = imgs[i].src || imgs[i].dataset.src || '';
+                                        if (src && src.indexOf('thumb') === -1 && src.indexOf('icon') === -1) {
+                                            goodImgs.push(src);
+                                        }
+                                    }
+                                    if (goodImgs.length > 0) {
+                                        r.image = goodImgs[0];
+                                        r.extra_images = goodImgs.slice(1, 5);
+                                    }
+                                }
+                                r.debug += ' dom_img';
+                            }
+                            
+                            if (!r.description) {
+                                // 商品說明
+                                var descEl = document.querySelector('[data-testid="description"], [class*="description"], [class*="Description"]');
+                                if (descEl) r.description = descEl.textContent.trim().substring(0, 500);
+                                r.debug += ' dom_desc';
+                            }
+                            
+                            // 商品狀態
+                            var condEls = document.querySelectorAll('[class*="condition"], [class*="Condition"]');
+                            for (var i = 0; i < condEls.length; i++) {
+                                var txt = condEls[i].textContent.trim();
+                                if (txt.length < 30 && txt.length > 1) { r.condition = txt; break; }
+                            }
+                            // table/detail 裡找
+                            if (!r.condition) {
+                                var rows = document.querySelectorAll('tr, [class*="detail"], [class*="Detail"]');
+                                for (var i = 0; i < rows.length; i++) {
+                                    var txt = rows[i].textContent;
+                                    if (txt.indexOf('商品の状態') !== -1) {
+                                        var match = txt.match(/商品の状態[：:]?\\s*(.+)/);
+                                        if (match) r.condition = match[1].trim().substring(0, 30);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            return r;
+                        """)
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__:
+                            self._driver = None
+                            self._create_driver()
+                            break
+                        continue
+                    
+                    if result and result.get("title") and result.get("price"):
+                        print(f"[Mercari] Chrome 渲染完成 (wait {(i+1)*2}s): {result.get('debug', '')}")
+                        return result
+                    elif result:
+                        print(f"[Mercari] 等待渲染... ({(i+1)*2}s) title={bool(result.get('title'))} price={bool(result.get('price'))} debug={result.get('debug', '')}")
+                
+                # 最後一次嘗試
+                if result and (result.get("title") or result.get("price")):
+                    print(f"[Mercari] Chrome 部分結果: {result.get('debug', '')}")
+                    return result
+                
+                print(f"[Mercari] Chrome 渲染 timeout")
+                return None
+                
+            except Exception as e:
+                print(f"[Mercari] Chrome 錯誤: {type(e).__name__}: {e}")
+                if attempt == 0:
+                    self._driver = None
+                    self._create_driver()
+                    continue
+                return None
+        
+        return None
+
     # ============================================================
     # Shopify 日本商店（nano universe 等）- 用 product.json API
     # ============================================================
