@@ -1,7 +1,8 @@
 """
-商品資訊爬取模組 v3.1
+商品資訊爬取模組 v3.2
 - Amazon.co.jp: requests + BeautifulSoup（快速、穩定）
 - Uniqlo JP: 內部 API（超快、不需瀏覽器）
+- MUJI JP: HTML + 內部 API（不需瀏覽器）
 - ZOZOTOWN: undetected-chromedriver（繞過 Akamai）
 - 其他網站: Playwright 無頭瀏覽器
 """
@@ -48,6 +49,8 @@ def detect_platform(url: str) -> str:
         return "amazon"
     if "uniqlo.com" in host:
         return "uniqlo"
+    if "muji.com" in host:
+        return "muji"
     if "rakuten.co.jp" in host:
         return "rakuten"
     return "generic"
@@ -140,6 +143,8 @@ class Scraper:
             return await self._scrape_amazon(url)
         elif platform == "uniqlo":
             return await self._scrape_uniqlo(url)
+        elif platform == "muji":
+            return await self._scrape_muji(url)
         else:
             return await self._scrape_with_playwright(url)
 
@@ -738,6 +743,262 @@ class Scraper:
                 product.price_jpy = int(pm.group(1).replace(",", ""))
 
         return product
+
+    # ============================================================
+    # MUJI JP - HTML 解析 + 內部 API（不需瀏覽器）
+    # ============================================================
+    async def _scrape_muji(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url, brand="無印良品")
+
+        # 從 URL 提取 JAN code：/detail/4548076445289
+        m = re.search(r'/detail/(\d{10,14})', url)
+        if not m:
+            print(f"[MUJI] ❌ 無法從 URL 提取商品代碼: {url}")
+            return product
+
+        jan_code = m.group(1)  # e.g. "4548076445289"
+        print(f"[MUJI] JAN: {jan_code}")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+
+            # === Step 1: 抓 HTML 頁面 ===
+            html_text = ""
+            cookies = {}
+            try:
+                print(f"[MUJI] Step 1: 抓 HTML...")
+                resp = await client.get(url, headers=headers)
+                html_text = resp.text
+                cookies = dict(resp.cookies)
+                print(f"[MUJI] HTML: {resp.status_code}, {len(html_text)} bytes")
+            except Exception as e:
+                print(f"[MUJI] HTML 錯誤: {type(e).__name__}: {e}")
+
+            # === 從 HTML 提取基本資訊 ===
+            if html_text:
+                soup = BeautifulSoup(html_text, "html.parser")
+
+                # 標題：從 <title>
+                title_tag = soup.find("title")
+                if title_tag:
+                    t = title_tag.get_text()
+                    product.title = t.replace("| 無印良品", "").replace("|無印良品", "").strip()
+                    print(f"[MUJI] 標題: {product.title[:50]}")
+
+                # OG 標題（可能更乾淨）
+                og_title = soup.find("meta", property="og:title")
+                if og_title and og_title.get("content"):
+                    t = og_title["content"].replace("| 無印良品", "").strip()
+                    if t:
+                        product.title = t
+
+                # OG 圖片
+                og_img = soup.find("meta", property="og:image")
+                if og_img and og_img.get("content"):
+                    product.image_url = og_img["content"]
+                    print(f"[MUJI] OG image: {product.image_url[:60]}")
+
+                # 已知的 MUJI 圖片 URL 模式
+                if not product.image_url:
+                    product.image_url = f"https://www.muji.com/public/media/img/item/{jan_code}_org.jpg"
+
+                # 額外圖片：從 HTML 找
+                extra = []
+                for img in soup.find_all("img"):
+                    src = img.get("src", "")
+                    if "muji.com" in src and jan_code in src and src not in extra:
+                        extra.append(src)
+                product.extra_images = [u for u in extra if u != product.image_url][:8]
+
+                # 從 ld+json 找價格
+                for script in soup.find_all("script", type="application/ld+json"):
+                    try:
+                        ld = json.loads(script.string or "")
+                        if isinstance(ld, list):
+                            ld = next((x for x in ld if x.get("@type") == "Product"), ld[0] if ld else {})
+                        if ld.get("@type") == "Product":
+                            offers = ld.get("offers", {})
+                            if isinstance(offers, list):
+                                offers = offers[0] if offers else {}
+                            price = offers.get("price")
+                            if price:
+                                product.price_jpy = int(float(price))
+                                print(f"[MUJI] ld+json 價格: ¥{product.price_jpy}")
+                    except:
+                        pass
+
+                # 從內嵌 script 找商品 JSON
+                self._parse_muji_embedded_json(soup, jan_code, product)
+
+                if product.price_jpy and product.title:
+                    print(f"[MUJI] ✅ HTML 解析完成: {product.title[:40]} / ¥{product.price_jpy:,}")
+                    return product
+
+            # === Step 2: 嘗試 MUJI 內部 API ===
+            api_headers = {
+                "User-Agent": headers["User-Agent"],
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "ja-JP,ja;q=0.9",
+                "Referer": url,
+                "Origin": "https://www.muji.com",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+
+            # 嘗試多個可能的 API 路徑
+            api_urls = [
+                f"https://www.muji.com/jp/api/store/cmdty/detail/{jan_code}",
+                f"https://www.muji.com/jp/api/store/v1/cmdty/{jan_code}",
+                f"https://www.muji.com/jp/api/product/{jan_code}",
+                f"https://www.muji.com/jp/api/v1/product/{jan_code}",
+                f"https://www.muji.com/jp/store/api/cmdty/detail/{jan_code}",
+            ]
+
+            for api_url in api_urls:
+                try:
+                    print(f"[MUJI] Step 2: API {api_url[:80]}...")
+                    resp = await client.get(api_url, headers=api_headers, cookies=cookies)
+                    print(f"[MUJI] API response: {resp.status_code}, {len(resp.text)} bytes")
+
+                    if resp.status_code == 200:
+                        try:
+                            api_data = resp.json()
+                            print(f"[MUJI] ✅ API JSON keys: {list(api_data.keys())[:8]}")
+                            self._parse_muji_api(api_data, jan_code, product)
+                            if product.price_jpy:
+                                print(f"[MUJI] ✅ API 價格: ¥{product.price_jpy:,}")
+                                break
+                        except:
+                            # 可能不是 JSON
+                            if len(resp.text) < 500:
+                                print(f"[MUJI] 非 JSON: {resp.text[:200]}")
+                    elif resp.status_code != 404:
+                        print(f"[MUJI] API {resp.status_code}: {resp.text[:200]}")
+
+                except Exception as e:
+                    print(f"[MUJI] API 錯誤: {type(e).__name__}: {e}")
+
+        if product.title:
+            print(f"[MUJI] 最終: {product.title[:40]} / ¥{product.price_jpy or '?'} / {len(product.variants)} variants")
+        else:
+            print(f"[MUJI] ⚠️ 未取得資料")
+
+        return product
+
+    def _parse_muji_embedded_json(self, soup, jan_code: str, product: ProductInfo):
+        """從 MUJI HTML 內嵌 script 找商品資料"""
+        for script in soup.find_all("script"):
+            text = script.string or ""
+            if not text or len(text) < 50:
+                continue
+
+            # __NEXT_DATA__
+            if "__NEXT_DATA__" in text:
+                try:
+                    jm = re.search(r'__NEXT_DATA__\s*=\s*({.+?})\s*(?:;|</)', text, re.DOTALL)
+                    if jm:
+                        data = json.loads(jm.group(1))
+                        props = data.get("props", {}).get("pageProps", {})
+                        print(f"[MUJI] __NEXT_DATA__ pageProps keys: {list(props.keys())[:8]}")
+                        self._parse_muji_api(props, jan_code, product)
+                        if product.price_jpy:
+                            return
+                except Exception as e:
+                    print(f"[MUJI] __NEXT_DATA__ 錯誤: {e}")
+
+            # window.__INITIAL_STATE__ 或類似
+            for pat in [r'__INITIAL_STATE__\s*=\s*({.+?})\s*;',
+                       r'window\.PRODUCT\s*=\s*({.+?})\s*;',
+                       r'window\.__PRELOADED_STATE__\s*=\s*({.+?})\s*;']:
+                try:
+                    sm = re.search(pat, text, re.DOTALL)
+                    if sm:
+                        data = json.loads(sm.group(1))
+                        print(f"[MUJI] 全域狀態 keys: {list(data.keys())[:8]}")
+                        self._parse_muji_api(data, jan_code, product)
+                        if product.price_jpy:
+                            return
+                except:
+                    pass
+
+            # 直接找價格 pattern（"price":XXXX 或 "salePrice":XXXX）
+            if jan_code in text and ('"price"' in text or '"salePrice"' in text):
+                price_m = re.search(r'"(?:sale)?[Pp]rice"\s*:\s*(\d{3,6})', text)
+                if price_m and not product.price_jpy:
+                    product.price_jpy = int(price_m.group(1))
+                    print(f"[MUJI] script 內找到價格: ¥{product.price_jpy}")
+
+    def _parse_muji_api(self, data: dict, jan_code: str, product: ProductInfo):
+        """解析 MUJI API 或內嵌 JSON"""
+        # 嘗試常見的 data 結構
+        prod = None
+
+        # 直接是商品
+        if "janCode" in data or "commodityCode" in data:
+            prod = data
+
+        # 巢狀結構
+        for key in ["product", "cmdty", "detail", "commodity", "data", "item"]:
+            if key in data and isinstance(data[key], dict):
+                prod = data[key]
+                break
+
+        if not prod:
+            return
+
+        # 名稱
+        name = prod.get("name") or prod.get("commodityName") or prod.get("productName") or ""
+        if name and not product.title:
+            product.title = name
+
+        # 價格
+        for pk in ["price", "salePrice", "sellingPrice", "retailPrice", "displayPrice", "priceIncTax", "priceExcTax"]:
+            v = prod.get(pk)
+            if v and isinstance(v, (int, float)) and v > 0:
+                product.price_jpy = int(v)
+                break
+
+        if not product.price_jpy:
+            prices = prod.get("prices", {}) or prod.get("price", {})
+            if isinstance(prices, dict):
+                for pk in ["selling", "retail", "sale", "current", "value"]:
+                    v = prices.get(pk)
+                    if v and isinstance(v, (int, float)):
+                        product.price_jpy = int(v)
+                        break
+
+        # 圖片
+        images = prod.get("images", []) or prod.get("imageList", []) or []
+        if isinstance(images, list):
+            for img in images:
+                u = img.get("url", "") if isinstance(img, dict) else str(img)
+                if u and "muji.com" in u:
+                    if not product.image_url:
+                        product.image_url = u
+                    elif u != product.image_url and len(product.extra_images) < 8:
+                        product.extra_images.append(u)
+
+        # 尺寸/顏色
+        variants_data = prod.get("skuList", []) or prod.get("variants", []) or prod.get("sizes", []) or prod.get("colors", []) or []
+        if isinstance(variants_data, list):
+            for v in variants_data:
+                if not isinstance(v, dict):
+                    continue
+                variant = {
+                    "color": v.get("colorName", "") or v.get("color", ""),
+                    "size": v.get("sizeName", "") or v.get("size", ""),
+                    "sku": v.get("janCode", "") or v.get("sku", "") or v.get("skuCode", ""),
+                    "price": product.price_jpy or 0,
+                    "in_stock": v.get("stockStatus", "") != "OUT_OF_STOCK",
+                    "image": "",
+                }
+                if variant["color"] or variant["size"]:
+                    product.variants.append(variant)
 
     # ============================================================
     # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
