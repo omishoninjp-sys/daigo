@@ -1548,15 +1548,23 @@ class Scraper:
                         pass
 
             # === 圖片 ===
-            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg (color, large)
-            # cdn.beams.co.jp/img/goods/{id}/S1/{id}_D_N.jpg (detail, large)
-            # cdn.beams.co.jp/img/goods/{id}/S2/{id}_C_1.jpg (thumbnail, skip)
+            # BEAMS CDN 路徑格式:
+            #   cdn.beams.co.jp/img/goods/{id}/S1/{id}_C_1.jpg  → 小圖 (600x720)
+            #   cdn.beams.co.jp/img/goods/{id}/L1/{id}_C_1.jpg  → 大圖
+            #   cdn.beams.co.jp/img/goods/{id}/{id}_C_1.jpg     → 原圖
+            # _C_N = 第 N 個顏色, _D_N = 第 N 張細節照
             
             # 從 URL 提取商品 ID
             item_id_match = re.search(r'/(\d{10,})/?$', url.rstrip("/"))
             item_id = item_id_match.group(1) if item_id_match else ""
             
+            def _beams_hires(img_url):
+                """將 BEAMS 圖片 URL 升級為高解析度"""
+                # /S1/ → 移除 size prefix，取得原圖
+                return re.sub(r'/S\d+/', '/', img_url)
+            
             images = []
+            seen_filenames = set()
             for img in soup.find_all("img"):
                 src = img.get("src", "") or img.get("data-src", "")
                 if not src or "cdn.beams.co.jp/img/goods" not in src:
@@ -1566,11 +1574,23 @@ class Scraper:
                 # 只抓當前商品的圖片
                 if item_id and item_id not in src:
                     continue
-                # 只要 S1（大圖），排除 S2 等縮圖
-                if "/S2/" in src or "/S3/" in src:
+                # 取檔名去重（不同 size prefix 的同一張圖）
+                filename = src.split("/")[-1]
+                if filename in seen_filenames:
                     continue
+                seen_filenames.add(filename)
+                # 升級為高解析度
+                src = _beams_hires(src)
                 if src not in images:
                     images.append(src)
+            
+            # 如果 HTML 中沒找到圖片（lazy loading），用 item_id 直接建構
+            if not images and item_id:
+                base = f"https://cdn.beams.co.jp/img/goods/{item_id}/{item_id}"
+                images = [f"{base}_C_1.jpg"]  # 至少第一個顏色
+                # 嘗試第二個顏色
+                images.append(f"{base}_C_2.jpg")
+                print(f"[BEAMS] 圖片從 item_id 建構: {len(images)} 張")
 
             if images:
                 # _C_ = 顏色主圖（每色一張），_D_ = 模特兒細節照（很多張）
