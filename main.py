@@ -154,6 +154,7 @@ async def create_order(req: CreateOrderRequest):
             source_url=url, original_price_jpy=product.price_jpy,
             brand=product.brand, extra_images=product.extra_images,
             variants=product.variants, image_base64=product.image_base64,
+            extra_tags=["18+", "adult"] if product.is_adult else None,
         )
 
         return CreateOrderResponse(
