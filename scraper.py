@@ -1459,13 +1459,19 @@ class Scraper:
 
             html = None
             for attempt in range(3):
+                # attempt 0: 直連; attempt 1: proxy; attempt 2: proxy + 更長 timeout
+                use_proxy = attempt >= 1 and PROXY_URL
                 try:
+                    timeout_val = 30.0 if attempt == 0 else 60.0
                     client_kwargs = {
-                        "timeout": httpx.Timeout(45.0, connect=15.0),
+                        "timeout": httpx.Timeout(timeout_val, connect=15.0),
                         "follow_redirects": True,
                     }
-                    if PROXY_URL:
+                    if use_proxy:
                         client_kwargs["proxy"] = PROXY_URL
+                        print(f"[BEAMS] attempt {attempt+1}: 使用 proxy ({PROXY_URL[:30]}...)")
+                    else:
+                        print(f"[BEAMS] attempt {attempt+1}: 直連 (timeout={timeout_val}s)")
 
                     async with httpx.AsyncClient(**client_kwargs) as client:
                         resp = await client.get(url, headers=headers)
@@ -1476,12 +1482,13 @@ class Scraper:
                                 continue
                             return product
                         html = resp.text
-                        print(f"[BEAMS] 頁面取得成功 ({len(html)} bytes, attempt {attempt+1})")
+                        mode = "proxy" if use_proxy else "直連"
+                        print(f"[BEAMS] 頁面取得成功 ({mode}, {len(html)} bytes, attempt {attempt+1})")
                         break
                 except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as te:
-                    print(f"[BEAMS] {type(te).__name__} (attempt {attempt+1}/3)")
+                    print(f"[BEAMS] {type(te).__name__} (attempt {attempt+1}/3, {'proxy' if use_proxy else '直連'})")
                     if attempt < 2:
-                        await asyncio.sleep(2 * (attempt + 1))
+                        await asyncio.sleep(2)
                         continue
                     raise
 
