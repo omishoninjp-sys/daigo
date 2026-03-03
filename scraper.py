@@ -1573,20 +1573,22 @@ class Scraper:
                     images.append(src)
 
             if images:
-                # 優先用 _C_ (color) 圖片當主圖
+                # _C_ = 顏色主圖（每色一張），_D_ = 模特兒細節照（很多張）
                 color_imgs = [i for i in images if "_C_" in i]
                 detail_imgs = [i for i in images if "_D_" in i]
 
                 if color_imgs:
                     product.image_url = color_imgs[0]
-                    # 額外圖片：其他 color + 前幾張 detail
-                    product.extra_images = (color_imgs[1:] + detail_imgs[:5])
+                    # 額外圖片：其他顏色 + 最多 3 張 detail
+                    product.extra_images = color_imgs[1:] + detail_imgs[:3]
                 elif detail_imgs:
                     product.image_url = detail_imgs[0]
-                    product.extra_images = detail_imgs[1:6]
+                    product.extra_images = detail_imgs[1:4]
                 else:
                     product.image_url = images[0]
-                    product.extra_images = images[1:6]
+                    product.extra_images = images[1:4]
+                
+                print(f"[BEAMS] 圖片: main={product.image_url.split('/')[-1]}, extra={len(product.extra_images)} 張")
 
             # === Variants（顏色 × 尺寸） ===
             colors = []
