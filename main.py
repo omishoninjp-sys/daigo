@@ -153,7 +153,7 @@ async def create_order(req: CreateOrderRequest):
             image_url=product.image_url, description=product.description,
             source_url=url, original_price_jpy=product.price_jpy,
             brand=product.brand, extra_images=product.extra_images,
-            variants=product.variants,
+            variants=product.variants, image_base64=product.image_base64,
         )
 
         return CreateOrderResponse(

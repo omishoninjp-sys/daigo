@@ -30,9 +30,12 @@ class ProductInfo:
     currency: str = "JPY"
     extra_images: list = field(default_factory=list)
     variants: list = field(default_factory=list)
+    image_base64: str = ""  # 當 Shopify 無法直接下載圖片時，用 base64 上傳
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d.pop("image_base64", None)  # 不回傳 base64 到前端（太大）
+        return d
 
     @property
     def is_valid(self):
@@ -894,80 +897,9 @@ class Scraper:
         if not product.price_jpy:
             print(f"[MUJI] httpx 全部 timeout，嘗試 Chrome UC...")
             try:
-                chrome_html = await self._muji_chrome_fallback(url)
-                if chrome_html:
-                    soup = BeautifulSoup(chrome_html, "html.parser")
-
-                    # 標題
-                    if not product.title:
-                        title_tag = soup.find("title")
-                        if title_tag:
-                            product.title = title_tag.get_text().replace("| 無印良品", "").replace("|無印良品", "").strip()
-                        og_title = soup.find("meta", property="og:title")
-                        if og_title and og_title.get("content"):
-                            product.title = og_title["content"].replace("| 無印良品", "").strip()
-
-                    # OG 圖片
-                    if not product.image_url:
-                        og_img = soup.find("meta", property="og:image")
-                        if og_img and og_img.get("content"):
-                            product.image_url = og_img["content"]
-                        else:
-                            product.image_url = f"https://www.muji.com/public/media/img/item/{jan_code}_org.jpg"
-
-                    # 額外圖片
-                    if not product.extra_images:
-                        extra = []
-                        for img in soup.find_all("img"):
-                            src = img.get("src", "")
-                            if "muji.com" in src and jan_code in src and src not in extra:
-                                extra.append(src)
-                        product.extra_images = [u for u in extra if u != product.image_url][:8]
-
-                    # 從 ld+json 找價格
-                    for script in soup.find_all("script", type="application/ld+json"):
-                        try:
-                            ld = json.loads(script.string or "")
-                            if isinstance(ld, list):
-                                ld = next((x for x in ld if x.get("@type") == "Product"), ld[0] if ld else {})
-                            if ld.get("@type") == "Product":
-                                offers = ld.get("offers", {})
-                                if isinstance(offers, list):
-                                    offers = offers[0] if offers else {}
-                                price = offers.get("price")
-                                if price:
-                                    product.price_jpy = int(float(price))
-                                    print(f"[MUJI] Chrome ld+json 價格: ¥{product.price_jpy}")
-                        except:
-                            pass
-
-                    # 內嵌 JSON
-                    self._parse_muji_embedded_json(soup, jan_code, product)
-
-                    # 從渲染後的 HTML 文字找價格（JS 渲染後的內容）
-                    if not product.price_jpy:
-                        page_text = soup.get_text(" ", strip=True)
-                        # 常見格式：¥1,990（税込）或 1,990円
-                        price_patterns = [
-                            r'¥\s*([\d,]+)',
-                            r'([\d,]+)\s*円',
-                            r'税込[）)]\s*([\d,]+)',
-                            r'([\d,]+)\s*[（(]税込',
-                        ]
-                        for pat in price_patterns:
-                            pm = re.search(pat, page_text)
-                            if pm:
-                                try:
-                                    p = int(pm.group(1).replace(",", ""))
-                                    if 50 < p < 500000:
-                                        product.price_jpy = p
-                                        print(f"[MUJI] Chrome 文字價格: ¥{p:,}")
-                                        break
-                                except:
-                                    pass
-
-                    if product.price_jpy:
-                        print(f"[MUJI] ✅ Chrome UC 成功")
+                success = await self._muji_chrome_fallback(url, product, jan_code)
+                if success:
+                    print(f"[MUJI] ✅ Chrome UC 成功")
             except Exception as e:
                 print(f"[MUJI] Chrome UC 錯誤: {type(e).__name__}: {e}")
 
@@ -1095,16 +1027,16 @@ class Scraper:
     # ============================================================
     # MUJI Chrome UC fallback
     # ============================================================
-    async def _muji_chrome_fallback(self, url: str) -> str | None:
-        """用 Chrome UC 載入 MUJI 頁面（httpx timeout 時的 fallback）"""
-        import time as _time
+    async def _muji_chrome_fallback(self, url: str, product: ProductInfo, jan_code: str) -> bool:
+        """用 Chrome UC 載入 MUJI 頁面，直接填入 product 的所有欄位"""
+        import time as _time, base64
 
         with self._driver_lock:
             try:
                 driver = self._ensure_driver()
                 if not driver:
                     print(f"[MUJI] Chrome driver 無法建立")
-                    return None
+                    return False
 
                 self._driver_use_count += 1
 
@@ -1136,7 +1068,6 @@ class Scraper:
                     except:
                         continue
 
-                    # 檢查是否有實際內容
                     has_data = (
                         'application/ld+json' in html or
                         '無印良品' in html or
@@ -1147,18 +1078,215 @@ class Scraper:
 
                     if i >= 1 and has_data:
                         print(f"[MUJI] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes, title: {title[:40]})")
-                        return html
+                        break
 
-                if html and len(html) > 5000:
-                    print(f"[MUJI] Chrome 頁面可能未完全渲染，但仍嘗試解析 ({len(html)} bytes)")
-                    return html
+                if not html or len(html) < 5000:
+                    print(f"[MUJI] Chrome 頁面載入失敗 ({len(html)} bytes)")
+                    return False
 
-                print(f"[MUJI] Chrome 頁面載入失敗 ({len(html)} bytes)")
-                return None
+                # === 解析 HTML ===
+                soup = BeautifulSoup(html, "html.parser")
+
+                # 標題
+                if not product.title:
+                    og_title = soup.find("meta", property="og:title")
+                    if og_title and og_title.get("content"):
+                        product.title = og_title["content"].replace("| 無印良品", "").strip()
+                    else:
+                        title_tag = soup.find("title")
+                        if title_tag:
+                            product.title = title_tag.get_text().replace("| 無印良品", "").replace("|無印良品", "").strip()
+
+                # 從 ld+json 找價格
+                for script in soup.find_all("script", type="application/ld+json"):
+                    try:
+                        ld = json.loads(script.string or "")
+                        if isinstance(ld, list):
+                            ld = next((x for x in ld if x.get("@type") == "Product"), ld[0] if ld else {})
+                        if ld.get("@type") == "Product":
+                            offers = ld.get("offers", {})
+                            if isinstance(offers, list):
+                                offers = offers[0] if offers else {}
+                            price = offers.get("price")
+                            if price:
+                                product.price_jpy = int(float(price))
+                                print(f"[MUJI] Chrome ld+json 價格: ¥{product.price_jpy}")
+                    except:
+                        pass
+
+                # 內嵌 JSON
+                self._parse_muji_embedded_json(soup, jan_code, product)
+
+                # 從渲染後的 HTML 文字找價格
+                if not product.price_jpy:
+                    page_text = soup.get_text(" ", strip=True)
+                    for pat in [r'¥\s*([\d,]+)', r'([\d,]+)\s*円', r'([\d,]+)\s*[（(]税込']:
+                        pm = re.search(pat, page_text)
+                        if pm:
+                            try:
+                                p = int(pm.group(1).replace(",", ""))
+                                if 50 < p < 500000:
+                                    product.price_jpy = p
+                                    print(f"[MUJI] Chrome 文字價格: ¥{p:,}")
+                                    break
+                            except:
+                                pass
+
+                # === 圖片：用 JS 在 Chrome 內下載為 base64 ===
+                og_img = soup.find("meta", property="og:image")
+                img_url = og_img["content"] if og_img and og_img.get("content") else f"https://www.muji.com/public/media/img/item/{jan_code}_org.jpg"
+                product.image_url = img_url
+
+                try:
+                    print(f"[MUJI] Chrome 下載圖片: {img_url[:60]}...")
+                    b64 = driver.execute_script("""
+                        return await fetch(arguments[0])
+                            .then(r => r.blob())
+                            .then(b => new Promise((resolve, reject) => {
+                                const reader = new FileReader();
+                                reader.onload = () => resolve(reader.result.split(',')[1]);
+                                reader.onerror = reject;
+                                reader.readAsDataURL(b);
+                            }));
+                    """, img_url)
+                    if b64 and len(b64) > 100:
+                        product.image_base64 = b64
+                        print(f"[MUJI] ✅ 圖片 base64: {len(b64)} chars")
+                except Exception as e:
+                    print(f"[MUJI] 圖片下載失敗: {type(e).__name__}: {e}")
+                    # 嘗試同步方式
+                    try:
+                        b64 = driver.execute_script("""
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', arguments[0], false);
+                            xhr.responseType = 'arraybuffer';
+                            xhr.send();
+                            if (xhr.status === 200) {
+                                var bytes = new Uint8Array(xhr.response);
+                                var binary = '';
+                                for (var i = 0; i < bytes.length; i++) {
+                                    binary += String.fromCharCode(bytes[i]);
+                                }
+                                return btoa(binary);
+                            }
+                            return '';
+                        """, img_url)
+                        if b64 and len(b64) > 100:
+                            product.image_base64 = b64
+                            print(f"[MUJI] ✅ 圖片 base64 (sync): {len(b64)} chars")
+                    except Exception as e2:
+                        print(f"[MUJI] 圖片 sync 也失敗: {type(e2).__name__}: {e2}")
+
+                # === 額外圖片 ===
+                extra = []
+                for img_tag in soup.find_all("img"):
+                    src = img_tag.get("src", "")
+                    if "muji.com" in src and jan_code in src and src != img_url and src not in extra:
+                        extra.append(src)
+                product.extra_images = extra[:8]
+
+                # === Variants：從渲染後的 DOM 找尺寸/顏色 ===
+                self._extract_muji_variants_from_html(driver, soup, product, jan_code)
+
+                return bool(product.price_jpy)
 
             except Exception as e:
                 print(f"[MUJI] Chrome 錯誤: {type(e).__name__}: {e}")
-                return None
+                return False
+
+    def _extract_muji_variants_from_html(self, driver, soup, product: ProductInfo, jan_code: str):
+        """從 MUJI 渲染後的 HTML 提取尺寸/顏色 variants"""
+        try:
+            # 方法 1: 用 JS 從頁面元素抓取（最可靠）
+            variants_js = driver.execute_script("""
+                var results = {sizes: [], colors: []};
+
+                // 找尺寸按鈕/選項
+                var sizeEls = document.querySelectorAll(
+                    '[data-size], [class*="size"] button, [class*="size"] a, ' +
+                    '[class*="Size"] button, [class*="Size"] a, ' +
+                    'button[class*="size"], .cmdty-size-list button, ' +
+                    '.cmdty-size-list a, .size-selector button, ' +
+                    '[aria-label*="サイズ"], [aria-label*="size"]'
+                );
+                sizeEls.forEach(function(el) {
+                    var text = el.textContent.trim();
+                    if (text && text.length < 10 && !results.sizes.includes(text)) {
+                        results.sizes.push(text);
+                    }
+                });
+
+                // 找顏色按鈕/選項
+                var colorEls = document.querySelectorAll(
+                    '[data-color], [class*="color"] button, [class*="color"] a, ' +
+                    '[class*="Color"] button, [class*="Color"] a, ' +
+                    '.cmdty-color-list button, .color-selector button, ' +
+                    '[aria-label*="カラー"], [aria-label*="color"]'
+                );
+                colorEls.forEach(function(el) {
+                    var text = el.textContent.trim();
+                    if (text && text.length < 20 && !results.colors.includes(text)) {
+                        results.colors.push(text);
+                    }
+                });
+
+                // 方法 2: 從 select 元素
+                document.querySelectorAll('select').forEach(function(sel) {
+                    var label = (sel.getAttribute('aria-label') || sel.name || '').toLowerCase();
+                    sel.querySelectorAll('option').forEach(function(opt) {
+                        var val = opt.textContent.trim();
+                        if (!val || val.includes('選択') || val.includes('選んで')) return;
+                        if (label.includes('size') || label.includes('サイズ')) {
+                            if (!results.sizes.includes(val)) results.sizes.push(val);
+                        } else if (label.includes('color') || label.includes('カラー')) {
+                            if (!results.colors.includes(val)) results.colors.push(val);
+                        }
+                    });
+                });
+
+                return results;
+            """)
+
+            sizes = variants_js.get("sizes", []) if variants_js else []
+            colors = variants_js.get("colors", []) if variants_js else []
+
+            print(f"[MUJI] JS variants: sizes={sizes}, colors={colors}")
+
+            # 方法 2: 從 HTML 文字找尺寸 pattern（fallback）
+            if not sizes:
+                page_text = soup.get_text(" ", strip=True)
+                # 常見尺寸：XS S M L XL XXL 或數字尺寸
+                size_section = re.search(r'サイズ[：:\s]*(?:[\w・]+\s*)?((?:(?:XS|S|M|L|XL|XXL|3XL|4XL|F|フリー)\s*[/／・]?\s*)+)', page_text)
+                if size_section:
+                    sizes = re.findall(r'\b(XS|S|M|L|XL|XXL|3XL|4XL|F|フリー)\b', size_section.group(1))
+                    sizes = list(dict.fromkeys(sizes))  # 去重保序
+                    print(f"[MUJI] HTML text sizes: {sizes}")
+
+            # 建構 variants
+            if sizes or colors:
+                if not colors:
+                    colors = [""]
+                if not sizes:
+                    sizes = [""]
+
+                for color in colors:
+                    for size in sizes:
+                        label_parts = [p for p in [color, size] if p]
+                        variant = {
+                            "color": color,
+                            "size": size,
+                            "sku": f"{jan_code}-{'-'.join(label_parts)}" if label_parts else jan_code,
+                            "price": product.price_jpy or 0,
+                            "in_stock": True,
+                            "image": "",
+                        }
+                        product.variants.append(variant)
+                print(f"[MUJI] ✅ 建構 {len(product.variants)} variants")
+            else:
+                print(f"[MUJI] 未找到尺寸/顏色選項（可能是無尺寸商品）")
+
+        except Exception as e:
+            print(f"[MUJI] variant 提取錯誤: {type(e).__name__}: {e}")
 
     # ============================================================
     # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
