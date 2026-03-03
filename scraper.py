@@ -1493,8 +1493,22 @@ class Scraper:
                     raise
 
             if not html:
-                print(f"[BEAMS] ❌ 無法取得頁面")
-                return product
+                # httpx 全部失敗，用 Chrome UC fallback
+                if PROXY_URL:
+                    print(f"[BEAMS] httpx 全部 timeout，嘗試 Chrome UC...")
+                    try:
+                        html = await self._beams_chrome_fallback(url)
+                        if html:
+                            print(f"[BEAMS] ✅ Chrome UC 成功 ({len(html)} bytes)")
+                        else:
+                            print(f"[BEAMS] ❌ Chrome UC 也失敗")
+                            return product
+                    except Exception as e:
+                        print(f"[BEAMS] Chrome UC 錯誤: {type(e).__name__}: {e}")
+                        return product
+                else:
+                    print(f"[BEAMS] ❌ 無法取得頁面（無 proxy 可用）")
+                    return product
 
             soup = BeautifulSoup(html, "html.parser")
 
@@ -1657,6 +1671,94 @@ class Scraper:
             print(f"[BEAMS] ❌ 錯誤: {type(e).__name__}: {e}")
 
         return product
+
+    # ============================================================
+    # BEAMS Chrome UC fallback
+    # ============================================================
+    async def _beams_chrome_fallback(self, url: str) -> str | None:
+        """用 Chrome UC 載入 BEAMS 頁面，回傳 HTML"""
+        import time as _time
+
+        with self._driver_lock:
+          for attempt in range(2):
+            try:
+                driver = self._ensure_driver()
+                if not driver:
+                    print(f"[BEAMS] Chrome driver 無法建立")
+                    return None
+
+                self._driver_use_count += 1
+
+                # 清理
+                try:
+                    handles = driver.window_handles
+                    if len(handles) > 1:
+                        for h in handles[1:]:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        driver.switch_to.window(handles[0])
+                    driver.delete_all_cookies()
+                except:
+                    pass
+
+                print(f"[BEAMS] Chrome UC 載入 (attempt {attempt+1}): {url[:80]}")
+                try:
+                    driver.uc_open_with_reconnect(url, reconnect_time=6)
+                except Exception as e:
+                    err_name = type(e).__name__
+                    print(f"[BEAMS] uc_open: {err_name}: {e}")
+                    if "InvalidSession" in err_name or "invalid session" in str(e).lower():
+                        print(f"[BEAMS] Session 已死，重建 driver...")
+                        self._driver = None
+                        self._create_driver()
+                        continue
+
+                # 等待渲染
+                html = ""
+                session_dead = False
+                for i in range(6):
+                    _time.sleep(2)
+                    try:
+                        html = driver.page_source
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__:
+                            session_dead = True
+                            break
+                        continue
+
+                    # BEAMS 頁面特徵
+                    has_data = (
+                        'cdn.beams.co.jp' in html or
+                        '税込' in html or
+                        'beams.co.jp' in html
+                    )
+
+                    if i >= 1 and has_data and len(html) > 10000:
+                        print(f"[BEAMS] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes)")
+                        return html
+
+                if session_dead:
+                    print(f"[BEAMS] Session 死了，重建 driver...")
+                    self._driver = None
+                    self._create_driver()
+                    continue
+
+                if html and len(html) > 10000:
+                    return html
+
+                print(f"[BEAMS] Chrome 頁面載入失敗 ({len(html)} bytes)")
+                return None
+
+            except Exception as e:
+                err_name = type(e).__name__
+                print(f"[BEAMS] Chrome 錯誤: {err_name}: {e}")
+                if "InvalidSession" in err_name and attempt == 0:
+                    self._driver = None
+                    self._create_driver()
+                    continue
+                return None
+
+        return None
 
     # ============================================================
     # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
