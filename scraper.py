@@ -766,7 +766,14 @@ class Scraper:
             "Accept-Encoding": "gzip, deflate, br",
         }
 
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        # MUJI 封雲端 IP，需走 proxy
+        proxy_arg = PROXY_URL if PROXY_URL else None
+        if proxy_arg:
+            print(f"[MUJI] 使用 proxy: {proxy_arg[:30]}...")
+        else:
+            print(f"[MUJI] ⚠️ 無 proxy，MUJI 可能 timeout")
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
 
             # === Step 1: 抓 HTML 頁面 ===
             html_text = ""
