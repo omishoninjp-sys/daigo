@@ -1788,41 +1788,122 @@ class Scraper:
                     if i >= 1 and has_data and len(html) > 10000:
                         print(f"[BEAMS] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes)")
                         
-                        # 用 JS 滾動頁面 + 測試大圖 URL
+                        # 用 JS 完整偵測圖片 URL 和可用尺寸
                         try:
-                            # 滾動觸發 lazy loading
-                            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
-                            _time.sleep(1)
-                            driver.execute_script("window.scrollTo(0, 0);")
-                            _time.sleep(0.5)
+                            # Step 1: 滾動整個頁面觸發 lazy loading
+                            driver.execute_script("""
+                                (function() {
+                                    var h = document.body.scrollHeight;
+                                    for (var i = 0; i <= h; i += 300) {
+                                        window.scrollTo(0, i);
+                                    }
+                                    window.scrollTo(0, 0);
+                                })();
+                            """)
+                            _time.sleep(3)
+                            
+                            # Step 2: 搜集所有 CDN 圖片 URL（包含 JS 變數、data 屬性）
+                            discovery_js = """
+                            var results = {};
+                            
+                            // 1. 搜全頁 HTML 找 CDN URL（含 JS 變數）
+                            var html = document.documentElement.innerHTML;
+                            var re = /cdn\\.beams\\.co\\.jp\\/img\\/goods\\/\\d+\\/([^/]+)\\/\\d+_[CD]_\\d+\\.jpg/g;
+                            var m;
+                            while (m = re.exec(html)) {
+                                var prefix = m[1];
+                                results['html_' + prefix] = (results['html_' + prefix] || 0) + 1;
+                            }
+                            
+                            // 2. 搜全部 img 的所有屬性
+                            var imgs = document.querySelectorAll('img');
+                            imgs.forEach(function(img) {
+                                for (var i = 0; i < img.attributes.length; i++) {
+                                    var val = img.attributes[i].value;
+                                    if (val.indexOf('cdn.beams.co.jp/img/goods') !== -1) {
+                                        var m2 = val.match(/\\/([A-Z0-9]+)\\/(\\d+_[CD]_\\d+\\.jpg)/);
+                                        if (m2) {
+                                            var key = 'attr_' + m2[1];
+                                            results[key] = (results[key] || 0) + 1;
+                                            if (!results['sample_' + m2[1]]) {
+                                                results['sample_' + m2[1]] = val.substring(0, 120);
+                                            }
+                                        }
+                                    }
+                                }
+                                // naturalWidth
+                                if (img.src && img.src.indexOf('cdn.beams.co.jp') !== -1 && img.naturalWidth > 0) {
+                                    var m3 = img.src.match(/\\/([A-Z0-9]+)\\/(\\d+_[CD]_\\d+\\.jpg)/);
+                                    if (m3) {
+                                        results['size_' + m3[1]] = img.naturalWidth + 'x' + img.naturalHeight;
+                                    }
+                                }
+                            });
+                            
+                            // 3. 搜 script 標籤
+                            var scripts = document.querySelectorAll('script');
+                            scripts.forEach(function(s) {
+                                var text = s.textContent || '';
+                                var re2 = /cdn\\.beams\\.co\\.jp\\/img\\/goods\\/\\d+\\/([^/'"]+)\\//g;
+                                var m4;
+                                while (m4 = re2.exec(text)) {
+                                    results['script_' + m4[1]] = (results['script_' + m4[1]] || 0) + 1;
+                                }
+                            });
+                            
+                            // 4. 測試不同 size prefix
+                            var itemId = window.location.pathname.match(/\\/(\\d{10,})\\/?$/);
+                            if (itemId) {
+                                results['item_id'] = itemId[1];
+                                var prefixes = ['S1','S2','M1','L1','O','B1','XL'];
+                                var testBase = 'https://cdn.beams.co.jp/img/goods/' + itemId[1] + '/';
+                                var testFile = itemId[1] + '_C_1.jpg';
+                                
+                                prefixes.forEach(function(p) {
+                                    var testImg = new Image();
+                                    testImg.src = testBase + p + '/' + testFile;
+                                    results['test_' + p] = testImg.src;
+                                });
+                            }
+                            
+                            return JSON.stringify(results);
+                            """
+                            js_result = driver.execute_script(discovery_js)
+                            print(f"[BEAMS] CDN 偵測結果: {js_result[:500]}")
+                            
+                            # Step 3: 等一下讓測試圖片載入
+                            _time.sleep(2)
+                            
+                            # Step 4: 檢查測試圖片的 naturalWidth
+                            size_test_js = """
+                            var results = {};
+                            var itemId = window.location.pathname.match(/\\/(\\d{10,})\\/?$/);
+                            if (itemId) {
+                                var prefixes = ['S1','S2','M1','L1','O','B1'];
+                                var testBase = 'https://cdn.beams.co.jp/img/goods/' + itemId[1] + '/';
+                                var testFile = itemId[1] + '_C_1.jpg';
+                                var promises = [];
+                                
+                                prefixes.forEach(function(p) {
+                                    var img = new Image();
+                                    img.src = testBase + p + '/' + testFile;
+                                    // 同步检查
+                                    if (img.complete && img.naturalWidth > 0) {
+                                        results[p] = img.naturalWidth + 'x' + img.naturalHeight;
+                                    } else {
+                                        results[p] = 'not_loaded';
+                                    }
+                                });
+                            }
+                            return JSON.stringify(results);
+                            """
+                            size_result = driver.execute_script(size_test_js)
+                            print(f"[BEAMS] 尺寸測試: {size_result}")
                             
                             # 重新取得含 lazy-loaded 圖片的 HTML
                             html = driver.page_source
-                            
-                            # 測試 L1 大圖是否存在
-                            test_js = """
-                            var results = [];
-                            var imgs = document.querySelectorAll('img[src*="cdn.beams.co.jp/img/goods"]');
-                            imgs.forEach(function(img) {
-                                var src = img.src || '';
-                                if (src && src.indexOf('/S1/') === -1 && src.indexOf('/S2/') === -1) {
-                                    results.push(src);
-                                }
-                                // check naturalWidth
-                                if (img.naturalWidth > 0) {
-                                    results.push('SIZE:' + src + ':' + img.naturalWidth + 'x' + img.naturalHeight);
-                                }
-                            });
-                            // check og:image
-                            var og = document.querySelector('meta[property="og:image"]');
-                            if (og && og.content) results.push('OG:' + og.content);
-                            return results.join('|||');
-                            """
-                            js_result = driver.execute_script(test_js)
-                            if js_result:
-                                print(f"[BEAMS] JS 圖片資訊: {js_result[:300]}")
                         except Exception as js_e:
-                            print(f"[BEAMS] JS 執行: {type(js_e).__name__}")
+                            print(f"[BEAMS] JS 偵測: {type(js_e).__name__}: {js_e}")
                         
                         return html
 
