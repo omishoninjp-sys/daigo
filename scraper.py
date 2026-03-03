@@ -890,6 +890,91 @@ class Scraper:
                 except Exception as e:
                     print(f"[MUJI] API 錯誤: {type(e).__name__}: {e}")
 
+        # === Step 3: httpx 全部失敗，用 Chrome UC fallback ===
+        if not product.price_jpy:
+            print(f"[MUJI] httpx 全部 timeout，嘗試 Chrome UC...")
+            try:
+                chrome_html = await self._muji_chrome_fallback(url)
+                if chrome_html:
+                    soup = BeautifulSoup(chrome_html, "html.parser")
+
+                    # 標題
+                    if not product.title:
+                        title_tag = soup.find("title")
+                        if title_tag:
+                            product.title = title_tag.get_text().replace("| 無印良品", "").replace("|無印良品", "").strip()
+                        og_title = soup.find("meta", property="og:title")
+                        if og_title and og_title.get("content"):
+                            product.title = og_title["content"].replace("| 無印良品", "").strip()
+
+                    # OG 圖片
+                    if not product.image_url:
+                        og_img = soup.find("meta", property="og:image")
+                        if og_img and og_img.get("content"):
+                            product.image_url = og_img["content"]
+                        else:
+                            product.image_url = f"https://www.muji.com/public/media/img/item/{jan_code}_org.jpg"
+
+                    # 額外圖片
+                    if not product.extra_images:
+                        extra = []
+                        for img in soup.find_all("img"):
+                            src = img.get("src", "")
+                            if "muji.com" in src and jan_code in src and src not in extra:
+                                extra.append(src)
+                        product.extra_images = [u for u in extra if u != product.image_url][:8]
+
+                    # 從 ld+json 找價格
+                    for script in soup.find_all("script", type="application/ld+json"):
+                        try:
+                            ld = json.loads(script.string or "")
+                            if isinstance(ld, list):
+                                ld = next((x for x in ld if x.get("@type") == "Product"), ld[0] if ld else {})
+                            if ld.get("@type") == "Product":
+                                offers = ld.get("offers", {})
+                                if isinstance(offers, list):
+                                    offers = offers[0] if offers else {}
+                                price = offers.get("price")
+                                if price:
+                                    product.price_jpy = int(float(price))
+                                    print(f"[MUJI] Chrome ld+json 價格: ¥{product.price_jpy}")
+                        except:
+                            pass
+
+                    # 內嵌 JSON
+                    self._parse_muji_embedded_json(soup, jan_code, product)
+
+                    # 從渲染後的 HTML 文字找價格（JS 渲染後的內容）
+                    if not product.price_jpy:
+                        page_text = soup.get_text(" ", strip=True)
+                        # 常見格式：¥1,990（税込）或 1,990円
+                        price_patterns = [
+                            r'¥\s*([\d,]+)',
+                            r'([\d,]+)\s*円',
+                            r'税込[）)]\s*([\d,]+)',
+                            r'([\d,]+)\s*[（(]税込',
+                        ]
+                        for pat in price_patterns:
+                            pm = re.search(pat, page_text)
+                            if pm:
+                                try:
+                                    p = int(pm.group(1).replace(",", ""))
+                                    if 50 < p < 500000:
+                                        product.price_jpy = p
+                                        print(f"[MUJI] Chrome 文字價格: ¥{p:,}")
+                                        break
+                                except:
+                                    pass
+
+                    if product.price_jpy:
+                        print(f"[MUJI] ✅ Chrome UC 成功")
+            except Exception as e:
+                print(f"[MUJI] Chrome UC 錯誤: {type(e).__name__}: {e}")
+
+        # === 最後保底：確保有圖片 ===
+        if not product.image_url:
+            product.image_url = f"https://www.muji.com/public/media/img/item/{jan_code}_org.jpg"
+
         if product.title:
             print(f"[MUJI] 最終: {product.title[:40]} / ¥{product.price_jpy or '?'} / {len(product.variants)} variants")
         else:
@@ -1006,6 +1091,74 @@ class Scraper:
                 }
                 if variant["color"] or variant["size"]:
                     product.variants.append(variant)
+
+    # ============================================================
+    # MUJI Chrome UC fallback
+    # ============================================================
+    async def _muji_chrome_fallback(self, url: str) -> str | None:
+        """用 Chrome UC 載入 MUJI 頁面（httpx timeout 時的 fallback）"""
+        import time as _time
+
+        with self._driver_lock:
+            try:
+                driver = self._ensure_driver()
+                if not driver:
+                    print(f"[MUJI] Chrome driver 無法建立")
+                    return None
+
+                self._driver_use_count += 1
+
+                # 清理 tab + cookies
+                try:
+                    handles = driver.window_handles
+                    if len(handles) > 1:
+                        for h in handles[1:]:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        driver.switch_to.window(handles[0])
+                    driver.delete_all_cookies()
+                except:
+                    pass
+
+                print(f"[MUJI] Chrome UC 載入: {url}")
+                try:
+                    driver.uc_open_with_reconnect(url, reconnect_time=6)
+                except Exception as e:
+                    print(f"[MUJI] uc_open: {type(e).__name__}: {e}")
+
+                # 等待渲染
+                html = ""
+                for i in range(8):
+                    _time.sleep(2)
+                    try:
+                        html = driver.page_source
+                        title = driver.title
+                    except:
+                        continue
+
+                    # 檢查是否有實際內容
+                    has_data = (
+                        'application/ld+json' in html or
+                        '無印良品' in html or
+                        'og:title' in html or
+                        '税込' in html or
+                        '円' in html
+                    )
+
+                    if i >= 1 and has_data:
+                        print(f"[MUJI] Chrome 頁面就緒 ({i+1}次, {len(html)} bytes, title: {title[:40]})")
+                        return html
+
+                if html and len(html) > 5000:
+                    print(f"[MUJI] Chrome 頁面可能未完全渲染，但仍嘗試解析 ({len(html)} bytes)")
+                    return html
+
+                print(f"[MUJI] Chrome 頁面載入失敗 ({len(html)} bytes)")
+                return None
+
+            except Exception as e:
+                print(f"[MUJI] Chrome 錯誤: {type(e).__name__}: {e}")
+                return None
 
     # ============================================================
     # ZOZOTOWN - SeleniumBase UC + xvfb（繞過 Akamai）
