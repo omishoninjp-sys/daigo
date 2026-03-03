@@ -1559,9 +1559,8 @@ class Scraper:
             item_id = item_id_match.group(1) if item_id_match else ""
             
             def _beams_hires(img_url):
-                """將 BEAMS 圖片 URL 升級為高解析度"""
-                # /S1/ → 移除 size prefix，取得原圖
-                return re.sub(r'/S\d+/', '/', img_url)
+                """保留 S1 路徑（確認可用），不冒險換路徑"""
+                return img_url
             
             images = []
             seen_filenames = set()
