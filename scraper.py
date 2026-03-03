@@ -345,9 +345,12 @@ class Scraper:
                         print(f"[Uniqlo] API keys: {list(api_data.keys())[:8]}")
 
                         product = self._parse_uniqlo_api(api_data, product_code, product_id, product)
-                        if product.price_jpy:
-                            print(f"[Uniqlo] ✅ API 解析成功: {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants")
+                        if product.price_jpy and product.variants:
+                            print(f"[Uniqlo] ✅ API 完整解析: {product.title[:40]} / ¥{product.price_jpy:,} / {len(product.variants)} variants")
                             return product
+                        elif product.price_jpy:
+                            print(f"[Uniqlo] API 取得價格 ¥{product.price_jpy:,} 但無 variants，繼續 fallback")
+                            break  # 有價格了，跳出 API loop 去 Step 4 建 variants
                         else:
                             print(f"[Uniqlo] API 回傳但未找到價格")
                     elif resp.status_code == 403:
