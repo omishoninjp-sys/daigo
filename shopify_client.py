@@ -1,6 +1,7 @@
 """Shopify Admin API 整合"""
 import httpx
 from config import SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, SHOPIFY_API_VERSION, DAIGO_COLLECTION_ID, STORE_DOMAIN
+from pricing import calculate_selling_price
 
 
 class ShopifyClient:
@@ -15,16 +16,9 @@ class ShopifyClient:
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
                                     seo_title="", seo_tags=None):
-        """
-        建立代購商品
-
-        新增參數:
-          seo_title: SEO 最佳化的標題（由 seo_title.py 生成）
-          seo_tags:  SEO 最佳化的 tags list（由 seo_title.py 生成）
-        """
         shopify_variants = []
         options = []
-        color_image_map = {}  # { "ブラウン": "https://..." }
+        color_image_map = {}
 
         if variants and len(variants) > 0:
             has_color = any(v.get("color") for v in variants)
@@ -42,8 +36,19 @@ class ShopifyClient:
                     color_image_map[color] = img
 
             for v in variants:
+                # ★ 修正：如果 variant 有自己的原始價格，就個別計算售價
+                # 否則 fallback 到商品主價（price_jpy 已是算好的售價）
+                variant_original_price = v.get("price", 0)
+                if variant_original_price and variant_original_price > 0:
+                    # variant.price 是日幣原價，需要重新計算代購售價
+                    variant_pricing = calculate_selling_price(variant_original_price)
+                    variant_selling_price = variant_pricing["selling_price_jpy"]
+                else:
+                    # 沒有個別定價，用商品主售價
+                    variant_selling_price = price_jpy
+
                 sv = {
-                    "price": str(price_jpy),
+                    "price": str(variant_selling_price),
                     "inventory_management": None,
                     "inventory_policy": "continue",
                     "requires_shipping": True,
@@ -101,7 +106,7 @@ class ShopifyClient:
         if options:
             product_data["product"]["options"] = options
 
-        # === 圖片：先只放主圖和額外圖（不放顏色圖片，之後用 variant_ids 綁定）===
+        # === 圖片 ===
         images = []
         added_urls = set()
         color_img_urls = set(color_image_map.values())
@@ -137,6 +142,10 @@ class ShopifyClient:
             print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(created_variants)}")
             print(f"[Shopify] 標題: {final_title}")
             print(f"[Shopify] Tags: {final_tags}")
+            # ★ 印出各 variant 的售價確認
+            for i, sv in enumerate(shopify_variants):
+                label = sv.get("option1", "") or sv.get("option2", "") or f"variant {i+1}"
+                print(f"[Shopify]   variant [{label}]: ¥{sv['price']}")
 
         # === 用 variant_ids 上傳顏色圖片並直接綁定 ===
         if color_image_map and created_variants:
@@ -159,7 +168,6 @@ class ShopifyClient:
         }
 
     async def _upload_color_images(self, product_id, created_variants, color_image_map):
-        """每個顏色上傳圖片，用 variant_ids 直接綁定到對應的 variants"""
         try:
             color_to_variant_ids = {}
             for var in created_variants:
@@ -180,12 +188,7 @@ class ShopifyClient:
                     resp = await client.post(
                         f"{self.base_url}/products/{product_id}/images.json",
                         headers=self.headers,
-                        json={
-                            "image": {
-                                "src": img_url,
-                                "variant_ids": variant_ids,
-                            }
-                        },
+                        json={"image": {"src": img_url, "variant_ids": variant_ids}},
                     )
                     if resp.status_code in (200, 201):
                         linked += 1
@@ -200,7 +203,6 @@ class ShopifyClient:
             print(f"[Shopify] 顏色圖片連動錯誤: {e}")
 
     async def _publish_to_all_channels(self, product_id):
-        """發布商品到所有銷售管道（GraphQL）"""
         try:
             graphql_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
             gql_headers = {
