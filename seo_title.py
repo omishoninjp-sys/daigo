@@ -21,30 +21,24 @@ PLATFORM_DISPLAY_NAMES = {
     "beams": "BEAMS",
     "rakuten": "樂天",
     "mercari": "Mercari",
-    "shopify_jp": "",       # 用 brand 代替
-    "generic": "",          # 用 domain 代替
+    "shopify_jp": "",
+    "generic": "",
 }
 
 
 def _get_platform_name(source_url: str, platform: str, brand: str) -> str:
-    """從 URL + 平台代碼產出顯示用的平台名"""
     name = PLATFORM_DISPLAY_NAMES.get(platform, "")
     if name:
         return name
-
-    # shopify_jp / generic → 用 brand 或 domain
     if brand:
         return brand
-
     host = (urlparse(source_url).hostname or "").lower()
-    # 去掉 www. 和 .co.jp/.com 等
     short = host.replace("www.", "").replace("store.", "")
     short = re.sub(r'\.(co\.jp|com|jp|net)$', '', short)
     return short.capitalize() if short else ""
 
 
 def _detect_platform_from_url(url: str) -> str:
-    """簡化版平台偵測（避免 import scraper 造成循環依賴）"""
     host = (urlparse(url).hostname or "").lower()
     if "zozo" in host: return "zozotown"
     if "amazon.co.jp" in host or "amazon.jp" in host or "amzn" in host: return "amazon"
@@ -68,20 +62,10 @@ async def generate_seo_title(
     source_url: str = "",
     platform: str = "",
 ) -> dict:
-    """
-    用 ChatGPT 生成 SEO 標題和 tags
-
-    回傳:
-    {
-        "title": "日本代購｜怪獸8號 鳴海弦 徽章 - ちびとこ 3WAY缶バッジ｜Animate",
-        "tags": ["日本代購", "怪獸8號", "鳴海弦", "徽章", "Animate", "動漫周邊"],
-    }
-    """
     if not platform:
         platform = _detect_platform_from_url(source_url)
     platform_name = _get_platform_name(source_url, platform, brand)
 
-    # === 呼叫 ChatGPT ===
     if OPENAI_API_KEY:
         try:
             result = await _call_chatgpt(original_title, brand, platform_name)
@@ -90,13 +74,10 @@ async def generate_seo_title(
         except Exception as e:
             print(f"[SEO] ChatGPT 失敗: {type(e).__name__}: {e}")
 
-    # === Fallback: 不用 ChatGPT，至少改善格式 ===
     return _build_fallback_title(original_title, brand, platform_name)
 
 
 async def _call_chatgpt(original_title: str, brand: str, platform_name: str) -> dict | None:
-    """呼叫 OpenAI API 分析商品標題"""
-
     prompt = f"""你是台灣電商 SEO 專家。分析以下日本商品標題，回傳 JSON（不要 markdown）。
 
 商品標題：{original_title}
@@ -140,8 +121,6 @@ async def _call_chatgpt(original_title: str, brand: str, platform_name: str) -> 
 
         data = resp.json()
         text = data["choices"][0]["message"]["content"].strip()
-
-        # 清理 markdown 包裝
         text = re.sub(r'^```json\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
 
@@ -153,19 +132,12 @@ async def _call_chatgpt(original_title: str, brand: str, platform_name: str) -> 
 
 
 def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) -> dict:
-    """用 ChatGPT 結果組裝最終標題和 tags"""
-
     brand_zh = gpt.get("brand_zh", "").strip()
     character_zh = gpt.get("character_zh", "").strip()
     product_type_zh = gpt.get("product_type_zh", "").strip()
     clean_title_zh = gpt.get("clean_title_zh", "").strip()
     extra_tags = gpt.get("extra_tags", [])
 
-    # === 組裝標題 ===
-    # 格式：日本代購｜{品牌/IP} {角色} {類型} - {中文描述}｜{平台}
-    title_parts = []
-
-    # 前段：品牌 + 角色 + 類型
     front = ""
     if brand_zh:
         front += brand_zh
@@ -175,19 +147,14 @@ def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) ->
         front += f" {product_type_zh}"
     front = front.strip()
 
-    # 中段：中文描述（如果和前段重複太多就用原標題）
     mid = clean_title_zh or original_title
 
-    # 避免前段和中段重複
     if front and mid:
-        # 如果 mid 開頭就是 front 的內容，去掉重複
         for part in [brand_zh, character_zh, product_type_zh]:
             if part and mid.startswith(part):
                 mid = mid[len(part):].strip()
-                # 去掉開頭的標點
                 mid = re.sub(r'^[・\s]+', '', mid)
 
-    # 組裝
     if front and mid:
         title_main = f"{front} - {mid}"
     elif front:
@@ -195,17 +162,14 @@ def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) ->
     else:
         title_main = mid or original_title
 
-    # 加平台
     if platform_name:
         title = f"日本代購｜{title_main}｜{platform_name}"
     else:
         title = f"日本代購｜{title_main}"
 
-    # Shopify 標題限制 255 字元，超過就截斷
     if len(title) > 250:
         title = title[:247] + "..."
 
-    # === Tags ===
     tags = ["日本代購", "代購", "daigo"]
     if brand_zh:
         tags.append(brand_zh)
@@ -219,7 +183,6 @@ def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) ->
         if isinstance(t, str) and t.strip() and t.strip() not in tags:
             tags.append(t.strip())
 
-    # 去重保序
     seen = set()
     unique_tags = []
     for t in tags:
@@ -230,16 +193,10 @@ def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) ->
     print(f"[SEO] 最終標題: {title}")
     print(f"[SEO] Tags: {unique_tags}")
 
-    return {
-        "title": title,
-        "tags": unique_tags,
-    }
+    return {"title": title, "tags": unique_tags}
 
 
 def _build_fallback_title(original_title: str, brand: str, platform_name: str) -> dict:
-    """ChatGPT 不可用時的 fallback 標題"""
-
-    # 簡單清理：去掉常見的平台後綴
     clean = original_title
     for suffix in ["| アニメイト", "- ZOZOTOWN", "| BEAMS", "| 楽天市場", "通販", "| Amazon"]:
         clean = clean.replace(suffix, "").strip()
@@ -262,7 +219,4 @@ def _build_fallback_title(original_title: str, brand: str, platform_name: str) -
     if platform_name and platform_name not in tags:
         tags.append(platform_name)
 
-    return {
-        "title": title,
-        "tags": tags,
-    }
+    return {"title": title, "tags": tags}

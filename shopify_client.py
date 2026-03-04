@@ -107,7 +107,6 @@ class ShopifyClient:
         color_img_urls = set(color_image_map.values())
 
         if image_base64:
-            # MUJI 等被封鎖的網站：用 base64 上傳（Shopify 無法直接下載）
             images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
             print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
         elif image_url:
@@ -162,7 +161,6 @@ class ShopifyClient:
     async def _upload_color_images(self, product_id, created_variants, color_image_map):
         """每個顏色上傳圖片，用 variant_ids 直接綁定到對應的 variants"""
         try:
-            # 建立 color → [variant_id, ...] 對照表
             color_to_variant_ids = {}
             for var in created_variants:
                 color = var.get("option1", "")
@@ -179,8 +177,6 @@ class ShopifyClient:
                 linked = 0
                 for color, variant_ids in color_to_variant_ids.items():
                     img_url = color_image_map[color]
-
-                    # POST /products/{id}/images.json 帶 variant_ids → 上傳 + 綁定一步完成
                     resp = await client.post(
                         f"{self.base_url}/products/{product_id}/images.json",
                         headers=self.headers,
@@ -213,7 +209,6 @@ class ShopifyClient:
             }
 
             async with httpx.AsyncClient(timeout=15) as client:
-                # 1. 取得所有 publication
                 resp = await client.post(graphql_url, headers=gql_headers, json={
                     "query": "{ publications(first:20){ edges{ node{ id name }}}}"
                 })
@@ -226,7 +221,6 @@ class ShopifyClient:
                     print(f"[Shopify] ⚠️ 沒有找到銷售管道")
                     return
 
-                # 去重
                 seen = set()
                 unique_pubs = []
                 for p in pubs:
@@ -235,7 +229,6 @@ class ShopifyClient:
                         seen.add(name)
                         unique_pubs.append(p["node"])
 
-                # 2. 發布到所有管道
                 mutation = """mutation publishablePublish($id:ID!,$input:[PublicationInput!]!){
                     publishablePublish(id:$id,input:$input){
                         userErrors{field message}
