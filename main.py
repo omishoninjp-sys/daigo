@@ -110,6 +110,8 @@ async def verify_api_key(x_api_key: str = Header(default="")):
 # === 帶併發控制的爬取 ===
 
 async def scrape_with_queue(url: str) -> ProductInfo:
+    global _queue_count  # 必須在函數最頂部宣告
+
     cached = cache_get(url)
     if cached:
         return cached
@@ -159,7 +161,6 @@ async def scrape_with_queue(url: str) -> ProductInfo:
             print(f"[Queue] ✅ 爬取完成 (active={_active_count}, queue={_queue_count})")
 
     except HTTPException:
-        global _queue_count
         async with _get_queue_lock():
             _queue_count -= 1
         raise
