@@ -36,6 +36,10 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # 格式：http://user:pass@host:port
 PROXY_URL = os.getenv("PROXY_URL", "")
 
+# OpenAI（SEO 標題翻譯用）
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 # API 安全
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")

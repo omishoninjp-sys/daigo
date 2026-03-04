@@ -1,7 +1,8 @@
 """
-GOYOUTATI DAIGO 代購系統 API v3.1
+GOYOUTATI DAIGO 代購系統 API v3.2
 - 快取 scrape 結果，create-order 不重複爬取
 - 常駐 Chrome 實例
+- SEO 最佳化標題（ChatGPT 翻譯）
 """
 import time
 import traceback
@@ -13,10 +14,11 @@ from config import API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL, DAIGO_COLL
 from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
+from seo_title import generate_seo_title
 
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 
-app = FastAPI(title="GOYOUTATI DAIGO API", version="3.1.0")
+app = FastAPI(title="GOYOUTATI DAIGO API", version="3.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,7 +98,7 @@ async def health():
     return {
         "status": "ok",
         "service": "daigo-api",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "cache_size": len(_scrape_cache),
         "driver": driver_status,
     }
@@ -148,6 +150,15 @@ async def create_order(req: CreateOrderRequest):
         pricing = calculate_selling_price(product.price_jpy)
         title = req.title_override or product.title
 
+        # === SEO 標題生成 ===
+        seo = await generate_seo_title(
+            original_title=title,
+            brand=product.brand,
+            source_url=url,
+        )
+        seo_title = seo.get("title", "")
+        seo_tags = seo.get("tags", [])
+
         result = await shopify.create_daigo_product(
             title=title, price_jpy=pricing["selling_price_jpy"],
             image_url=product.image_url, description=product.description,
@@ -155,6 +166,7 @@ async def create_order(req: CreateOrderRequest):
             brand=product.brand, extra_images=product.extra_images,
             variants=product.variants, image_base64=product.image_base64,
             extra_tags=["18+", "adult"] if product.is_adult else None,
+            seo_title=seo_title, seo_tags=seo_tags,
         )
 
         return CreateOrderResponse(
@@ -174,10 +186,19 @@ async def create_manual_order(req: ManualOrderRequest):
         if req.price_jpy <= 0:
             return CreateOrderResponse(success=False, error="價格錯誤")
 
+        # === SEO 標題生成（手動輸入也做） ===
+        seo = await generate_seo_title(
+            original_title=req.title,
+            source_url=req.source_url,
+        )
+        seo_title = seo.get("title", "")
+        seo_tags = seo.get("tags", [])
+
         result = await shopify.create_daigo_product(
             title=req.title, price_jpy=req.price_jpy,
             image_url=req.image_url, source_url=req.source_url,
             original_price_jpy=req.original_price_jpy,
+            seo_title=seo_title, seo_tags=seo_tags,
         )
 
         return CreateOrderResponse(
