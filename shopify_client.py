@@ -13,7 +13,15 @@ class ShopifyClient:
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
-                                    variants=None, image_base64="", extra_tags=None):
+                                    variants=None, image_base64="", extra_tags=None,
+                                    seo_title="", seo_tags=None):
+        """
+        建立代購商品
+
+        新增參數:
+          seo_title: SEO 最佳化的標題（由 seo_title.py 生成）
+          seo_tags:  SEO 最佳化的 tags list（由 seo_title.py 生成）
+        """
         shopify_variants = []
         options = []
         color_image_map = {}  # { "ブラウン": "https://..." }
@@ -61,15 +69,25 @@ class ShopifyClient:
                 "requires_shipping": True,
             }]
 
-        title = f"客製化代購 {title}"
+        # === 標題：優先用 SEO 標題，fallback 舊格式 ===
+        final_title = seo_title if seo_title else f"日本代購｜{title}"
+
+        # === Tags：合併 SEO tags + extra_tags ===
+        final_tags = list(seo_tags) if seo_tags else ["日本代購", "代購", "daigo"]
+        if brand and brand not in final_tags:
+            final_tags.append(brand)
+        if extra_tags:
+            for t in extra_tags:
+                if t not in final_tags:
+                    final_tags.append(t)
 
         product_data = {
             "product": {
-                "title": title,
+                "title": final_title,
                 "body_html": self._build_description(description, source_url, original_price_jpy),
                 "vendor": brand or "代購商品",
                 "product_type": "代購",
-                "tags": ["代購", "daigo"],
+                "tags": final_tags,
                 "status": "active",
                 "variants": shopify_variants,
                 "metafields": [mf for mf in [
@@ -82,12 +100,6 @@ class ShopifyClient:
 
         if options:
             product_data["product"]["options"] = options
-
-        if brand:
-            product_data["product"]["tags"].append(brand)
-
-        if extra_tags:
-            product_data["product"]["tags"].extend(extra_tags)
 
         # === 圖片：先只放主圖和額外圖（不放顏色圖片，之後用 variant_ids 綁定）===
         images = []
@@ -124,6 +136,8 @@ class ShopifyClient:
             handle = product["handle"]
             created_variants = product.get("variants", [])
             print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(created_variants)}")
+            print(f"[Shopify] 標題: {final_title}")
+            print(f"[Shopify] Tags: {final_tags}")
 
         # === 用 variant_ids 上傳顏色圖片並直接綁定 ===
         if color_image_map and created_variants:
