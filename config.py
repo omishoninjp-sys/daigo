@@ -11,7 +11,6 @@ DAIGO_COLLECTION_ID = os.getenv("DAIGO_COLLECTION_ID", "")
 STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
 
 # ZOZOTOWN 外部爬蟲（選填，備用）
-# 不設定的話，系統會直接在 Zeabur 上用 undetected-chromedriver
 ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
 
 # 定價
@@ -33,12 +32,18 @@ SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 # 代理（ZOZOTOWN 用，日本住宅 IP 繞過 Akamai IP 信譽檢查）
-# 格式：http://user:pass@host:port
 PROXY_URL = os.getenv("PROXY_URL", "")
 
 # OpenAI（SEO 標題翻譯用）
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# 快取（秒）— 30 分鐘，減少重複爬取
+CACHE_TTL = int(os.getenv("CACHE_TTL", "1800"))
+
+# 併發限制
+MAX_CONCURRENT_SCRAPES = int(os.getenv("MAX_CONCURRENT_SCRAPES", "3"))  # 同時爬取上限
+SCRAPE_QUEUE_TIMEOUT = int(os.getenv("SCRAPE_QUEUE_TIMEOUT", "90"))     # 排隊等候超時（秒）
 
 # API 安全
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
