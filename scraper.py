@@ -270,63 +270,47 @@ class Scraper:
                     "18歳以上", "アダルト", "over18", "adult-verification",
                 ]
                 is_age_gate = any(ind in html_lower or ind in url_lower for ind in age_gate_indicators)
-                if not is_age_gate and "productTitle" not in html and ("はい" in html or "確認" in html):
-                    is_age_gate = True
+                # 如果頁面已有商品標題，就不是 age gate（避免誤判）
+                if is_age_gate and "productTitle" in html:
+                    is_age_gate = False
+                    print(f"[Amazon] age gate 誤判排除（productTitle 存在）")
 
                 if is_age_gate:
                     print(f"[Amazon] 偵測到年齡確認頁面 (url: {final_url[:80]})")
                     product.is_adult = True
-                    age_soup = BeautifulSoup(html, "html.parser")
-
-                    age_form = age_soup.find("form")
-                    if age_form:
-                        action = age_form.get("action", "")
-                        if not action.startswith("http"):
-                            action = f"https://www.amazon.co.jp{action}"
-                        form_data = {}
-                        for inp in age_form.find_all("input"):
-                            name = inp.get("name")
-                            if name:
-                                form_data[name] = inp.get("value", "")
-                        try:
-                            resp2 = await client.post(action, data=form_data, headers=headers)
-                            if resp2.status_code == 200:
-                                html = resp2.text
-                                print(f"[Amazon] 年齡確認 POST 成功")
-                        except:
-                            pass
-
-                    if "productTitle" not in html:
-                        for a in age_soup.find_all("a", href=True):
-                            href = a.get("href", "")
-                            text = a.get_text(strip=True)
-                            if ("はい" in text or "18" in text or "yes" in text.lower()) and href:
-                                if not href.startswith("http"):
-                                    href = f"https://www.amazon.co.jp{href}"
-                                try:
-                                    resp3 = await client.get(href, headers=headers)
-                                    if resp3.status_code == 200:
-                                        html = resp3.text
-                                        print(f"[Amazon] 年齡確認 GET 成功")
-                                except:
-                                    pass
-                                break
-
                     asin = am.group(1)
-                    if "productTitle" not in html:
-                        try:
-                            resp4 = await client.get(
+
+                    # age gate 繞過後，直接重新 GET 正確的 ASIN URL
+                    # 不跟隨「はい」redirect，避免跑到搜尋結果或其他商品
+                    try:
+                        resp_retry = await client.get(
+                            f"https://www.amazon.co.jp/dp/{asin}",
+                            headers=headers,
+                        )
+                        if resp_retry.status_code == 200 and "productTitle" in resp_retry.text:
+                            html = resp_retry.text
+                            print(f"[Amazon] 直接重取 dp/{asin} 成功")
+                        else:
+                            # 嘗試帶 mature-content cookie 繞過
+                            mature_cookies = {
+                                "session-id": "355-0769823-1641625",
+                                "i18n-prefs": "JPY",
+                                "lc-acbjp": "ja_JP",
+                                "sp-cdn": '"L5Z9:JP"',
+                                "mature-content-preference": "1",
+                            }
+                            resp_mature = await client.get(
                                 f"https://www.amazon.co.jp/dp/{asin}",
                                 headers=headers,
+                                cookies=mature_cookies,
                             )
-                            if resp4.status_code == 200 and "productTitle" in resp4.text:
-                                html = resp4.text
-                                print(f"[Amazon] 重試 dp/{asin} 成功")
-                        except:
-                            pass
-
-                    if "productTitle" not in html:
-                        print(f"[Amazon] ⚠️ 年齡確認繞過失敗，HTML 前200字: {html[:200]}")
+                            if resp_mature.status_code == 200 and "productTitle" in resp_mature.text:
+                                html = resp_mature.text
+                                print(f"[Amazon] mature cookie 繞過成功")
+                            else:
+                                print(f"[Amazon] ⚠️ age gate 繞過失敗")
+                    except Exception as e:
+                        print(f"[Amazon] age gate 繞過錯誤: {e}")
 
             soup = BeautifulSoup(html, "html.parser")
 
