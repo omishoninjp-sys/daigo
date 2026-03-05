@@ -417,7 +417,7 @@ class Scraper:
             seen_imgs = set()
             for img in soup.find_all("img", src=True):
                 src = img["src"]
-                if "nijisanji-master-catalog" in src and "physical" in src:
+                if "nijisanji-master-catalog" in src and ("physical" in src or "digital" in src):
                     if not src.startswith("http"):
                         src = base + src
                     if src not in seen_imgs:
