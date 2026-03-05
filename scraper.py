@@ -213,14 +213,14 @@ class Scraper:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=15) as c:
                     resp = await c.get(url, headers={"User-Agent": USER_AGENT})
                     final_url = str(resp.url)
-                # 從最終 URL 提取 ASIN，重建乾淨連結避免 query param 干擾
-                asin_match = re.search(r'/dp/([A-Z0-9]{10})', final_url)
+                print(f"[Amazon] redirect 最終 URL: {final_url}")  # ← 看 Zeabur log 確認
+                asin_match = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})', final_url)
                 if asin_match:
                     url = f"https://www.amazon.co.jp/dp/{asin_match.group(1)}"
                     print(f"[Amazon] 短連結展開 → {url}")
                 else:
                     url = final_url
-                    print(f"[Amazon] 短連結展開 (無法提取 ASIN) → {url}")
+                    print(f"[Amazon] 短連結展開 (無法提取 ASIN): {url}")
                 product.source_url = url
 
             # 驗證 ASIN
