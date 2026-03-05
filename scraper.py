@@ -13,6 +13,7 @@ import asyncio
 from urllib.parse import urlparse
 from dataclasses import dataclass, asdict, field
 from collections import Counter
+from playwright.async_api import async_playwright
 
 import httpx
 from bs4 import BeautifulSoup
