@@ -173,6 +173,7 @@ class Scraper:
         return False
 
     async def scrape(self, url: str) -> ProductInfo:
+        url = self._normalize_url(url)   
         platform = detect_platform(url)
 
         if platform == "zozotown":
@@ -2521,8 +2522,18 @@ class Scraper:
                 return Counter(normalized).most_common(1)[0][0]
         return None
 
+@staticmethod
+    def _normalize_url(url: str) -> str:
+        import re as _re
+        shopserve_m = _re.match(r'(https?://[^/]+)/smp/item/(.+)', url)
+        if shopserve_m:
+            normalized = f"{shopserve_m.group(1)}/SHOP/{shopserve_m.group(2)}"
+            print(f"[Normalize] ShopServe 手機版 → PC 版: {url} → {normalized}")
+            return normalized
+        return url
+
     @staticmethod
-    def _normalize_price(price):
+    def _normalize_price(price):   # ← 這個完全不動
         if isinstance(price, (int, float)):
             return int(price)
         if isinstance(price, str):
