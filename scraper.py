@@ -212,16 +212,24 @@ class Scraper:
         try:
             # 短連結展開
             if "amzn.asia" in url or "amzn.to" in url:
+                _asin_pattern = r'/(?:dp|gp/product|gp/aw/d|ASIN)/([A-Z0-9]{10})'
+                _desktop_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
                 async with httpx.AsyncClient(follow_redirects=True, timeout=15) as c:
-                    resp = await c.get(url, headers={"User-Agent": USER_AGENT})
-                    final_url = str(resp.url)
-                print(f"[Amazon] redirect 最終 URL: {final_url}")
-                asin_match = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})', final_url)
-                if asin_match:
-                    url = f"https://www.amazon.co.jp/dp/{asin_match.group(1)}"
+                    resp = await c.get(url, headers={"User-Agent": _desktop_ua})
+                    # 掃全部 redirect 歷史 + 最終 URL，只要找到 ASIN 就停
+                    all_urls = [str(r.url) for r in resp.history] + [str(resp.url)]
+                    print(f"[Amazon] redirect chain: {all_urls}")
+                    found_asin = None
+                    for _u in all_urls:
+                        _m = re.search(_asin_pattern, _u)
+                        if _m:
+                            found_asin = _m.group(1)
+                            break
+                if found_asin:
+                    url = f"https://www.amazon.co.jp/dp/{found_asin}"
                     print(f"[Amazon] 短連結展開 → {url}")
                 else:
-                    url = final_url
+                    url = str(resp.url)
                     print(f"[Amazon] 短連結展開 (無法提取 ASIN): {url}")
                 product.source_url = url
 
