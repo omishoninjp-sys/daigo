@@ -2522,7 +2522,7 @@ class Scraper:
                 return Counter(normalized).most_common(1)[0][0]
         return None
 
-@staticmethod
+    @staticmethod
     def _normalize_url(url: str) -> str:
         import re as _re
         shopserve_m = _re.match(r'(https?://[^/]+)/smp/item/(.+)', url)
