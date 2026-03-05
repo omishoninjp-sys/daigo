@@ -2518,36 +2518,74 @@ class Scraper:
                             }
                         }
 
-                        // Variants from color/size selectors
-                        var seen = {};
-                        var selectors = [
-                            '[class*="swatch"] button',
-                            '[class*="Swatch"] button',
-                            '[class*="color"] button',
-                            '[class*="Color"] button',
-                            '[class*="size"] button',
-                            '[class*="Size"] button',
-                            '[class*="variant"] button',
-                            '[data-testid*="swatch"]',
-                            '[data-testid*="size"]',
+                        // Variants - 精準抓 color / size，避免抓到導覽列按鈕
+                        var colorVariants = [];
+                        var sizeVariants = [];
+
+                        // 顏色 swatch（只找有 aria-label 且在商品區塊內的按鈕）
+                        var colorSelectors = [
+                            '[data-testid*="color"] button',
+                            '[data-testid*="swatch"] button',
+                            '[class*="ColorSwatch"] button',
+                            '[class*="colorSwatch"] button',
+                            '[class*="color-swatch"] button',
+                            '[class*="SwatchWrapper"] button',
+                            '[class*="swatchWrapper"] button',
                         ];
-                        selectors.forEach(function(sel) {
+                        colorSelectors.forEach(function(sel) {
                             document.querySelectorAll(sel).forEach(function(btn) {
-                                var text = (btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.textContent || '').trim();
-                                if (text && text.length > 0 && text.length < 50 && !seen[text]) {
-                                    var disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled') || btn.classList.contains('unavailable');
-                                    seen[text] = true;
-                                    r.variants.push({
-                                        color: text,
-                                        size: '',
-                                        sku: text,
-                                        price: r.price,
-                                        in_stock: !disabled,
-                                        image: ''
-                                    });
+                                var label = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').trim();
+                                if (!label) return;
+                                if (label.length > 60) return;
+                                // 過濾掉導覽用文字
+                                var skip = ['カート', 'ログイン', '検索', 'メニュー', 'Close', 'Back', 'Next', 'Prev', 'Add to'];
+                                for (var i = 0; i < skip.length; i++) { if (label.indexOf(skip[i]) !== -1) return; }
+                                var alreadyAdded = colorVariants.some(function(v){ return v.label === label; });
+                                if (!alreadyAdded) {
+                                    var unavailable = btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled') || btn.classList.contains('unavailable') || btn.classList.contains('out-of-stock');
+                                    colorVariants.push({label: label, available: !unavailable});
                                 }
                             });
                         });
+
+                        // 尺寸
+                        var sizeSelectors = [
+                            '[data-testid*="size"] button',
+                            '[class*="SizeOption"] button',
+                            '[class*="sizeOption"] button',
+                            '[class*="size-option"] button',
+                            '[class*="SizeButton"] button',
+                            '[class*="sizeButton"] button',
+                        ];
+                        sizeSelectors.forEach(function(sel) {
+                            document.querySelectorAll(sel).forEach(function(btn) {
+                                var label = (btn.getAttribute('aria-label') || btn.textContent || '').trim();
+                                if (!label || label.length > 20) return;
+                                var alreadyAdded = sizeVariants.some(function(v){ return v.label === label; });
+                                if (!alreadyAdded) {
+                                    var unavailable = btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled');
+                                    sizeVariants.push({label: label, available: !unavailable});
+                                }
+                            });
+                        });
+
+                        // 組合 color x size
+                        if (colorVariants.length > 0 || sizeVariants.length > 0) {
+                            var colors = colorVariants.length > 0 ? colorVariants : [{label: '', available: true}];
+                            var sizes = sizeVariants.length > 0 ? sizeVariants : [{label: '', available: true}];
+                            colors.forEach(function(c) {
+                                sizes.forEach(function(s) {
+                                    r.variants.push({
+                                        color: c.label,
+                                        size: s.label,
+                                        sku: c.label + (s.label ? '-' + s.label : ''),
+                                        price: r.price,
+                                        in_stock: c.available && s.available,
+                                        image: ''
+                                    });
+                                });
+                            });
+                        }
 
                         // Product images from img tags
                         if (r.images.length < 3) {
