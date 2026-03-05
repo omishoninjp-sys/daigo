@@ -192,6 +192,8 @@ class Scraper:
             product = await self._scrape_shopify_jp(url)
         elif platform == "mercari":
             product = await self._scrape_mercari(url)
+        elif "oakley.com" in url:          # ← 加這兩行
+            product = await self._scrape_oakley(url)
         else:
             product = await self._scrape_with_playwright(url)
 
