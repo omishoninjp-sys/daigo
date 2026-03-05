@@ -2398,40 +2398,33 @@ class Scraper:
     # Oakley 
     # ============================================================
     async def _scrape_oakley(self, url: str) -> ProductInfo:
-        """Oakley JP - Salesforce Commerce Cloud"""
-        # 從 URL 提取 product ID
-        # 格式: /product/W0OO7145SAUC?variant=888392680624
-        pid_match = re.search(r'/product/([^/?]+)', url)
-        if not pid_match:
-            raise ValueError(f"無法從 URL 提取 Oakley product ID: {url}")
-        pid = pid_match.group(1)
+        """Oakley JP - Playwright (SFCC API 403, 需要瀏覽器渲染)"""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                locale="ja-JP",
+            )
+            page = await context.new_page()
     
-        variant_id = None
-        variant_match = re.search(r'[?&]variant=(\d+)', url)
-        if variant_match:
-            variant_id = variant_match.group(1)
+            # 攔截 SFCC Product-Variation API 回應
+            api_data = {}
+            async def handle_response(response):
+                if "Product-Variation" in response.url or "Product-Show" in response.url:
+                    try:
+                        api_data["json"] = await response.json()
+                    except:
+                        pass
     
-        api_url = (
-            f"https://www.oakley.com/on/demandware.store/"
-            f"Sites-OakleyJP-Site/ja_JP/Product-Variation?pid={pid}"
-        )
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json, text/javascript, */*",
-            "Referer": url,
-            "x-requested-with": "XMLHttpRequest",
-        }
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-            resp = await client.get(api_url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+            page.on("response", handle_response)
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await browser.close()
     
-        product = data.get("product", data)
+        product_json = api_data.get("json", {})
+        product = product_json.get("product", product_json)
     
-        # 名稱
         name = product.get("productName") or product.get("name", "")
     
-        # 價格
         price_data = product.get("price", {})
         price_raw = (
             price_data.get("sales", {}).get("value")
@@ -2440,31 +2433,22 @@ class Scraper:
         )
         price = int(price_raw)
     
-        # 圖片
         images = []
         for img in product.get("images", {}).get("large", []):
             src = img.get("url", "")
             if src and src not in images:
                 images.append(src if src.startswith("http") else "https:" + src)
     
-        # 庫存 / 變體
         variants = []
-        variation_attrs = product.get("variationAttributes", [])
-        
-        if variation_attrs:
-            # 找顏色、尺寸屬性
-            for attr in variation_attrs:
-                attr_id = attr.get("attributeId", "")
-                for val in attr.get("values", []):
-                    v_price = price
-                    v_available = val.get("selectable", True)
-                    variants.append({
-                        "name": f"{val.get('displayValue', val.get('value', ''))}",
-                        "price": v_price,
-                        "available": v_available,
-                        "sku": val.get("value", ""),
-                    })
-        
+        for attr in product.get("variationAttributes", []):
+            for val in attr.get("values", []):
+                variants.append({
+                    "name": val.get("displayValue", val.get("value", "")),
+                    "price": price,
+                    "available": val.get("selectable", True),
+                    "sku": val.get("value", ""),
+                })
+    
         if not variants:
             variants = [{"name": "DEFAULT", "price": price, "available": True}]
     
