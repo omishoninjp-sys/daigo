@@ -211,9 +211,10 @@ class Scraper:
             # 短連結展開
             if "amzn.asia" in url or "amzn.to" in url:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=10) as c:
-                    resp = await c.head(url)
+                    resp = await c.get(url, headers={"User-Agent": USER_AGENT})
                     url = str(resp.url)
                     product.source_url = url
+                    print(f"[Amazon] 短連結展開: {url[:80]}")
 
             # 驗證 ASIN
             am = re.search(r'/(?:dp|gp/product|gp/aw/d|ASIN)/([A-Z0-9]{10})', url)
