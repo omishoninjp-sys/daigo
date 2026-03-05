@@ -13,7 +13,6 @@ import asyncio
 from urllib.parse import urlparse
 from dataclasses import dataclass, asdict, field
 from collections import Counter
-from playwright.async_api import async_playwright
 
 import httpx
 from bs4 import BeautifulSoup
@@ -193,7 +192,7 @@ class Scraper:
             product = await self._scrape_shopify_jp(url)
         elif platform == "mercari":
             product = await self._scrape_mercari(url)
-        elif "oakley.com" in url:          # ← 加這兩行
+        elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
             product = await self._scrape_with_playwright(url)
@@ -216,7 +215,7 @@ class Scraper:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=15) as c:
                     resp = await c.get(url, headers={"User-Agent": USER_AGENT})
                     final_url = str(resp.url)
-                print(f"[Amazon] redirect 最終 URL: {final_url}")  # ← 看 Zeabur log 確認
+                print(f"[Amazon] redirect 最終 URL: {final_url}")
                 asin_match = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})', final_url)
                 if asin_match:
                     url = f"https://www.amazon.co.jp/dp/{asin_match.group(1)}"
@@ -2395,73 +2394,189 @@ class Scraper:
             print(f"[Shopify] JSON API 失敗: {type(e).__name__}: {e}")
 
         return await self._scrape_with_playwright(url)
+
     # ============================================================
-    # Oakley 
+    # Oakley JP - SeleniumBase UC（SFCC JS rendered）
     # ============================================================
     async def _scrape_oakley(self, url: str) -> ProductInfo:
-        """Oakley JP - Playwright (SFCC API 403, 需要瀏覽器渲染)"""
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=USER_AGENT,
-                locale="ja-JP",
-            )
-            page = await context.new_page()
-    
-            # 攔截 SFCC Product-Variation API 回應
-            api_data = {}
-            async def handle_response(response):
-                if "Product-Variation" in response.url or "Product-Show" in response.url:
+        product = ProductInfo(source_url=url, brand="Oakley")
+
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, self._fetch_oakley_uc, url
+        )
+
+        if data:
+            product.title = data.get("title", "")
+            product.price_jpy = data.get("price") or None
+            product.description = data.get("description", "")[:500]
+            images = data.get("images", [])
+            if images:
+                product.image_url = images[0]
+                product.extra_images = images[1:9]
+            product.variants = data.get("variants", [])
+
+        print(f"[Oakley] {'✅' if product.title else '⚠️'} {product.title[:40] if product.title else '未取得'} / ¥{product.price_jpy} / {len(product.variants)} variants")
+        return product
+
+    def _fetch_oakley_uc(self, url: str) -> dict | None:
+        import time as _time
+
+        with self._driver_lock:
+            for attempt in range(2):
+                try:
+                    driver = self._ensure_driver()
+                    if not driver:
+                        return None
+
+                    self._driver_use_count += 1
+
                     try:
-                        api_data["json"] = await response.json()
+                        handles = driver.window_handles
+                        if len(handles) > 1:
+                            for h in handles[1:]:
+                                driver.switch_to.window(h)
+                                driver.close()
+                            driver.switch_to.window(handles[0])
+                        driver.delete_all_cookies()
                     except:
                         pass
-    
-            page.on("response", handle_response)
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            await browser.close()
-    
-        product_json = api_data.get("json", {})
-        product = product_json.get("product", product_json)
-    
-        name = product.get("productName") or product.get("name", "")
-    
-        price_data = product.get("price", {})
-        price_raw = (
-            price_data.get("sales", {}).get("value")
-            or price_data.get("list", {}).get("value")
-            or 0
-        )
-        price = int(price_raw)
-    
-        images = []
-        for img in product.get("images", {}).get("large", []):
-            src = img.get("url", "")
-            if src and src not in images:
-                images.append(src if src.startswith("http") else "https:" + src)
-    
-        variants = []
-        for attr in product.get("variationAttributes", []):
-            for val in attr.get("values", []):
-                variants.append({
-                    "name": val.get("displayValue", val.get("value", "")),
-                    "price": price,
-                    "available": val.get("selectable", True),
-                    "sku": val.get("value", ""),
-                })
-    
-        if not variants:
-            variants = [{"name": "DEFAULT", "price": price, "available": True}]
-    
-        return ProductInfo(
-            name=name,
-            price=price,
-            currency="JPY",
-            images=images,
-            variants=variants,
-            source_url=url,
-        )
-     
+
+                    try:
+                        driver.uc_open_with_reconnect(url, reconnect_time=6)
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__:
+                            self._driver = None
+                            self._create_driver()
+                            continue
+
+                    for i in range(10):
+                        _time.sleep(3)
+                        try:
+                            html = driver.page_source
+                        except Exception as e:
+                            if "InvalidSession" in type(e).__name__:
+                                break
+                            continue
+
+                        has_data = (
+                            'og:title' in html or
+                            'application/ld+json' in html or
+                            'addToCart' in html or
+                            'productName' in html
+                        )
+                        print(f"[Oakley] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+
+                        if i >= 1 and has_data:
+                            break
+
+                    result = driver.execute_script("""
+                        var r = {title:'', price:0, images:[], description:'', variants:[]};
+
+                        // JSON-LD
+                        document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                            try {
+                                var d = JSON.parse(s.textContent);
+                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
+                                if (d && d['@type'] === 'Product') {
+                                    if (!r.title) r.title = d.name || '';
+                                    if (d.offers) {
+                                        var offers = d.offers;
+                                        if (Array.isArray(offers)) offers = offers[0];
+                                        if (offers && offers.price) r.price = parseInt(offers.price);
+                                    }
+                                    if (d.image) {
+                                        var imgs = Array.isArray(d.image) ? d.image : [d.image];
+                                        imgs.forEach(function(i){ if (typeof i === 'string') r.images.push(i); });
+                                    }
+                                    r.description = d.description || '';
+                                }
+                            } catch(e) {}
+                        });
+
+                        // OG tags fallback
+                        if (!r.title) {
+                            var og = document.querySelector('meta[property="og:title"]');
+                            if (og) r.title = og.content || '';
+                        }
+                        if (r.images.length === 0) {
+                            var ogImg = document.querySelector('meta[property="og:image"]');
+                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
+                        }
+
+                        // h1 fallback
+                        if (!r.title) {
+                            var h1 = document.querySelector('h1');
+                            if (h1) r.title = h1.textContent.trim();
+                        }
+
+                        // Price from DOM
+                        if (!r.price) {
+                            var priceEls = document.querySelectorAll('[class*="price"], [class*="Price"]');
+                            for (var i = 0; i < priceEls.length; i++) {
+                                var m = priceEls[i].textContent.match(/[¥￥]([\d,]+)/);
+                                if (m) { r.price = parseInt(m[1].replace(/,/g,'')); break; }
+                            }
+                        }
+
+                        // Variants from color/size selectors
+                        var seen = {};
+                        var selectors = [
+                            '[class*="swatch"] button',
+                            '[class*="Swatch"] button',
+                            '[class*="color"] button',
+                            '[class*="Color"] button',
+                            '[class*="size"] button',
+                            '[class*="Size"] button',
+                            '[class*="variant"] button',
+                            '[data-testid*="swatch"]',
+                            '[data-testid*="size"]',
+                        ];
+                        selectors.forEach(function(sel) {
+                            document.querySelectorAll(sel).forEach(function(btn) {
+                                var text = (btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.textContent || '').trim();
+                                if (text && text.length > 0 && text.length < 50 && !seen[text]) {
+                                    var disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled') || btn.classList.contains('unavailable');
+                                    seen[text] = true;
+                                    r.variants.push({
+                                        color: text,
+                                        size: '',
+                                        sku: text,
+                                        price: r.price,
+                                        in_stock: !disabled,
+                                        image: ''
+                                    });
+                                }
+                            });
+                        });
+
+                        // Product images from img tags
+                        if (r.images.length < 3) {
+                            document.querySelectorAll('img').forEach(function(img) {
+                                var src = img.src || img.getAttribute('data-src') || '';
+                                if (src && src.indexOf('oakley.com') !== -1 && src.indexOf('product') !== -1) {
+                                    if (r.images.indexOf(src) === -1) r.images.push(src);
+                                }
+                            });
+                        }
+
+                        return r;
+                    """)
+
+                    if result:
+                        return result
+
+                    return None
+
+                except Exception as e:
+                    print(f"[Oakley] SeleniumBase 錯誤: {type(e).__name__}: {e}")
+                    if attempt == 0:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+                    return None
+
+        return None
+
     # ============================================================
     # 通用 - Playwright（其他日本網站）
     # ============================================================
@@ -2610,7 +2725,7 @@ class Scraper:
         return url
 
     @staticmethod
-    def _normalize_price(price):   # ← 這個完全不動
+    def _normalize_price(price):
         if isinstance(price, (int, float)):
             return int(price)
         if isinstance(price, str):
