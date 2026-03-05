@@ -2482,29 +2482,58 @@ class Scraper:
                             if (og) r.title = (og.content || '').replace(/\s*\|.*$/, '').trim();
                         }
 
-                        // Step 3: 價格優先從 DOM 商品區塊抓（避免抓到推薦商品的 JSON-LD 價格）
-                        var priceSelectors = [
-                            '[data-testid*="product-price"]',
-                            '[data-testid*="productPrice"]',
-                            '[class*="ProductPrice"]',
-                            '[class*="product-price"]',
-                            '[class*="productPrice"]',
-                            'main [class*="price"]',
-                            'main [class*="Price"]',
-                            '#main [class*="price"]',
-                            '.product-detail [class*="price"]',
-                        ];
-                        for (var pi = 0; pi < priceSelectors.length; pi++) {
-                            var el = document.querySelector(priceSelectors[pi]);
-                            if (el) {
-                                var txt = el.textContent;
-                                var pm = txt.match(/[\u00a5\uffe5]([\d,]+)/);
-                                if (pm) {
-                                    r.price = parseInt(pm[1].replace(/,/g, ''));
-                                    break;
+                        // Step 3: 價格 - 找 h1 附近最近的價格元素（最準確）
+                        (function() {
+                            // 方法A: 從 h1 往上找父元素，在其中尋找價格
+                            var h1el = document.querySelector('h1');
+                            if (h1el) {
+                                var parent = h1el.parentElement;
+                                for (var depth = 0; depth < 8; depth++) {
+                                    if (!parent) break;
+                                    var txt = parent.textContent;
+                                    var allPrices = txt.match(/[\u00a5\uffe5]([\d,]{3,7})(?:\s*(?:\(税込\)|税込))?/g);
+                                    if (allPrices && allPrices.length > 0) {
+                                        // 取第一個合理價格（100〜2000000）
+                                        for (var i = 0; i < allPrices.length; i++) {
+                                            var numMatch = allPrices[i].match(/([\d,]+)/);
+                                            if (numMatch) {
+                                                var p = parseInt(numMatch[1].replace(/,/g,''));
+                                                if (p >= 100 && p <= 2000000) {
+                                                    r.price = p;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (r.price) break;
+                                    }
+                                    parent = parent.parentElement;
                                 }
                             }
-                        }
+
+                            // 方法B: 掃 main/article 內所有含 ¥ 的元素，取 h1 距離最近的
+                            if (!r.price) {
+                                var mainEl = document.querySelector('main') || document.querySelector('article') || document.body;
+                                var allEls = mainEl.querySelectorAll('*');
+                                var bestEl = null, bestDist = 999999;
+                                var h1rect = h1el ? h1el.getBoundingClientRect() : null;
+                                for (var i = 0; i < allEls.length; i++) {
+                                    var el = allEls[i];
+                                    if (el.children.length > 0) continue; // 只要葉節點
+                                    var t = el.textContent.trim();
+                                    var pm = t.match(/^[\u00a5\uffe5]([\d,]{3,7})/);
+                                    if (!pm) continue;
+                                    var p = parseInt(pm[1].replace(/,/g,''));
+                                    if (p < 100 || p > 2000000) continue;
+                                    if (h1rect) {
+                                        var rect = el.getBoundingClientRect();
+                                        var dist = Math.abs(rect.top - h1rect.bottom);
+                                        if (dist < bestDist) { bestDist = dist; bestEl = el; r.price = p; }
+                                    } else {
+                                        r.price = p; break;
+                                    }
+                                }
+                            }
+                        })();
 
                         // Step 4: JSON-LD（補圖片和描述，價格只在 DOM 沒找到時才用）
                         var currentPath = location.pathname;
