@@ -2472,50 +2472,76 @@ class Scraper:
                     result = driver.execute_script("""
                         var r = {title:'', price:0, images:[], description:'', variants:[]};
 
-                        // JSON-LD
+                        // Step 1: 標題從 h1（最準確，就是當前商品）
+                        var h1 = document.querySelector('h1');
+                        if (h1) r.title = h1.textContent.trim();
+
+                        // Step 2: OG title fallback
+                        if (!r.title) {
+                            var og = document.querySelector('meta[property="og:title"]');
+                            if (og) r.title = (og.content || '').replace(/\s*\|.*$/, '').trim();
+                        }
+
+                        // Step 3: 價格優先從 DOM 商品區塊抓（避免抓到推薦商品的 JSON-LD 價格）
+                        var priceSelectors = [
+                            '[data-testid*="product-price"]',
+                            '[data-testid*="productPrice"]',
+                            '[class*="ProductPrice"]',
+                            '[class*="product-price"]',
+                            '[class*="productPrice"]',
+                            'main [class*="price"]',
+                            'main [class*="Price"]',
+                            '#main [class*="price"]',
+                            '.product-detail [class*="price"]',
+                        ];
+                        for (var pi = 0; pi < priceSelectors.length; pi++) {
+                            var el = document.querySelector(priceSelectors[pi]);
+                            if (el) {
+                                var txt = el.textContent;
+                                var pm = txt.match(/[\u00a5\uffe5]([\d,]+)/);
+                                if (pm) {
+                                    r.price = parseInt(pm[1].replace(/,/g, ''));
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Step 4: JSON-LD（補圖片和描述，價格只在 DOM 沒找到時才用）
+                        var currentPath = location.pathname;
+                        var bestLd = null;
                         document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
                             try {
                                 var d = JSON.parse(s.textContent);
-                                if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
-                                if (d && d['@type'] === 'Product') {
-                                    if (!r.title) r.title = d.name || '';
-                                    if (d.offers) {
-                                        var offers = d.offers;
-                                        if (Array.isArray(offers)) offers = offers[0];
-                                        if (offers && offers.price) r.price = parseInt(offers.price);
-                                    }
-                                    if (d.image) {
-                                        var imgs = Array.isArray(d.image) ? d.image : [d.image];
-                                        imgs.forEach(function(i){ if (typeof i === 'string') r.images.push(i); });
-                                    }
-                                    r.description = d.description || '';
+                                if (Array.isArray(d)) {
+                                    d = d.find(function(i){ return i['@type'] === 'Product'; }) || null;
+                                }
+                                if (!d || d['@type'] !== 'Product') return;
+                                var ldUrl = (d.url || d['@id'] || '');
+                                if (!bestLd) {
+                                    bestLd = d;
+                                } else if (ldUrl && ldUrl.indexOf(currentPath) !== -1) {
+                                    bestLd = d;
                                 }
                             } catch(e) {}
                         });
-
-                        // OG tags fallback
-                        if (!r.title) {
-                            var og = document.querySelector('meta[property="og:title"]');
-                            if (og) r.title = og.content || '';
+                        if (bestLd) {
+                            if (!r.title) r.title = bestLd.name || '';
+                            if (!r.price && bestLd.offers) {
+                                var offers = bestLd.offers;
+                                if (Array.isArray(offers)) offers = offers[0];
+                                if (offers && offers.price) r.price = parseInt(offers.price);
+                            }
+                            if (bestLd.image) {
+                                var imgs = Array.isArray(bestLd.image) ? bestLd.image : [bestLd.image];
+                                imgs.forEach(function(i){ if (typeof i === 'string') r.images.push(i); });
+                            }
+                            r.description = bestLd.description || '';
                         }
+
+                        // Step 5: OG image fallback
                         if (r.images.length === 0) {
                             var ogImg = document.querySelector('meta[property="og:image"]');
                             if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                        }
-
-                        // h1 fallback
-                        if (!r.title) {
-                            var h1 = document.querySelector('h1');
-                            if (h1) r.title = h1.textContent.trim();
-                        }
-
-                        // Price from DOM
-                        if (!r.price) {
-                            var priceEls = document.querySelectorAll('[class*="price"], [class*="Price"]');
-                            for (var i = 0; i < priceEls.length; i++) {
-                                var m = priceEls[i].textContent.match(/[¥￥]([\d,]+)/);
-                                if (m) { r.price = parseInt(m[1].replace(/,/g,'')); break; }
-                            }
                         }
 
                         // Variants - 精準抓 color / size，避免抓到導覽列按鈕
