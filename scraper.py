@@ -2392,7 +2392,89 @@ class Scraper:
             print(f"[Shopify] JSON API 失敗: {type(e).__name__}: {e}")
 
         return await self._scrape_with_playwright(url)
-
+    # ============================================================
+    # Oakley 
+    # ============================================================
+    async def _scrape_oakley(self, url: str) -> ProductInfo:
+        """Oakley JP - Salesforce Commerce Cloud"""
+        # 從 URL 提取 product ID
+        # 格式: /product/W0OO7145SAUC?variant=888392680624
+        pid_match = re.search(r'/product/([^/?]+)', url)
+        if not pid_match:
+            raise ValueError(f"無法從 URL 提取 Oakley product ID: {url}")
+        pid = pid_match.group(1)
+    
+        variant_id = None
+        variant_match = re.search(r'[?&]variant=(\d+)', url)
+        if variant_match:
+            variant_id = variant_match.group(1)
+    
+        api_url = (
+            f"https://www.oakley.com/on/demandware.store/"
+            f"Sites-OakleyJP-Site/ja_JP/Product-Variation?pid={pid}"
+        )
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json, text/javascript, */*",
+            "Referer": url,
+            "x-requested-with": "XMLHttpRequest",
+        }
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            resp = await client.get(api_url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    
+        product = data.get("product", data)
+    
+        # 名稱
+        name = product.get("productName") or product.get("name", "")
+    
+        # 價格
+        price_data = product.get("price", {})
+        price_raw = (
+            price_data.get("sales", {}).get("value")
+            or price_data.get("list", {}).get("value")
+            or 0
+        )
+        price = int(price_raw)
+    
+        # 圖片
+        images = []
+        for img in product.get("images", {}).get("large", []):
+            src = img.get("url", "")
+            if src and src not in images:
+                images.append(src if src.startswith("http") else "https:" + src)
+    
+        # 庫存 / 變體
+        variants = []
+        variation_attrs = product.get("variationAttributes", [])
+        
+        if variation_attrs:
+            # 找顏色、尺寸屬性
+            for attr in variation_attrs:
+                attr_id = attr.get("attributeId", "")
+                for val in attr.get("values", []):
+                    v_price = price
+                    v_available = val.get("selectable", True)
+                    variants.append({
+                        "name": f"{val.get('displayValue', val.get('value', ''))}",
+                        "price": v_price,
+                        "available": v_available,
+                        "sku": val.get("value", ""),
+                    })
+        
+        if not variants:
+            variants = [{"name": "DEFAULT", "price": price, "available": True}]
+    
+        return ProductInfo(
+            name=name,
+            price=price,
+            currency="JPY",
+            images=images,
+            variants=variants,
+            source_url=url,
+        )
+     
     # ============================================================
     # 通用 - Playwright（其他日本網站）
     # ============================================================
