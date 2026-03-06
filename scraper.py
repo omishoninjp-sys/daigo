@@ -306,7 +306,6 @@ class Scraper:
                                     resp = await client.get(resp.headers["location"], headers=headers, follow_redirects=True)
                                 elif resp.status_code == 200:
                                     pass  # OK
-                                print(f"[Amazon] 繞過後 hasTitle={'productTitle' in resp.text}")
                                 break
                     resp = await client.get(location, headers=headers)
                 if resp.status_code != 200:
