@@ -275,25 +275,39 @@ class Scraper:
                             asin_m = re.search(r'/dp/([A-Z0-9]{10})', return_path)
                             if asin_m:
                                 asin_val = asin_m.group(1)
-                                # 第一層：POST「はい」to black-curtain
-                                try:
-                                    resp_age = await client.post(
-                                        "https://www.amazon.co.jp/black-curtain/black-curtain",
-                                        data={"returnUrl": return_path, "action": "mature-ok"},
-                                        headers=headers,
-                                        follow_redirects=True,
-                                    )
-                                except Exception:
-                                    resp_age = None
-                                
-                                # 第二層：直接 GET 商品頁
                                 direct_url = f"https://www.amazon.co.jp/dp/{asin_val}"
+                                
+                                # Step1: GET black-curtain 頁面
+                                bc_resp = await client.get(location, headers=headers, follow_redirects=True)
+                                bc_soup = BeautifulSoup(bc_resp.text, "html.parser")
+                                
+                                # Step2: 找「はい」的 href 並 GET
+                                hai_link = None
+                                for a in bc_soup.find_all('a'):
+                                    if 'はい' in a.get_text():
+                                        hai_link = a.get('href', '')
+                                        break
+                                # 也找 form action
+                                if not hai_link:
+                                    form = bc_soup.find('form')
+                                    if form:
+                                        hai_link = form.get('action', '')
+                                
+                                if hai_link:
+                                    if not hai_link.startswith('http'):
+                                        hai_link = 'https://www.amazon.co.jp' + hai_link
+                                    await client.get(hai_link, headers=headers, follow_redirects=True)
+                                    print(f"[Amazon] はい クリック → {hai_link[:80]}")
+                                
+                                # Step3: 取得商品頁（不跟隨 redirect 避免再進 black-curtain）
                                 print(f"[Amazon] black-curtain 繞過 → {direct_url}")
-                                resp = await client.get(direct_url, headers=headers, follow_redirects=True)
-                                print(f"[Amazon] 繞過後 status={resp.status_code}, url={str(resp.url)[:100]}, hasTitle={'productTitle' in resp.text}, bodySnippet={resp.text[2000:2300]!r}")
+                                resp = await client.get(direct_url, headers=headers, follow_redirects=False)
+                                if resp.status_code in (301, 302) and "black-curtain" not in resp.headers.get("location", ""):
+                                    resp = await client.get(resp.headers["location"], headers=headers, follow_redirects=True)
+                                elif resp.status_code == 200:
+                                    pass  # OK
+                                print(f"[Amazon] 繞過後 hasTitle={'productTitle' in resp.text}")
                                 break
-                        print(f"[Amazon] 偵測到年齡確認頁面，無法取得 ASIN")
-                        break
                     resp = await client.get(location, headers=headers)
                 if resp.status_code != 200:
                     print(f"[Amazon] HTTP {resp.status_code}")
