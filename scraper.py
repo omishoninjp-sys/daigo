@@ -255,6 +255,8 @@ class Scraper:
                 "i18n-prefs": "JPY",
                 "lc-acbjp": "ja_JP",
                 "sp-cdn": '"L5Z9:JP"',
+                "mature-content-preference": "1",      # ← ここに追加
+                "ubid-acbjp": "355-0769823-1641625",   # ← これも追加
             }) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code != 200:
@@ -282,39 +284,28 @@ class Scraper:
                 if is_age_gate:
                     print(f"[Amazon] 偵測到年齡確認頁面 (url: {final_url[:80]})")
                     product.is_adult = True
-                    asin = am.group(1)
-
-                    # age gate 繞過後，直接重新 GET 正確的 ASIN URL
-                    # 不跟隨「はい」redirect，避免跑到搜尋結果或其他商品
-                    try:
-                        resp_retry = await client.get(
-                            f"https://www.amazon.co.jp/dp/{asin}",
-                            headers=headers,
-                        )
-                        if resp_retry.status_code == 200 and "productTitle" in resp_retry.text:
-                            html = resp_retry.text
-                            print(f"[Amazon] 直接重取 dp/{asin} 成功")
-                        else:
-                            # 嘗試帶 mature-content cookie 繞過
-                            mature_cookies = {
-                                "session-id": "355-0769823-1641625",
-                                "i18n-prefs": "JPY",
-                                "lc-acbjp": "ja_JP",
-                                "sp-cdn": '"L5Z9:JP"',
-                                "mature-content-preference": "1",
-                            }
-                            resp_mature = await client.get(
-                                f"https://www.amazon.co.jp/dp/{asin}",
-                                headers=headers,
-                                cookies=mature_cookies,
+                    # 從 black-curtain URL 的 returnUrl 取 ASIN
+                    ru_match = re.search(r'returnUrl=%2Fdp%2F([A-Z0-9]{10})', final_url)
+                    asin_from_url = ru_match.group(1) if ru_match else (asin if 'asin' in dir() else None)
+                    if asin_from_url:
+                        try:
+                            resp_retry = await client.get(
+                                f"https://www.amazon.co.jp/dp/{asin_from_url}",
+                                headers={**headers, "Cookie": "mature-content-preference=1; i18n-prefs=JPY"},
+                                follow_redirects=False,  # ← 不跟隨 redirect，避免再進 black-curtain
                             )
-                            if resp_mature.status_code == 200 and "productTitle" in resp_mature.text:
-                                html = resp_mature.text
-                                print(f"[Amazon] mature cookie 繞過成功")
+                            # 301/302 就取 Location
+                            if resp_retry.status_code in (301, 302):
+                                loc = resp_retry.headers.get("location", "")
+                                if "/dp/" in loc:
+                                    resp_retry = await client.get(loc, headers=headers)
+                            if "productTitle" in resp_retry.text:
+                                html = resp_retry.text
+                                print(f"[Amazon] age gate 繞過成功")
                             else:
                                 print(f"[Amazon] ⚠️ age gate 繞過失敗")
-                    except Exception as e:
-                        print(f"[Amazon] age gate 繞過錯誤: {e}")
+                        except Exception as e:
+                            print(f"[Amazon] age gate 繞過錯誤: {e}")
 
             soup = BeautifulSoup(html, "html.parser")
 
