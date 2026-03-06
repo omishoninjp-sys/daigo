@@ -60,6 +60,8 @@ def detect_platform(url: str) -> str:
         return "beams"
     if "nijisanji.jp" in host:
         return "nijisanji"
+    if "palcloset.jp" in host:
+        return "palcloset"
     if "rakuten.co.jp" in host:
         return "rakuten"
     # Shopify 日本商店
@@ -188,6 +190,8 @@ class Scraper:
             product = await self._scrape_beams(url)
         elif platform == "nijisanji":
             product = await self._scrape_nijisanji(url)
+        elif platform == "palcloset":
+            product = await self._scrape_palcloset(url)
         elif platform == "shopify_jp":
             product = await self._scrape_shopify_jp(url)
         elif platform == "mercari":
@@ -505,6 +509,105 @@ class Scraper:
 
         except Exception as e:
             print(f"[Nijisanji] ❌ 錯誤: {type(e).__name__}: {e}")
+
+        return product
+    # ============================================================
+    # PAL CLOSET
+    # ============================================================
+    async def _scrape_palcloset(self, url: str) -> ProductInfo:
+        product = ProductInfo(source_url=url)
+        try:
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Accept-Language": "ja,en-US;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Referer": "https://www.palcloset.jp/",
+            }
+            async with httpx.AsyncClient(follow_redirects=True, timeout=SCRAPE_TIMEOUT, headers=headers) as client:
+                resp = await client.get(url)
+                html = resp.text
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # 標題
+            h1 = soup.find("h1")
+            if h1:
+                product.title = h1.get_text(strip=True)
+            if not product.title:
+                self._extract_og_tags(soup, product)
+
+            # 品牌（URL の b= パラメータ or breadcrumb）
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(url).query)
+            brand_param = qs.get("b", [""])[0]
+            if brand_param:
+                for a in soup.select("ol a, nav a, [class*='breadcrumb'] a"):
+                    if brand_param in a.get("href", "") and a.get_text(strip=True):
+                        product.brand = a.get_text(strip=True)
+                        break
+                if not product.brand:
+                    product.brand = brand_param
+
+            # 価格（JSON-LD 優先）
+            self._extract_json_ld(soup, product)
+            if not product.price_jpy:
+                for pat in [r'"price"\s*:\s*"?([\d.]+)"?', r'[¥￥]([\d,]+)\s*(?:税込|円)']:
+                    pm = re.search(pat, html)
+                    if pm:
+                        p = int(float(pm.group(1).replace(",", "")))
+                        if 100 <= p <= 1000000:
+                            product.price_jpy = p
+                            break
+
+            # 主画像
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                if "contents.palcloset.jp" in src and not src.startswith("data:"):
+                    product.image_url = src
+                    break
+
+            # カラー variants（img の alt text から抽出）
+            COLOR_RE = re.compile(
+                r'(ブラック|ホワイト|ベージュ|カーキ|ブラウン|グレー|ネイビー|ブルー|レッド|ピンク|グリーン|'
+                r'イエロー|オレンジ|パープル|ゴールド|シルバー|オフホワイト|ライトブルー|ダークネイビー|'
+                r'アイボリー|ボルドー|ライトグレー|チャコール|オリーブ|モカ|ラベンダー|ミント|テラコッタ|'
+                r'キャメル|マスタード|バーガンディ|コーラル|ライトピンク|ダークブラウン)',
+                re.IGNORECASE
+            )
+
+            seen_colors: set = set()
+            color_first_image: dict = {}
+
+            for img in soup.find_all("img", alt=True):
+                alt = img.get("alt", "").strip()
+                m = COLOR_RE.search(alt)
+                if not m:
+                    continue
+                color = m.group(1)
+                img_src = img.get("src", "")
+                if "contents.palcloset.jp" in img_src and color not in color_first_image:
+                    color_first_image[color] = img_src
+                seen_colors.add(color)
+
+            variants = []
+            for color in seen_colors:
+                variants.append({
+                    "color": color,
+                    "size": "",
+                    "sku": color,
+                    "price": product.price_jpy or 0,
+                    "in_stock": True,
+                    "image": color_first_image.get(color, ""),
+                })
+            product.variants = variants
+
+            extra = [v["image"] for v in variants if v["image"] and v["image"] != product.image_url]
+            product.extra_images = extra[:8]
+
+            print(f"[PalCloset] ✅ {product.title[:40] if product.title else '?'} / ¥{product.price_jpy} / {len(variants)} colors: {[v['color'] for v in variants]}")
+
+        except Exception as e:
+            print(f"[PalCloset] ❌ {type(e).__name__}: {e}")
 
         return product
 
