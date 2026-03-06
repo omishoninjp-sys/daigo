@@ -566,28 +566,18 @@ class Scraper:
                     product.image_url = src
                     break
 
-            # カラー variants（BeautifulSoup で直接抽出）
+            # カラー variants（raw HTML regex）
+            pairs = re.findall(
+                r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'[^>]*>"
+                r"(?:<img[^>]*>)?\s*</a>\s*\n?\s*([^\n<]{1,15}?)\s*(?:\n|</li>)",
+                html
+            )
+            
             seen_colors: set = set()
             variants = []
-            
-            for a in soup.find_all('a', href=re.compile(r'document\.ph01\.src')):
-                href = a.get('href', '')
-                # _1.jpg のみ（カラーサムネイル）
-                img_match = re.search(r"'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'", href)
-                if not img_match:
-                    continue
-                img_url = img_match.group(1)
-                
-                # 親の <li> からテキストを取得
-                parent = a.find_parent('li')
-                if not parent:
-                    continue
-                # img の alt テキストを除去
-                for img_tag in parent.find_all('img'):
-                    img_tag.decompose()
-                color = parent.get_text(strip=True)
-                
-                if not color or len(color) > 15 or color in seen_colors:
+            for img_url, color in pairs:
+                color = color.strip()
+                if not color or color in seen_colors:
                     continue
                 seen_colors.add(color)
                 variants.append({
