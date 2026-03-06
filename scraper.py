@@ -250,15 +250,37 @@ class Scraper:
                 "Upgrade-Insecure-Requests": "1",
             }
 
-            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=True, cookies={
-                "session-id": "355-0769823-1641625",  # 假 session
+            cookies_base = {
                 "i18n-prefs": "JPY",
                 "lc-acbjp": "ja_JP",
                 "sp-cdn": '"L5Z9:JP"',
-                "mature-content-preference": "1",      # ← ここに追加
-                "ubid-acbjp": "355-0769823-1641625",   # ← これも追加
-            }) as client:
+                "mature-content-preference": "1",
+                "ubid-acbjp": "355-0769823-1641625",
+            }
+            async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=False, cookies=cookies_base) as client:
                 resp = await client.get(url, headers=headers)
+                for _ in range(5):
+                    if resp.status_code not in (301, 302, 303, 307, 308):
+                        break
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        break
+                    if not location.startswith("http"):
+                        location = "https://www.amazon.co.jp" + location
+                    if "black-curtain" in location:
+                        ru = re.search(r'returnUrl=([^&]+)', location)
+                        if ru:
+                            import urllib.parse
+                            return_path = urllib.parse.unquote(ru.group(1))
+                            asin_m = re.search(r'/dp/([A-Z0-9]{10})', return_path)
+                            if asin_m:
+                                direct_url = f"https://www.amazon.co.jp/dp/{asin_m.group(1)}"
+                                print(f"[Amazon] black-curtain 繞過 → {direct_url}")
+                                resp = await client.get(direct_url, headers=headers)
+                                break
+                        print(f"[Amazon] 偵測到年齡確認頁面，無法取得 ASIN")
+                        break
+                    resp = await client.get(location, headers=headers)
                 if resp.status_code != 200:
                     print(f"[Amazon] HTTP {resp.status_code}")
                     return product
@@ -267,46 +289,6 @@ class Scraper:
                     return product
                 html = resp.text
                 final_url = str(resp.url)
-
-                # === 年齡確認頁面（成人商品） ===
-                html_lower = html.lower()
-                url_lower = final_url.lower()
-                age_gate_indicators = [
-                    "black_curtain", "age_verification", "年齢確認",
-                    "18歳以上", "アダルト", "over18", "adult-verification",
-                ]
-                is_age_gate = any(ind in html_lower or ind in url_lower for ind in age_gate_indicators)
-                # 如果頁面已有商品標題，就不是 age gate（避免誤判）
-                if is_age_gate and "productTitle" in html:
-                    is_age_gate = False
-                    print(f"[Amazon] age gate 誤判排除（productTitle 存在）")
-
-                if is_age_gate:
-                    print(f"[Amazon] 偵測到年齡確認頁面 (url: {final_url[:80]})")
-                    product.is_adult = True
-                    # 從 black-curtain URL 的 returnUrl 取 ASIN
-                    ru_match = re.search(r'returnUrl=%2Fdp%2F([A-Z0-9]{10})', final_url)
-                    asin_from_url = ru_match.group(1) if ru_match else (asin if 'asin' in dir() else None)
-                    if asin_from_url:
-                        try:
-                            resp_retry = await client.get(
-                                f"https://www.amazon.co.jp/dp/{asin_from_url}",
-                                headers={**headers, "Cookie": "mature-content-preference=1; i18n-prefs=JPY"},
-                                follow_redirects=False,  # ← 不跟隨 redirect，避免再進 black-curtain
-                            )
-                            # 301/302 就取 Location
-                            if resp_retry.status_code in (301, 302):
-                                loc = resp_retry.headers.get("location", "")
-                                if "/dp/" in loc:
-                                    resp_retry = await client.get(loc, headers=headers)
-                            if "productTitle" in resp_retry.text:
-                                html = resp_retry.text
-                                print(f"[Amazon] age gate 繞過成功")
-                            else:
-                                print(f"[Amazon] ⚠️ age gate 繞過失敗")
-                        except Exception as e:
-                            print(f"[Amazon] age gate 繞過錯誤: {e}")
-
             soup = BeautifulSoup(html, "html.parser")
 
             if soup.find("form", {"name": "signIn"}) or soup.select_one("#ap_email"):
