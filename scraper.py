@@ -566,41 +566,32 @@ class Scraper:
                     product.image_url = src
                     break
 
-            # カラー variants（img の alt text から抽出）
-            COLOR_RE = re.compile(
-                r'(ブラック|ホワイト|ベージュ|カーキ|ブラウン|グレー|ネイビー|ブルー|レッド|ピンク|グリーン|'
-                r'イエロー|オレンジ|パープル|ゴールド|シルバー|オフホワイト|ライトブルー|ダークネイビー|'
-                r'アイボリー|ボルドー|ライトグレー|チャコール|オリーブ|モカ|ラベンダー|ミント|テラコッタ|'
-                r'キャメル|マスタード|バーガンディ|コーラル|ライトピンク|ダークブラウン)',
-                re.IGNORECASE
+            # カラー variants（「カラー：XXX」テキスト + javascript src から抽出）
+            color_matches = re.findall(r'カラー：(.+)', html)
+            img_matches = re.findall(
+                r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'",
+                html
             )
-
+            
             seen_colors: set = set()
-            color_first_image: dict = {}
-
-            for img in soup.find_all("img", alt=True):
-                alt = img.get("alt", "").strip()
-                m = COLOR_RE.search(alt)
-                if not m:
-                    continue
-                color = m.group(1)
-                img_src = img.get("src", "")
-                if "contents.palcloset.jp" in img_src and color not in color_first_image:
-                    color_first_image[color] = img_src
-                seen_colors.add(color)
-
             variants = []
-            for color in seen_colors:
+            
+            for i, color in enumerate(color_matches):
+                color = color.strip()
+                if color in seen_colors:
+                    continue
+                seen_colors.add(color)
+                img = img_matches[i] if i < len(img_matches) else ""
                 variants.append({
                     "color": color,
                     "size": "",
                     "sku": color,
                     "price": product.price_jpy or 0,
                     "in_stock": True,
-                    "image": color_first_image.get(color, ""),
+                    "image": img,
                 })
+            
             product.variants = variants
-
             extra = [v["image"] for v in variants if v["image"] and v["image"] != product.image_url]
             product.extra_images = extra[:8]
 
