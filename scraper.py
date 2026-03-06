@@ -566,35 +566,33 @@ class Scraper:
                     product.image_url = src
                     break
 
-            # カラー variants（「カラー：XXX」テキスト + javascript src から抽出）
-            color_matches = [
-                c.strip() for c in re.findall(r'カラー：(.+)', html)
-                if len(c.strip()) <= 10 and not any(ch in c for ch in ["'", '+', '(', ')', ';'])
-            ]
-            img_matches = re.findall(
-                r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'",
-                html
-            )
-            
-            seen_colors: set = set()
-            variants = []
-            
-            for i, color in enumerate(color_matches):
-                color = color.strip()
-                if color in seen_colors:
-                    continue
-                seen_colors.add(color)
-                img = img_matches[i] if i < len(img_matches) else ""
-                variants.append({
-                    "color": color,
-                    "size": "",
-                    "sku": color,
-                    "price": product.price_jpy or 0,
-                    "in_stock": True,
-                    "image": img,
-                })
-            
-            product.variants = variants
+            # カラー variants（COLORブロックから抽出）
+            color_block_match = re.search(r'COLOR(.+?)DETAIL', html, re.DOTALL)
+            if color_block_match:
+                color_block = color_block_match.group(1)
+                pairs = re.findall(
+                    r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'[^>]*>.*?\n\s+([^\n\[<]{1,10})\s*\n",
+                    color_block,
+                    re.DOTALL
+                )
+                seen_colors: set = set()
+                variants = []
+                for img_url, color in pairs:
+                    color = color.strip()
+                    if not color or color in seen_colors:
+                        continue
+                    seen_colors.add(color)
+                    variants.append({
+                        "color": color,
+                        "size": "",
+                        "sku": color,
+                        "price": product.price_jpy or 0,
+                        "in_stock": True,
+                        "image": img_url,
+                    })
+                product.variants = variants
+
+product.extra_images = [v["image"] for v in product.variants if v["image"] and v["image"] != product.image_url][:8]
             extra = [v["image"] for v in variants if v["image"] and v["image"] != product.image_url]
             product.extra_images = extra[:8]
 
