@@ -567,7 +567,10 @@ class Scraper:
                     break
 
             # カラー variants（「カラー：XXX」テキスト + javascript src から抽出）
-            color_matches = re.findall(r'カラー：(.+)', html)
+            color_matches = [
+                c.strip() for c in re.findall(r'カラー：(.+)', html)
+                if len(c.strip()) <= 10 and not any(ch in c for ch in ["'", '+', '(', ')', ';'])
+            ]
             img_matches = re.findall(
                 r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'",
                 html
