@@ -566,17 +566,19 @@ class Scraper:
                     product.image_url = src
                     break
 
-            # カラー variants（raw HTML regex）
-            pairs = re.findall(
-                r"document\.ph01\.src\s*=\s*'(https://contents\.palcloset\.jp/[^']+_1\.jpg)'[^>]*>"
-                r"(?:<img[^>]*>)?\s*</a>\s*\n?\s*([^\n<]{1,15}?)\s*(?:\n|</li>)",
-                html
-            )
-            
+            # カラー variants（cbk_sku_wrapper から抽出）
             seen_colors: set = set()
             variants = []
-            for img_url, color in pairs:
-                color = color.strip()
+
+            for wrapper in soup.find_all('div', class_='cbk_sku_wrapper'):
+                color_tag = wrapper.find('p', class_='cart_pic__desc__color')
+                img_tag = wrapper.find('div', class_='cart_pic').find('img') if wrapper.find('div', class_='cart_pic') else None
+                
+                if not color_tag:
+                    continue
+                color = color_tag.get_text(strip=True).replace('カラー：', '')
+                img_url = img_tag['src'] if img_tag and img_tag.get('src') else ''
+                
                 if not color or color in seen_colors:
                     continue
                 seen_colors.add(color)
@@ -588,15 +590,12 @@ class Scraper:
                     "in_stock": True,
                     "image": img_url,
                 })
-            
+
             product.variants = variants
             product.extra_images = [v["image"] for v in variants if v["image"] and v["image"] != product.image_url][:8]
-
             print(f"[PalCloset] ✅ {product.title[:40] if product.title else '?'} / ¥{product.price_jpy} / {len(variants)} colors: {[v['color'] for v in variants]}")
-
         except Exception as e:
             print(f"[PalCloset] ❌ {type(e).__name__}: {e}")
-
         return product
 
     # ============================================================
