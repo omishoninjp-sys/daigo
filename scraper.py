@@ -276,7 +276,7 @@ class Scraper:
                             if asin_m:
                                 direct_url = f"https://www.amazon.co.jp/dp/{asin_m.group(1)}"
                                 print(f"[Amazon] black-curtain 繞過 → {direct_url}")
-                                resp = await client.get(direct_url, headers=headers)
+                                resp = await client.get(direct_url, headers=headers, follow_redirects=True)  # ← 這裡改
                                 break
                         print(f"[Amazon] 偵測到年齡確認頁面，無法取得 ASIN")
                         break
