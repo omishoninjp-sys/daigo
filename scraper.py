@@ -591,8 +591,8 @@ class Scraper:
                         "image": img_url,
                     })
                 product.variants = variants
-
-product.extra_images = [v["image"] for v in product.variants if v["image"] and v["image"] != product.image_url][:8]
+            
+            product.extra_images = [v["image"] for v in product.variants if v["image"] and v["image"] != product.image_url][:8]
             extra = [v["image"] for v in variants if v["image"] and v["image"] != product.image_url]
             product.extra_images = extra[:8]
 
