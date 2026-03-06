@@ -274,9 +274,22 @@ class Scraper:
                             return_path = urllib.parse.unquote(ru.group(1))
                             asin_m = re.search(r'/dp/([A-Z0-9]{10})', return_path)
                             if asin_m:
-                                direct_url = f"https://www.amazon.co.jp/dp/{asin_m.group(1)}"
+                                asin_val = asin_m.group(1)
+                                # 第一層：POST「はい」to black-curtain
+                                try:
+                                    resp_age = await client.post(
+                                        "https://www.amazon.co.jp/black-curtain/black-curtain",
+                                        data={"returnUrl": return_path, "action": "mature-ok"},
+                                        headers=headers,
+                                        follow_redirects=True,
+                                    )
+                                except Exception:
+                                    resp_age = None
+                                
+                                # 第二層：直接 GET 商品頁
+                                direct_url = f"https://www.amazon.co.jp/dp/{asin_val}"
                                 print(f"[Amazon] black-curtain 繞過 → {direct_url}")
-                                resp = await client.get(direct_url, headers=headers, follow_redirects=True)  # ← 這裡改
+                                resp = await client.get(direct_url, headers=headers, follow_redirects=True)
                                 break
                         print(f"[Amazon] 偵測到年齡確認頁面，無法取得 ASIN")
                         break
