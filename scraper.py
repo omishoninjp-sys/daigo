@@ -290,6 +290,7 @@ class Scraper:
                                 direct_url = f"https://www.amazon.co.jp/dp/{asin_val}"
                                 print(f"[Amazon] black-curtain 繞過 → {direct_url}")
                                 resp = await client.get(direct_url, headers=headers, follow_redirects=True)
+                                print(f"[Amazon] 繞過後 status={resp.status_code}, url={str(resp.url)[:100]}, hasTitle={'productTitle' in resp.text}, bodySnippet={resp.text[2000:2300]!r}")
                                 break
                         print(f"[Amazon] 偵測到年齡確認頁面，無法取得 ASIN")
                         break
