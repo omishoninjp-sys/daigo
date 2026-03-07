@@ -55,7 +55,6 @@ class VisvimMixin:
                             self._create_driver()
                             continue
 
-                    # 初回ロード待機
                     for i in range(15):
                         _time.sleep(2)
                         try:
@@ -70,166 +69,137 @@ class VisvimMixin:
                             print(f"[visvim] redirect 待機中... ({i+1})")
                             continue
 
-                        has_data = (
-                            "og:title"            in html or
-                            "application/ld+json" in html or
-                            "NS.url"              in html or
-                            "itemid"              in html.lower()
-                        )
-                        print(f"[visvim] 嘗試 {i+1}: {len(html)} bytes | data={has_data} | title={title[:50] if title else ''}")
+                        has_data = "detail-shoppingbag-list-size-no" in html or "og:title" in html
+                        print(f"[visvim] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
 
-                        if i >= 2 and has_data:
+                        if i >= 1 and has_data:
                             break
 
-                    # ===== スクロールして lazy load を発火 =====
-                    try:
-                        driver.execute_script("window.scrollTo(0, 300);")
-                        _time.sleep(1)
-                        driver.execute_script("window.scrollTo(0, 600);")
-                        _time.sleep(1)
-                        driver.execute_script("window.scrollTo(0, 1200);")
-                        _time.sleep(2)
-                        driver.execute_script("window.scrollTo(0, 0);")
-                        _time.sleep(1)
-                    except Exception:
-                        pass
+                    result = driver.execute_script("""
+                        var r = {title:'', price:0, images:[], description:'', variants:[], debug:''};
 
-                    # ===== DEBUG DUMP v2 =====
-                    debug_info = driver.execute_script("""
-                        var result = {
-                            total_html_len: document.body.innerHTML.length,
-                            w_elements: [],
-                            selects: [],
-                            options: [],
-                            price_els: [],
-                            sold_out_elements: [],
-                            product_section: ''
-                        };
+                        // --- タイトル ---
+                        var h1 = document.querySelector('h1');
+                        if (h1) r.title = h1.textContent.trim();
+                        if (!r.title) {
+                            var og = document.querySelector('meta[property="og:title"]');
+                            if (og) r.title = (og.content || '').trim();
+                        }
 
-                        // W[数字] を直接テキストに持つ要素（自分のテキストノードのみ）
-                        document.querySelectorAll('*').forEach(function(el) {
-                            var own = '';
-                            for (var i = 0; i < el.childNodes.length; i++) {
-                                if (el.childNodes[i].nodeType === 3) {
-                                    own += el.childNodes[i].textContent;
-                                }
-                            }
-                            own = own.trim();
-                            if (/W[0-9]/.test(own) && own.length < 60) {
-                                result.w_elements.push(
-                                    el.tagName
-                                    + '[class=' + (el.className||'').toString().substring(0,40) + ']'
-                                    + ' => "' + own.substring(0,50) + '"'
-                                );
-                            }
+                        // --- 価格 ---
+                        // ページ内全テキストから ¥XXX,XXX パターンを探す
+                        var allText = document.body.innerText || '';
+                        var priceMatches = allText.match(/¥[\d,]+/g) || [];
+                        priceMatches.forEach(function(pm) {
+                            if (r.price) return;
+                            var p = parseInt(pm.replace(/[¥,]/g, ''));
+                            if (p >= 10000 && p <= 2000000) r.price = p;
                         });
-
-                        // 全 select
-                        document.querySelectorAll('select').forEach(function(sel) {
-                            var opts = [];
-                            sel.querySelectorAll('option').forEach(function(o) {
-                                opts.push(o.value.substring(0,20) + ':' + o.textContent.trim().substring(0,20));
+                        // JSON-LD fallback
+                        if (!r.price) {
+                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
+                                if (r.price) return;
+                                try {
+                                    var d = JSON.parse(s.textContent);
+                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product';}) || null;
+                                    if (!d || d['@type'] !== 'Product') return;
+                                    var offers = d.offers || {};
+                                    if (Array.isArray(offers)) offers = offers[0] || {};
+                                    if (offers.price) {
+                                        var p = parseInt(String(offers.price).replace(/,/g,''));
+                                        if (p >= 1000) r.price = p;
+                                    }
+                                } catch(e) {}
                             });
-                            result.selects.push('name=' + (sel.name||sel.id||'?') + ' [' + opts.join(' | ') + ']');
-                        });
+                        }
 
-                        // 全 option
-                        document.querySelectorAll('option').forEach(function(o) {
-                            result.options.push('val="' + o.value.substring(0,30) + '" text="' + o.textContent.trim().substring(0,30) + '"');
-                        });
+                        // --- 画像 ---
+                        var ogImg = document.querySelector('meta[property="og:image"]');
+                        if (ogImg && ogImg.content) r.images.push(ogImg.content);
 
-                        // 価格要素
-                        document.querySelectorAll('[class*="price"],[class*="Price"],[itemprop="price"],[class*="amount"],[class*="Amount"]').forEach(function(el) {
-                            result.price_els.push(
-                                el.tagName + '[' + (el.className||'').toString().substring(0,30) + ']'
-                                + ' content="' + (el.getAttribute('content')||'') + '"'
-                                + ' text="' + el.textContent.trim().substring(0,40) + '"'
-                            );
-                        });
+                        // --- Variants ---
+                        // 戦略: td.detail-shoppingbag-list-size-no を全部取得し、
+                        //       各要素から上に tr → td(兄弟th) をたどってカラー名取得
+                        //
+                        // DOM:
+                        //   table.detail-shoppingbag-list-color
+                        //     tbody > tr
+                        //       th → img + span(カラー名)
+                        //       td
+                        //         table.detail-shoppingbag-list-size
+                        //           tbody > tr
+                        //             td.detail-shoppingbag-list-size-no   ← ここから上へたどる
+                        //             td.detail-shoppingbag-list-size-stock
+                        //             td.detail-shoppingbag-list-size-btn
 
-                        // Sold Out テキストを持つ要素
-                        document.querySelectorAll('*').forEach(function(el) {
-                            if (el.children.length > 3) return;
-                            var t = el.textContent.trim();
-                            if (t === 'Sold Out' || t === 'SOLD OUT') {
-                                result.sold_out_elements.push(
-                                    el.tagName + '[' + (el.className||'').toString().substring(0,40) + ']'
-                                );
-                            }
-                        });
+                        var sizeNoCells = document.querySelectorAll('td.detail-shoppingbag-list-size-no');
+                        r.debug += ' sizeNoCells:' + sizeNoCells.length;
 
-                        // 商品詳細セクション（h1 の親要素の innerHTML）
-                        var h1 = document.querySelector('h1');
-                        if (h1) {
-                            var parent = h1.parentElement;
-                            for (var d = 0; d < 5; d++) {
-                                if (!parent) break;
-                                if (parent.innerHTML.length > 500 && parent.innerHTML.length < 20000) {
-                                    result.product_section = parent.innerHTML.substring(0, 5000);
-                                    break;
+                        sizeNoCells.forEach(function(sizeNoCell) {
+                            var size = sizeNoCell.textContent.trim();
+                            if (!size) return;
+
+                            // 同じ tr の中の stock / btn セル
+                            var sizeRow   = sizeNoCell.parentElement; // <tr>
+                            var stockCell = sizeRow ? sizeRow.querySelector('.detail-shoppingbag-list-size-stock') : null;
+                            var btnCell   = sizeRow ? sizeRow.querySelector('.detail-shoppingbag-list-size-btn')   : null;
+
+                            var stockText = stockCell ? stockCell.textContent.trim() : '';
+                            var inStock   = stockText !== 'Sold Out' && stockText !== 'SOLD OUT';
+
+                            // カラー名を探す:
+                            // sizeNoCell → tr → tbody → table.detail-shoppingbag-list-size
+                            // → td（親） → tr（カラー行） → th → span
+                            var colorName = '';
+                            var colorImg  = '';
+
+                            var sizeTable = sizeNoCell.closest('table');
+                            if (sizeTable) {
+                                var colorTd = sizeTable.parentElement; // <td>
+                                if (colorTd) {
+                                    var colorTr = colorTd.parentElement; // <tr>
+                                    if (colorTr) {
+                                        var th = colorTr.querySelector('th');
+                                        if (th) {
+                                            var span = th.querySelector('span');
+                                            colorName = span ? span.textContent.trim() : '';
+                                            var img = th.querySelector('img');
+                                            if (img) {
+                                                colorImg = img.getAttribute('data-thumb') ||
+                                                           img.getAttribute('data-src') ||
+                                                           img.src || '';
+                                                if (colorImg && !colorImg.startsWith('http')) {
+                                                    colorImg = 'https://shop.visvim.tv' + colorImg;
+                                                }
+                                                // サムネ → ラージ変換
+                                                colorImg = colorImg.replace('_S0.', '_L0.').replace('_400_', '_800_');
+                                                if (colorImg && r.images.indexOf(colorImg) === -1) {
+                                                    r.images.push(colorImg);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                                parent = parent.parentElement;
                             }
-                        }
 
-                        return result;
-                    """)
-
-                    print(f"[visvim][DEBUG] HTML総サイズ: {debug_info.get('total_html_len')} bytes")
-
-                    print(f"[visvim][DEBUG] W要素({len(debug_info.get('w_elements',[]))}件):")
-                    for x in debug_info.get('w_elements', []):
-                        print(f"  {x}")
-
-                    print(f"[visvim][DEBUG] SELECT({len(debug_info.get('selects',[]))}件):")
-                    for x in debug_info.get('selects', []):
-                        print(f"  {x}")
-
-                    print(f"[visvim][DEBUG] OPTION({len(debug_info.get('options',[]))}件):")
-                    for x in debug_info.get('options', [])[:30]:
-                        print(f"  {x}")
-
-                    print(f"[visvim][DEBUG] PRICE_ELS({len(debug_info.get('price_els',[]))}件):")
-                    for x in debug_info.get('price_els', []):
-                        print(f"  {x}")
-
-                    print(f"[visvim][DEBUG] SOLD_OUT要素({len(debug_info.get('sold_out_elements',[]))}件):")
-                    for x in debug_info.get('sold_out_elements', [])[:10]:
-                        print(f"  {x}")
-
-                    section = debug_info.get('product_section', '')
-                    if section:
-                        print(f"[visvim][DEBUG] product_section(5000文字):")
-                        for i in range(0, min(len(section), 5000), 500):
-                            print(f"  [{i}] {section[i:i+500]}")
-                    else:
-                        print(f"[visvim][DEBUG] product_section: 見つからず")
-
-                    # 最低限のデータだけ返す（デバッグ優先）
-                    basic = driver.execute_script("""
-                        var h1 = document.querySelector('h1');
-                        var price = 0;
-                        document.querySelectorAll('[class*="price"],[itemprop="price"]').forEach(function(el) {
-                            if (price) return;
-                            var raw = el.getAttribute('content') || el.textContent;
-                            var m = (raw||'').replace(/,/g,'').match(/[0-9]{4,7}/);
-                            if (m) { var p = parseInt(m[0]); if (p >= 1000 && p <= 2000000) price = p; }
+                            r.variants.push({
+                                color:    colorName,
+                                size:     size,
+                                sku:      (colorName ? colorName + '-' : '') + size,
+                                price:    r.price,
+                                in_stock: inStock,
+                                image:    colorImg
+                            });
                         });
-                        var og = document.querySelector('meta[property="og:title"]');
-                        return {
-                            title: h1 ? h1.textContent.trim() : (og ? og.content : ''),
-                            price: price
-                        };
+
+                        r.debug += ' variants:' + r.variants.length;
+                        return r;
                     """)
 
-                    if basic and basic.get('title'):
-                        return {
-                            'title': basic['title'],
-                            'price': basic.get('price', 0),
-                            'images': [],
-                            'description': '',
-                            'variants': []
-                        }
+                    if result:
+                        print(f"[visvim] debug: {result.get('debug','')}")
+                        if result.get("title"):
+                            return result
 
                     return None
 
