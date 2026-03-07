@@ -153,12 +153,13 @@ class BeamsMixin:
                 if text and len(text) < 40 and re.match(r'^[A-Za-z0-9/\s\-\.]+$', text) and any(c.isupper() for c in text):
                     colors.append(text)
 
-            size_stock_pattern = re.findall(r'([A-Z0-9][A-Z0-9.]*)／(在庫あり|在庫なし|残りわずか|残り\d+点|取り寄せ)', page_text)
-            seen_sizes = set()
-            for size, stock in size_stock_pattern:
-                if size in VALID_SIZES and size not in seen_sizes:
-                    sizes.append(size)
-                    seen_sizes.add(size)
+            # 全局 size -> in_stock 對應表（以第一次出現為準）
+            size_stock_map = {}
+            for size, stock in re.findall(r'([A-Z0-9][A-Z0-9.]*)／(在庫あり|在庫なし|残りわずか|残り\d+点|取り寄せ)', page_text):
+                if size in VALID_SIZES and size not in size_stock_map:
+                    size_stock_map[size] = stock != "在庫なし"
+
+            sizes = list(size_stock_map.keys())
 
             if colors or sizes:
                 if not colors:
@@ -175,11 +176,12 @@ class BeamsMixin:
                     section_text = color_section.group(1) if color_section else page_text
 
                     for size in sizes:
-                        stock_match = re.search(re.escape(size) + r'／(在庫あり|在庫なし|残りわずか)', section_text)
-                        in_stock = True
+                        stock_match = re.search(re.escape(size) + r'／(在庫あり|在庫なし|残りわずか|残り\d+点|取り寄せ)', section_text)
                         if stock_match:
-                            status = stock_match.group(1)
-                            in_stock = status != "在庫なし"
+                            in_stock = stock_match.group(1) != "在庫なし"
+                        else:
+                            # section 切割失敗時，用全局 map（找不到保守預設 False）
+                            in_stock = size_stock_map.get(size, False)
 
                         color_img = ""
                         if color:
