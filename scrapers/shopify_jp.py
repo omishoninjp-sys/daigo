@@ -75,7 +75,7 @@ class ShopifyJpMixin:
                             option1 = v.get("option1", "") or ""
                             option2 = v.get("option2", "") or ""
                             option3 = v.get("option3", "") or ""
-                            available = v.get("available", True)
+                            available = v.get("available", False)
 
                             variant_info = {"color": "", "size": "", "in_stock": available, "image": ""}
 
