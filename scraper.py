@@ -1942,7 +1942,7 @@ class Scraper:
                                     sizeItems.forEach(function(li) {
                                         var fullText = li.textContent.replace(/\s+/g, ' ').trim();
                                         var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
+                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:\.\d+)?(?:cm)?)\s*[\/／]/i);
                                         var size = sizeMatch ? sizeMatch[1].trim() : '';
                                         if (!size) return;
 
