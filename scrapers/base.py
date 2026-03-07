@@ -58,7 +58,7 @@ def detect_platform(url: str) -> str:
     if "nanouniverse" in host or "store.nanouniverse.jp" in host:
         return "shopify_jp"
     if "neighborhood.jp" in host:
-        return "shopify_jp"
+        return "neighborhood"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
     return "generic"
