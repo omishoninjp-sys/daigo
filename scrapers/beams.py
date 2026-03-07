@@ -93,7 +93,7 @@ class BeamsMixin:
                     except:
                         pass
 
-            item_id_match = re.search(r'/(\d{10,})/?$', url.rstrip("/"))
+            item_id_match = re.search(r'/(\d{10,})/?$', url.split('?')[0].rstrip("/"))
             item_id = item_id_match.group(1) if item_id_match else ""
 
             images = []
@@ -150,10 +150,10 @@ class BeamsMixin:
 
             for h4 in soup.find_all("h4"):
                 text = h4.get_text(strip=True)
-                if text and len(text) < 20 and re.match(r'^[A-Z\s]+$', text):
+                if text and len(text) < 40 and re.match(r'^[A-Za-z0-9/\s\-\.]+$', text) and any(c.isupper() for c in text):
                     colors.append(text)
 
-            size_stock_pattern = re.findall(r'([A-Z0-9]+)／(在庫あり|在庫なし|残りわずか)', page_text)
+            size_stock_pattern = re.findall(r'([A-Z0-9][A-Z0-9.]*)／(在庫あり|在庫なし|残りわずか|残り\d+点|取り寄せ)', page_text)
             seen_sizes = set()
             for size, stock in size_stock_pattern:
                 if size in VALID_SIZES and size not in seen_sizes:
@@ -178,7 +178,8 @@ class BeamsMixin:
                         stock_match = re.search(re.escape(size) + r'／(在庫あり|在庫なし|残りわずか)', section_text)
                         in_stock = True
                         if stock_match:
-                            in_stock = stock_match.group(1) != "在庫なし"
+                            status = stock_match.group(1)
+                            in_stock = status != "在庫なし"
 
                         color_img = ""
                         if color:

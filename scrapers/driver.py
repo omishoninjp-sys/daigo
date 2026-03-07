@@ -10,8 +10,12 @@ from config import PROXY_URL
 VALID_SIZES = {
     "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "5XL",
     "F", "フリー", "FREE",
+    # 日本鞋碼 (cm)
     *[str(n) for n in range(19, 32)],
     *[str(n) for n in range(55, 120, 5)],
+    # US 鞋碼（整號 + 半號，5~14）
+    *[str(n) for n in range(5, 15)],
+    *[f"{n}.5" for n in range(5, 14)],
 }
 
 
