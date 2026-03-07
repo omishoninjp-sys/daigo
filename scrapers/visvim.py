@@ -80,249 +80,111 @@ class VisvimMixin:
                         if i >= 2 and has_data:
                             break
 
-                    result = driver.execute_script("""
-                        var r = {title:'', price:0, images:[], description:'', variants:[], debug:''};
-
-                        // --- タイトル ---
-                        var h1 = document.querySelector('h1');
-                        if (h1) r.title = h1.textContent.trim();
-                        if (!r.title) {
-                            var og = document.querySelector('meta[property="og:title"]');
-                            if (og) r.title = (og.content || '').trim();
-                        }
-
-                        // --- 価格 ---
-                        var priceSelectors = ['[itemprop="price"]','[class*="price"]','[class*="Price"]','[data-price]'];
-                        for (var si = 0; si < priceSelectors.length && !r.price; si++) {
-                            document.querySelectorAll(priceSelectors[si]).forEach(function(el) {
-                                if (r.price) return;
-                                var raw = el.getAttribute('content') || el.getAttribute('data-price') || el.textContent;
-                                var m = (raw || '').replace(/,/g,'').match(/[0-9]{4,7}/);
-                                if (m) {
-                                    var p = parseInt(m[0]);
-                                    if (p >= 1000 && p <= 2000000) r.price = p;
-                                }
-                            });
-                        }
-                        if (!r.price) {
-                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
-                                try {
-                                    var d = JSON.parse(s.textContent);
-                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product';}) || null;
-                                    if (!d || d['@type'] !== 'Product') return;
-                                    if (!r.title && d.name) r.title = d.name;
-                                    var offers = d.offers || {};
-                                    if (Array.isArray(offers)) offers = offers[0] || {};
-                                    if (offers.price) {
-                                        var p = parseInt(String(offers.price).replace(/,/g,''));
-                                        if (p >= 1000) r.price = p;
-                                    }
-                                    if (d.image) {
-                                        var imgs = Array.isArray(d.image) ? d.image : [d.image];
-                                        imgs.forEach(function(u){ if (typeof u === 'string') r.images.push(u); });
-                                    }
-                                    r.description = d.description || '';
-                                } catch(e) {}
-                            });
-                        }
-
-                        // --- 画像 ---
-                        if (r.images.length === 0) {
-                            var ogImg = document.querySelector('meta[property="og:image"]');
-                            if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                        }
-                        document.querySelectorAll('img').forEach(function(img) {
-                            var src = img.src || img.getAttribute('data-src') || '';
-                            if (!src) return;
-                            if (src.indexOf('visvim') !== -1 &&
-                                src.indexOf('logo') === -1 &&
-                                src.indexOf('icon') === -1 &&
-                                r.images.indexOf(src) === -1 &&
-                                r.images.length < 10) {
-                                r.images.push(src);
-                            }
-                        });
-
-                        // --- 説明 ---
-                        if (!r.description) {
-                            var descEl = document.querySelector('[itemprop="description"], [class*="description"]');
-                            if (descEl) r.description = descEl.textContent.trim().substring(0, 500);
-                        }
-
-                        // ============================================================
-                        // Variants 抽出 v3
-                        //
-                        // visvim ページ構造（実測）:
-                        //   カラーラベル（DK.BROWN / BROWN）が縦方向に並ぶ
-                        //   各カラーの横に W6〜W10 のサイズ行
-                        //   カラーラベルは垂直中央揃えのため W6 より Y が大きい場合あり
-                        //
-                        // 戦略:
-                        //   1. サイズ行（W\d+ で始まる要素）を収集
-                        //   2. カラーラベル（大文字短文・無視ワード除外）を収集
-                        //   3. 各カラーが担当するサイズ範囲を Y 座標で分割して割り当て
-                        //
-                        // 無視ワード（言語・地域切替）:
-                        //   Japanese, English, JAPAN, NORTH AMERICA, EUROPE, ASIA, OCEANIA, NEW, SALE
-                        // ============================================================
-
-                        var IGNORE_SET = {
-                            'Japanese':1, 'English':1,
-                            'JAPAN':1, 'NORTH AMERICA':1, 'EUROPE':1,
-                            'ASIA':1, 'OCEANIA':1, 'ASIA / OCEANIA':1,
-                            'USD':1, 'JPY':1, 'EUR':1, 'GBP':1, 'CNY':1, 'KRW':1, 'HKD':1, 'TWD':1,
-                            'NEW':1, 'SALE':1, 'SOLD OUT':1, 'ADD TO CART':1,
-                            'MEN':1, "MEN'S":1, 'WOMEN':1, "WOMEN'S":1, 'UNISEX':1,
+                    # ===== DEBUG DUMP =====
+                    debug_info = driver.execute_script("""
+                        var result = {
+                            w_elements: [],
+                            options: [],
+                            selects: [],
+                            price_els: [],
+                            body_snippet: ''
                         };
 
-                        // カラーラベルのパターン:
-                        //   大文字・数字・スペース・ドット・スラッシュ・ハイフンのみ
-                        //   2〜25文字、数字で始まらない
-                        var COLOR_RE = /^[A-Z][A-Z0-9 .\/\-]*$/;
-                        var SIZE_RE  = /^W\d+$/;
-
-                        var allEls = Array.from(document.body.querySelectorAll('*'));
-
-                        // --- サイズ行を収集（W6, W7, ... にマッチする最小要素）---
-                        var sizeRows = [];
-                        allEls.forEach(function(el) {
-                            if (['SCRIPT','STYLE','NAV','HEADER','FOOTER','BUTTON'].indexOf(el.tagName) !== -1) return;
-                            // 葉ノードか、子が1〜2個程度の薄い要素
-                            if (el.children.length > 3) return;
-                            var t = el.textContent.replace(/\s+/g,' ').trim();
-                            var m = t.match(/^(W\d+)\b/);
-                            if (!m) return;
-                            var size = m[1];
-                            // 在庫判定
-                            var inStock = t.indexOf('Sold Out') === -1 &&
-                                          t.indexOf('SOLD OUT') === -1 &&
-                                          t.indexOf('sold out') === -1;
-                            // ボタン有無でも判定補強
-                            var btn = el.querySelector('button') ||
-                                      el.closest('tr,li,div') && el.closest('tr,li,div').querySelector('button[class*="cart"], button[class*="add"]');
-                            if (btn) {
-                                var bt = btn.textContent.trim().toLowerCase();
-                                if (bt.indexOf('sold') !== -1) inStock = false;
-                                else if (bt.indexOf('cart') !== -1 || bt.indexOf('かご') !== -1) inStock = true;
+                        // W[数字] を含む全要素
+                        document.querySelectorAll('*').forEach(function(el) {
+                            var own = '';
+                            for (var i = 0; i < el.childNodes.length; i++) {
+                                if (el.childNodes[i].nodeType === 3) {
+                                    own += el.childNodes[i].textContent;
+                                }
                             }
-                            var rect = el.getBoundingClientRect();
-                            // 画面外（表示されていない）要素は除外
-                            if (rect.width === 0 && rect.height === 0) return;
-                            sizeRows.push({el:el, size:size, inStock:inStock, y: rect.top + window.scrollY});
-                        });
-
-                        // 重複除去（同じ size + 近い Y は同じ行）
-                        var dedupedSizes = [];
-                        sizeRows.sort(function(a,b){return a.y - b.y;});
-                        sizeRows.forEach(function(row) {
-                            var dup = dedupedSizes.find(function(d){ return d.size === row.size && Math.abs(d.y - row.y) < 5; });
-                            if (!dup) dedupedSizes.push(row);
-                        });
-                        sizeRows = dedupedSizes;
-
-                        r.debug += ' sizeRows:' + sizeRows.length;
-
-                        // --- カラーラベルを収集 ---
-                        var colorCands = [];
-                        allEls.forEach(function(el) {
-                            // 葉ノードのみ
-                            if (el.children.length > 0) return;
-                            var t = el.textContent.trim();
-                            if (!t || t.length < 2 || t.length > 25) return;
-                            if (!COLOR_RE.test(t)) return;
-                            if (IGNORE_SET[t] || IGNORE_SET[t.toUpperCase()]) return;
-                            if (SIZE_RE.test(t)) return;
-                            if (/^\d/.test(t)) return;
-                            // 数字のみは除外
-                            if (/^[0-9 ]+$/.test(t)) return;
-                            var rect = el.getBoundingClientRect();
-                            if (rect.width === 0 && rect.height === 0) return;
-                            // カラーサムネイル画像が近くにあるか確認（visvim はサムネあり）
-                            var nearImg = '';
-                            var parent = el.parentElement;
-                            for (var d = 0; d < 6; d++) {
-                                if (!parent) break;
-                                var img = parent.querySelector('img[src*="visvim"]');
-                                if (img && img.src) { nearImg = img.src; break; }
-                                parent = parent.parentElement;
+                            own = own.trim();
+                            if (/W[0-9]/.test(own) && own.length < 50) {
+                                result.w_elements.push(
+                                    el.tagName + '.' + (el.className||'').toString().replace(/\\s+/g,'_').substring(0,40)
+                                    + ' => "' + own.substring(0,40) + '"'
+                                );
                             }
-                            colorCands.push({
-                                color: t,
-                                y: rect.top + window.scrollY,
-                                image: nearImg
-                            });
                         });
 
-                        // 重複除去
-                        var dedupedColors = [];
-                        colorCands.sort(function(a,b){return a.y - b.y;});
-                        colorCands.forEach(function(cc) {
-                            var dup = dedupedColors.find(function(d){ return d.color === cc.color; });
-                            if (!dup) dedupedColors.push(cc);
-                        });
-                        colorCands = dedupedColors;
-
-                        r.debug += ' colorCands:' + colorCands.length;
-                        r.debug += ' colors:[' + colorCands.map(function(c){return c.color;}).join(',') + ']';
-
-                        var variants = [];
-
-                        if (sizeRows.length > 0 && colorCands.length > 0) {
-                            // 各カラーが担当する Y 範囲を決める
-                            // カラー i の範囲: colorCands[i].y - margin  〜  colorCands[i+1].y - margin
-                            // margin = 各カラー間距離の半分、またはサイズ行の平均高さ
-
-                            colorCands.forEach(function(cc, idx) {
-                                var rangeStart = cc.y - 80;   // カラーラベルより上のサイズも含む（垂直中央揃え対策）
-                                var rangeEnd   = idx < colorCands.length - 1
-                                                    ? colorCands[idx + 1].y - 80
-                                                    : Infinity;
-
-                                sizeRows.forEach(function(row) {
-                                    if (row.y >= rangeStart && row.y < rangeEnd) {
-                                        variants.push({
-                                            color:    cc.color,
-                                            size:     row.size,
-                                            sku:      cc.color + '-' + row.size,
-                                            price:    r.price,
-                                            in_stock: row.inStock,
-                                            image:    cc.image
-                                        });
-                                    }
-                                });
+                        // 全 select と option
+                        document.querySelectorAll('select').forEach(function(sel) {
+                            var info = 'SELECT name=' + (sel.name||sel.id||'?') + ' options=[';
+                            var opts = [];
+                            sel.querySelectorAll('option').forEach(function(o) {
+                                opts.push('"' + o.textContent.trim().substring(0,20) + '"');
                             });
-
-                        } else if (sizeRows.length > 0) {
-                            // カラーなし → サイズのみ
-                            sizeRows.forEach(function(row) {
-                                variants.push({
-                                    color:    '',
-                                    size:     row.size,
-                                    sku:      row.size,
-                                    price:    r.price,
-                                    in_stock: row.inStock,
-                                    image:    ''
-                                });
-                            });
-                        }
-
-                        // 重複除去（color+size キー）
-                        var seen = {};
-                        r.variants = variants.filter(function(v) {
-                            var key = v.color + '|' + v.size;
-                            if (seen[key]) return false;
-                            seen[key] = true;
-                            return true;
+                            info += opts.join(',') + ']';
+                            result.selects.push(info);
                         });
 
-                        r.debug += ' finalVariants:' + r.variants.length;
-                        return r;
+                        // 全 option（select 外も含む）
+                        document.querySelectorAll('option').forEach(function(o) {
+                            result.options.push('val=' + o.value + ' text=' + o.textContent.trim().substring(0,30));
+                        });
+
+                        // 価格っぽい要素
+                        document.querySelectorAll('[class*="price"],[class*="Price"],[itemprop="price"]').forEach(function(el) {
+                            result.price_els.push(
+                                el.tagName + '.' + (el.className||'').toString().replace(/\\s+/g,'_').substring(0,30)
+                                + ' content=' + (el.getAttribute('content')||'')
+                                + ' text="' + el.textContent.trim().substring(0,30) + '"'
+                            );
+                        });
+
+                        // body 先頭 3000 文字（構造確認用）
+                        result.body_snippet = document.body.innerHTML.substring(0, 3000);
+
+                        return result;
                     """)
 
-                    if result:
-                        print(f"[visvim] debug: {result.get('debug','')}")
-                        if result.get("title"):
-                            return result
+                    print(f"[visvim][DEBUG] W要素({len(debug_info.get('w_elements',[]))}件):")
+                    for x in debug_info.get('w_elements', []):
+                        print(f"  {x}")
+
+                    print(f"[visvim][DEBUG] SELECT({len(debug_info.get('selects',[]))}件):")
+                    for x in debug_info.get('selects', []):
+                        print(f"  {x}")
+
+                    print(f"[visvim][DEBUG] OPTION({len(debug_info.get('options',[]))}件):")
+                    for x in debug_info.get('options', []):
+                        print(f"  {x}")
+
+                    print(f"[visvim][DEBUG] PRICE_ELS({len(debug_info.get('price_els',[]))}件):")
+                    for x in debug_info.get('price_els', []):
+                        print(f"  {x}")
+
+                    snippet = debug_info.get('body_snippet', '')
+                    print(f"[visvim][DEBUG] body_snippet(先頭3000文字):")
+                    # 500文字ずつ分割して出力
+                    for i in range(0, min(len(snippet), 3000), 500):
+                        print(f"  [{i}] {snippet[i:i+500]}")
+
+                    # variants は今は空で返す（デバッグ優先）
+                    title_el = driver.execute_script("""
+                        var h1 = document.querySelector('h1');
+                        var price = 0;
+                        document.querySelectorAll('[class*="price"],[itemprop="price"]').forEach(function(el) {
+                            if (price) return;
+                            var raw = el.getAttribute('content') || el.textContent;
+                            var m = (raw||'').replace(/,/g,'').match(/[0-9]{4,7}/);
+                            if (m) { var p = parseInt(m[0]); if (p >= 1000 && p <= 2000000) price = p; }
+                        });
+                        var og = document.querySelector('meta[property="og:title"]');
+                        return {
+                            title: h1 ? h1.textContent.trim() : (og ? og.content : ''),
+                            price: price
+                        };
+                    """)
+
+                    if title_el and title_el.get('title'):
+                        return {
+                            'title': title_el['title'],
+                            'price': title_el.get('price', 0),
+                            'images': [],
+                            'description': '',
+                            'variants': []
+                        }
 
                     return None
 
