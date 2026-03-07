@@ -21,6 +21,7 @@ from scrapers.palcloset import PalClosetMixin
 from scrapers.shopify_jp import ShopifyJpMixin
 from scrapers.mercari import MercariMixin
 from scrapers.oakley import OakleyMixin
+from scrapers.visvim import VisvimMixin
 
 
 class Scraper(
@@ -36,6 +37,7 @@ class Scraper(
     ShopifyJpMixin,
     MercariMixin,
     OakleyMixin,
+    VisvimMixin,
 ):
     """
     商品爬取主 class
@@ -64,6 +66,8 @@ class Scraper(
             product = await self._scrape_nijisanji(url)
         elif platform == "palcloset":
             product = await self._scrape_palcloset(url)
+        elif platform == "visvim":
+            product = await self._scrape_visvim(url)
         elif platform == "shopify_jp":
             product = await self._scrape_shopify_jp(url)
         elif platform == "mercari":

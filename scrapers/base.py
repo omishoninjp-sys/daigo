@@ -53,6 +53,8 @@ def detect_platform(url: str) -> str:
         return "nijisanji"
     if "palcloset.jp" in host:
         return "palcloset"
+    if "visvim.tv" in host:
+        return "visvim"
     if "rakuten.co.jp" in host:
         return "rakuten"
     if "nanouniverse" in host or "store.nanouniverse.jp" in host:
