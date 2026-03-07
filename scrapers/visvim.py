@@ -55,6 +55,7 @@ class VisvimMixin:
                             self._create_driver()
                             continue
 
+                    # 初回ロード待機
                     for i in range(15):
                         _time.sleep(2)
                         try:
@@ -80,17 +81,32 @@ class VisvimMixin:
                         if i >= 2 and has_data:
                             break
 
-                    # ===== DEBUG DUMP =====
+                    # ===== スクロールして lazy load を発火 =====
+                    try:
+                        driver.execute_script("window.scrollTo(0, 300);")
+                        _time.sleep(1)
+                        driver.execute_script("window.scrollTo(0, 600);")
+                        _time.sleep(1)
+                        driver.execute_script("window.scrollTo(0, 1200);")
+                        _time.sleep(2)
+                        driver.execute_script("window.scrollTo(0, 0);")
+                        _time.sleep(1)
+                    except Exception:
+                        pass
+
+                    # ===== DEBUG DUMP v2 =====
                     debug_info = driver.execute_script("""
                         var result = {
+                            total_html_len: document.body.innerHTML.length,
                             w_elements: [],
-                            options: [],
                             selects: [],
+                            options: [],
                             price_els: [],
-                            body_snippet: ''
+                            sold_out_elements: [],
+                            product_section: ''
                         };
 
-                        // W[数字] を含む全要素
+                        // W[数字] を直接テキストに持つ要素（自分のテキストノードのみ）
                         document.querySelectorAll('*').forEach(function(el) {
                             var own = '';
                             for (var i = 0; i < el.childNodes.length; i++) {
@@ -99,44 +115,67 @@ class VisvimMixin:
                                 }
                             }
                             own = own.trim();
-                            if (/W[0-9]/.test(own) && own.length < 50) {
+                            if (/W[0-9]/.test(own) && own.length < 60) {
                                 result.w_elements.push(
-                                    el.tagName + '.' + (el.className||'').toString().replace(/\\s+/g,'_').substring(0,40)
-                                    + ' => "' + own.substring(0,40) + '"'
+                                    el.tagName
+                                    + '[class=' + (el.className||'').toString().substring(0,40) + ']'
+                                    + ' => "' + own.substring(0,50) + '"'
                                 );
                             }
                         });
 
-                        // 全 select と option
+                        // 全 select
                         document.querySelectorAll('select').forEach(function(sel) {
-                            var info = 'SELECT name=' + (sel.name||sel.id||'?') + ' options=[';
                             var opts = [];
                             sel.querySelectorAll('option').forEach(function(o) {
-                                opts.push('"' + o.textContent.trim().substring(0,20) + '"');
+                                opts.push(o.value.substring(0,20) + ':' + o.textContent.trim().substring(0,20));
                             });
-                            info += opts.join(',') + ']';
-                            result.selects.push(info);
+                            result.selects.push('name=' + (sel.name||sel.id||'?') + ' [' + opts.join(' | ') + ']');
                         });
 
-                        // 全 option（select 外も含む）
+                        // 全 option
                         document.querySelectorAll('option').forEach(function(o) {
-                            result.options.push('val=' + o.value + ' text=' + o.textContent.trim().substring(0,30));
+                            result.options.push('val="' + o.value.substring(0,30) + '" text="' + o.textContent.trim().substring(0,30) + '"');
                         });
 
-                        // 価格っぽい要素
-                        document.querySelectorAll('[class*="price"],[class*="Price"],[itemprop="price"]').forEach(function(el) {
+                        // 価格要素
+                        document.querySelectorAll('[class*="price"],[class*="Price"],[itemprop="price"],[class*="amount"],[class*="Amount"]').forEach(function(el) {
                             result.price_els.push(
-                                el.tagName + '.' + (el.className||'').toString().replace(/\\s+/g,'_').substring(0,30)
-                                + ' content=' + (el.getAttribute('content')||'')
-                                + ' text="' + el.textContent.trim().substring(0,30) + '"'
+                                el.tagName + '[' + (el.className||'').toString().substring(0,30) + ']'
+                                + ' content="' + (el.getAttribute('content')||'') + '"'
+                                + ' text="' + el.textContent.trim().substring(0,40) + '"'
                             );
                         });
 
-                        // body 先頭 3000 文字（構造確認用）
-                        result.body_snippet = document.body.innerHTML.substring(0, 3000);
+                        // Sold Out テキストを持つ要素
+                        document.querySelectorAll('*').forEach(function(el) {
+                            if (el.children.length > 3) return;
+                            var t = el.textContent.trim();
+                            if (t === 'Sold Out' || t === 'SOLD OUT') {
+                                result.sold_out_elements.push(
+                                    el.tagName + '[' + (el.className||'').toString().substring(0,40) + ']'
+                                );
+                            }
+                        });
+
+                        // 商品詳細セクション（h1 の親要素の innerHTML）
+                        var h1 = document.querySelector('h1');
+                        if (h1) {
+                            var parent = h1.parentElement;
+                            for (var d = 0; d < 5; d++) {
+                                if (!parent) break;
+                                if (parent.innerHTML.length > 500 && parent.innerHTML.length < 20000) {
+                                    result.product_section = parent.innerHTML.substring(0, 5000);
+                                    break;
+                                }
+                                parent = parent.parentElement;
+                            }
+                        }
 
                         return result;
                     """)
+
+                    print(f"[visvim][DEBUG] HTML総サイズ: {debug_info.get('total_html_len')} bytes")
 
                     print(f"[visvim][DEBUG] W要素({len(debug_info.get('w_elements',[]))}件):")
                     for x in debug_info.get('w_elements', []):
@@ -147,21 +186,27 @@ class VisvimMixin:
                         print(f"  {x}")
 
                     print(f"[visvim][DEBUG] OPTION({len(debug_info.get('options',[]))}件):")
-                    for x in debug_info.get('options', []):
+                    for x in debug_info.get('options', [])[:30]:
                         print(f"  {x}")
 
                     print(f"[visvim][DEBUG] PRICE_ELS({len(debug_info.get('price_els',[]))}件):")
                     for x in debug_info.get('price_els', []):
                         print(f"  {x}")
 
-                    snippet = debug_info.get('body_snippet', '')
-                    print(f"[visvim][DEBUG] body_snippet(先頭3000文字):")
-                    # 500文字ずつ分割して出力
-                    for i in range(0, min(len(snippet), 3000), 500):
-                        print(f"  [{i}] {snippet[i:i+500]}")
+                    print(f"[visvim][DEBUG] SOLD_OUT要素({len(debug_info.get('sold_out_elements',[]))}件):")
+                    for x in debug_info.get('sold_out_elements', [])[:10]:
+                        print(f"  {x}")
 
-                    # variants は今は空で返す（デバッグ優先）
-                    title_el = driver.execute_script("""
+                    section = debug_info.get('product_section', '')
+                    if section:
+                        print(f"[visvim][DEBUG] product_section(5000文字):")
+                        for i in range(0, min(len(section), 5000), 500):
+                            print(f"  [{i}] {section[i:i+500]}")
+                    else:
+                        print(f"[visvim][DEBUG] product_section: 見つからず")
+
+                    # 最低限のデータだけ返す（デバッグ優先）
+                    basic = driver.execute_script("""
                         var h1 = document.querySelector('h1');
                         var price = 0;
                         document.querySelectorAll('[class*="price"],[itemprop="price"]').forEach(function(el) {
@@ -177,10 +222,10 @@ class VisvimMixin:
                         };
                     """)
 
-                    if title_el and title_el.get('title'):
+                    if basic and basic.get('title'):
                         return {
-                            'title': title_el['title'],
-                            'price': title_el.get('price', 0),
+                            'title': basic['title'],
+                            'price': basic.get('price', 0),
                             'images': [],
                             'description': '',
                             'variants': []
