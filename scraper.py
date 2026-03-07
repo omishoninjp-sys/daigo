@@ -2040,7 +2040,17 @@ class Scraper:
                                 }
                             });
                             r.images = r.images.slice(0, 20);
-
+                            var liClasses = new Set();
+                            document.querySelectorAll('li').forEach(function(el) {
+                                if (el.className) liClasses.add(el.className.trim().split(' ')[0]);
+                            });
+                            var dtClasses = new Set();
+                            document.querySelectorAll('dt').forEach(function(el) {
+                                if (el.className) dtClasses.add(el.className.trim().split(' ')[0]);
+                            });
+                            r.variant_debug += ' | li_classes: ' + Array.from(liClasses).slice(0,15).join(',') + 
+                                               ' | dt_classes: ' + Array.from(dtClasses).slice(0,10).join(',') +
+                                               ' | NEXT_DATA: ' + (document.getElementById('__NEXT_DATA__') ? 'yes' : 'no');
                             return r;
                         """)
                         if result:
