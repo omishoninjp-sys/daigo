@@ -110,6 +110,7 @@ class HumanMadeMixin:
             # === 顏色 ===
             colors = []
             seen_colors = set()
+            color_img_map: dict[str, str] = {}  # color_name -> image_url
             color_containers = soup.find_all(
                 class_=re.compile(r'color', re.I)
             ) + soup.find_all(attrs={"data-attr": "color"})
@@ -121,7 +122,7 @@ class HumanMadeMixin:
                 "select", "選択", "選擇",
             }
             for container in color_containers:
-                for el in container.find_all(["button", "label", "span"]):
+                for el in container.find_all(["button", "label", "span", "a"]):
                     text = (
                         el.get("title") or
                         el.get("data-attr-value") or
@@ -132,6 +133,37 @@ class HumanMadeMixin:
                             and text.lower() not in color_exclude):
                         seen_colors.add(text)
                         colors.append(text)
+
+                        # 嘗試抓這個顏色的縮圖
+                        swatch_img = None
+                        img_el = el.find("img")
+                        if img_el:
+                            swatch_img = (
+                                img_el.get("data-src") or
+                                img_el.get("src") or
+                                img_el.get("data-lazy-src") or ""
+                            )
+                        # SFCC 常見：data-swatch-url / data-image / href
+                        if not swatch_img:
+                            swatch_img = (
+                                el.get("data-swatch-url") or
+                                el.get("data-image") or
+                                el.get("data-img") or ""
+                            )
+                        # 嘗試找同層 sibling 的 <img>
+                        if not swatch_img:
+                            parent = el.parent
+                            if parent:
+                                pi = parent.find("img")
+                                if pi:
+                                    swatch_img = (
+                                        pi.get("data-src") or pi.get("src") or ""
+                                    )
+
+                        if swatch_img and swatch_img.startswith("http"):
+                            # 把縮圖升解析度（SFCC 常見 sw=80 → sw=800）
+                            swatch_img = re.sub(r'[?&]sw=\d+', '', swatch_img)
+                            color_img_map[text] = swatch_img
 
             # === 商品說明 ===
             for desc_sel in [
@@ -150,6 +182,7 @@ class HumanMadeMixin:
                 variants = []
                 if sizes and colors:
                     for color in colors:
+                        color_img = color_img_map.get(color) or product.image_url
                         for size in sizes:
                             variants.append({
                                 "color": color,
@@ -157,7 +190,7 @@ class HumanMadeMixin:
                                 "sku": f"hm-{color}-{size}".lower().replace(" ", "-"),
                                 "price": product.price_jpy or 0,
                                 "in_stock": True,
-                                "image": product.image_url,
+                                "image": color_img,
                             })
                 elif sizes:
                     for size in sizes:
@@ -171,19 +204,21 @@ class HumanMadeMixin:
                         })
                 elif colors:
                     for color in colors:
+                        color_img = color_img_map.get(color) or product.image_url
                         variants.append({
                             "color": color,
                             "size": "",
                             "sku": f"hm-{color}".lower().replace(" ", "-"),
                             "price": product.price_jpy or 0,
                             "in_stock": True,
-                            "image": product.image_url,
+                            "image": color_img,
                         })
                 product.variants = variants
 
             print(
                 f"[HumanMade] ✅ {product.title} / ¥{product.price_jpy} / "
-                f"sizes={sizes} / colors={colors} / images={len(imgs)}"
+                f"sizes={sizes} / colors={colors} / "
+                f"color_imgs={list(color_img_map.keys())} / images={len(imgs)}"
             )
 
         except Exception as e:
