@@ -1,14 +1,10 @@
 """
 NEIGHBORHOOD 爬蟲 Mixin
-neighborhood.jp 使用自訂庫存 JSON（qua 欄位），不能用 Shopify available
+neighborhood.jp 需要 Playwright（JS 渲染），庫存從 qua JSON 讀取
 """
 import re
 import json
 
-import httpx
-from bs4 import BeautifulSoup
-
-from config import USER_AGENT
 from scrapers.base import ProductInfo
 
 
@@ -17,24 +13,29 @@ class NeighborhoodMixin:
     async def _scrape_neighborhood(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
         try:
-            headers = {
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Referer": "https://www.neighborhood.jp/",
-            }
+            from playwright.async_api import async_playwright
+            import asyncio
 
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(20.0, connect=10.0),
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code != 200:
-                    print(f"[NEIGHBORHOOD] HTTP {resp.status_code}")
-                    return product
-                html = resp.text
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    locale="ja-JP",
+                )
+                page = await ctx.new_page()
 
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    # 等待價格元素出現
+                    try:
+                        await page.wait_for_selector(".product-price", timeout=10000)
+                    except Exception:
+                        pass
+                    html = await page.content()
+                finally:
+                    await browser.close()
+
+            from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, "html.parser")
 
             # ── 標題 ──────────────────────────────────────
@@ -47,7 +48,6 @@ class NeighborhoodMixin:
             product.brand = vendor.get_text(strip=True) if vendor else "NEIGHBORHOOD"
 
             # ── 價格 ──────────────────────────────────────
-            # <span class="product-price ...">¥12,100</span>
             price_el = soup.find("span", class_=re.compile(r'product-price'))
             if price_el:
                 price_text = price_el.get_text(strip=True)
@@ -63,7 +63,6 @@ class NeighborhoodMixin:
             for img in soup.find_all("img"):
                 src = img.get("src") or img.get("data-src") or ""
                 if "cdn.shopify.com" in src and "/products/" in src:
-                    # 升至最大尺寸
                     src = re.sub(r'_\d+x\d*(\.\w+)$', r'\1', src)
                     if src not in imgs:
                         imgs.append(src)
@@ -72,13 +71,9 @@ class NeighborhoodMixin:
                 product.extra_images = imgs[1:5]
 
             # ── 庫存 JSON（qua 欄位）─────────────────────
-            # <script type="application/json">
-            # [{"qua": "1", "name": "OLIVE DRAB XS"}, ...]
-            # </script>
-            stock_map = {}  # "COLOR SIZE" -> bool
+            stock_map = {}
             for script in soup.find_all("script", type="application/json"):
-                raw = script.string or ""
-                raw = raw.strip()
+                raw = (script.string or "").strip()
                 if not raw.startswith("["):
                     continue
                 try:
@@ -86,9 +81,8 @@ class NeighborhoodMixin:
                     if isinstance(items, list) and items and "qua" in items[0]:
                         for item in items:
                             name = item.get("name", "")
-                            qua = item.get("qua", "0")
                             try:
-                                stock_map[name] = int(qua) > 0
+                                stock_map[name] = int(item.get("qua", "0")) > 0
                             except (ValueError, TypeError):
                                 stock_map[name] = False
                         break
@@ -96,8 +90,7 @@ class NeighborhoodMixin:
                     continue
 
             # ── Colors / Sizes ────────────────────────────
-            colors = []
-            sizes = []
+            colors, sizes = [], []
 
             color_div = soup.find("div", id="colorOptions")
             if color_div:
@@ -115,21 +108,13 @@ class NeighborhoodMixin:
 
             # ── 組合 variants ─────────────────────────────
             if colors or sizes:
-                if not colors:
-                    colors = [""]
-                if not sizes:
-                    sizes = [""]
+                if not colors: colors = [""]
+                if not sizes:  sizes  = [""]
 
                 for color in colors:
                     for size in sizes:
                         key = f"{color} {size}".strip()
-                        if stock_map:
-                            in_stock = stock_map.get(key, False)
-                        else:
-                            # 沒有庫存 JSON 時，從 soldout class 判斷
-                            # 保守預設 False
-                            in_stock = False
-
+                        in_stock = stock_map.get(key, False)
                         product.variants.append({
                             "color": color,
                             "size": size,
