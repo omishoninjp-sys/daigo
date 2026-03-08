@@ -22,6 +22,7 @@ from scrapers.shopify_jp import ShopifyJpMixin
 from scrapers.mercari import MercariMixin
 from scrapers.oakley import OakleyMixin
 from scrapers.neighborhood import NeighborhoodMixin
+from scrapers.wtaps import WtapsMixin
 
 
 class Scraper(
@@ -38,6 +39,7 @@ class Scraper(
     MercariMixin,
     OakleyMixin,
     NeighborhoodMixin,
+    WtapsMixin,
 ):
     """
     商品爬取主 class
@@ -72,6 +74,8 @@ class Scraper(
             product = await self._scrape_mercari(url)
         elif platform == "neighborhood":
             product = await self._scrape_neighborhood(url)
+        elif platform == "wtaps":
+            product = await self._scrape_wtaps(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
