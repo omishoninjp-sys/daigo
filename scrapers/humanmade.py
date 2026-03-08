@@ -1,250 +1,255 @@
 """
 Human Made (humanmade.jp) 爬蟲 Mixin
-humanmade.jp 使用 Salesforce Commerce Cloud (SFCC) 自建平台，有 WAF 防護，
-需要 Playwright headless browser 才能正常讀取。
+humanmade.jp 使用自建平台（原 SFCC），有 WAF 防護，
+使用 SeleniumBase UC driver 繞過封鎖。
 """
+import re
+import time as _time
+
 from scrapers.base import ProductInfo
 
 
 class HumanMadeMixin:
 
     async def _scrape_humanmade(self, url: str) -> ProductInfo:
-        page = await self._get_playwright_page()
         product = ProductInfo(source_url=url, brand="Human Made")
 
-        # 載入頁面
-        try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-        except Exception:
-            try:
-                await page.wait_for_timeout(5000)
-            except Exception:
-                pass
-
-        # 關閉 Global-e 國際運送彈窗
-        try:
-            await page.evaluate("""() => {
-                const ge = document.getElementById('globalePopupWrapper');
-                if (ge) ge.remove();
-                document.querySelectorAll('[class*="globale"], [id*="globale"]').forEach(el => {
-                    if (getComputedStyle(el).position === 'fixed') el.remove();
-                });
-            }""")
-        except Exception:
-            pass
-
-        # 關閉 Cookie 彈窗
-        try:
-            btn = page.locator('text=同意する').first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                await page.wait_for_timeout(1000)
-        except Exception:
-            pass
+        html = await self._humanmade_fetch_html(url)
+        if not html:
+            print(f"[HumanMade] ❌ 無法取得 HTML: {url}")
+            return product
 
         try:
-            data = await page.evaluate("""() => {
-                const result = {
-                    title: '',
-                    price_jpy: 0,
-                    sizes: [],
-                    colors: [],
-                    images: [],
-                    description: ''
-                };
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
 
-                // === 商品名稱 ===
-                for (const sel of ['h1', '.product-title', '.product-name', 'main h1']) {
-                    const el = document.querySelector(sel);
-                    if (el && el.textContent.trim().length > 2) {
-                        result.title = el.textContent.trim();
-                        break;
-                    }
-                }
+            # === 商品名稱 ===
+            for sel in [
+                ("h1", {}),
+                ("h1", {"class": re.compile(r"product")}),
+                ("div", {"class": re.compile(r"product-name|product-title")}),
+            ]:
+                el = soup.find(sel[0], sel[1])
+                if el and el.get_text(strip=True):
+                    product.title = el.get_text(strip=True)
+                    break
 
-                // === 價格（專門找結構化 JPY，避免抓到碎片金額）===
-                // SFCC 常見 selector
-                const priceSelectors = [
-                    '.sales .value',
-                    '.price-sales .value',
-                    '.product-price .sales',
-                    '[class*="price-sales"]',
-                    '[class*="sales"][class*="price"]',
-                    '.pdp-main .price .value',
-                    '.product-detail .price'
-                ];
-                for (const sel of priceSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const text = el.textContent.trim();
-                        const m = text.match(/[¥￥]\\s*([\\d,]+)/);
-                        if (m) {
-                            const val = parseInt(m[1].replace(/,/g, ''));
-                            if (val >= 1000) {
-                                result.price_jpy = val;
-                                break;
-                            }
-                        }
-                    }
-                }
+            # === 價格（只接受 ¥ + 四位數以上，避免抓到碎片）===
+            price_jpy = 0
+            # 先找結構化 selector
+            for cls_pattern in [
+                re.compile(r"sales"),
+                re.compile(r"price-sales"),
+                re.compile(r"product-price"),
+            ]:
+                el = soup.find(class_=cls_pattern)
+                if el:
+                    text = el.get_text(strip=True)
+                    m = re.search(r'[¥￥]\s*([\d,]+)', text)
+                    if m:
+                        val = int(m.group(1).replace(',', ''))
+                        if val >= 1000:
+                            price_jpy = val
+                            break
 
-                // Fallback：用 TreeWalker 掃文字節點，找四位數以上的 ¥ 金額
-                if (!result.price_jpy) {
-                    const walker = document.createTreeWalker(
-                        document.body, NodeFilter.SHOW_TEXT, null
-                    );
-                    let node;
-                    while ((node = walker.nextNode())) {
-                        const text = node.textContent.trim();
-                        // 只接受「¥XXXXX」格式，且金額 >= 1000
-                        const m = text.match(/^[¥￥]\\s*([1-9][\\d,]{3,})$/);
-                        if (m) {
-                            const val = parseInt(m[1].replace(/,/g, ''));
-                            if (val >= 1000 && val <= 500000) {
-                                result.price_jpy = val;
-                                break;
-                            }
-                        }
-                    }
-                }
+            # Fallback：掃全部文字節點，找 ¥XXXXX 格式（四位數以上）
+            if not price_jpy:
+                for text in soup.stripped_strings:
+                    m = re.match(r'^[¥￥]\s*([1-9][\d,]{3,})$', text.strip())
+                    if m:
+                        val = int(m.group(1).replace(',', ''))
+                        if 1000 <= val <= 500000:
+                            price_jpy = val
+                            break
 
-                // === 尺寸 ===
-                const sizeSelectors = [
-                    '.attribute[data-attr="size"] button',
-                    '.swatches.size button',
-                    '.swatches.size label',
-                    '[class*="size"] button',
-                    '[class*="size"] label',
-                    '[class*="Size"] button',
-                    '[class*="Size"] label',
-                    '[data-option="size"] button',
-                    '[data-option="size"] label',
-                    'li[data-attr-value]'
-                ];
-                const sizePattern = /^(XXS|XS|S|M|L|XL|2XL|3XL|4XL|ONE\\s*SIZE|FREE|OS|\\d{2,3})$/i;
-                const seenSizes = new Set();
-                for (const sel of sizeSelectors) {
-                    document.querySelectorAll(sel).forEach(el => {
-                        const text = el.textContent.trim().toUpperCase();
-                        if (sizePattern.test(text) && !seenSizes.has(text)) {
-                            seenSizes.add(text);
-                            result.sizes.push(text);
-                        }
-                    });
-                    if (result.sizes.length > 0) break;
-                }
+            product.price_jpy = price_jpy if price_jpy >= 1000 else None
 
-                // === 顏色 ===
-                const colorSelectors = [
-                    '.attribute[data-attr="color"] button',
-                    '.swatches.color button',
-                    '[class*="color"] label',
-                    '[class*="color"] button'
-                ];
-                const seenColors = new Set();
-                for (const sel of colorSelectors) {
-                    document.querySelectorAll(sel).forEach(el => {
-                        const text = (el.title || el.dataset.attrValue || el.textContent).trim();
-                        if (text && text.length < 30 && !seenColors.has(text)) {
-                            seenColors.add(text);
-                            result.colors.push(text);
-                        }
-                    });
-                    if (result.colors.length > 0) break;
-                }
+            # === 圖片 ===
+            exclude = ['icon', 'logo', 'svg', 'pixel', 'tracking',
+                       'spacer', 'blank', 'globale', 'banner', 'badge',
+                       'flag', 'payment']
+            imgs = []
+            seen = set()
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+                if not src:
+                    srcset = img.get("srcset", "")
+                    if srcset:
+                        src = srcset.split(",")[0].strip().split(" ")[0]
+                if src and src.startswith("http") and src not in seen:
+                    sl = src.lower()
+                    if not any(p in sl for p in exclude):
+                        seen.add(src)
+                        imgs.append(src)
+                if len(imgs) >= 8:
+                    break
 
-                // === 圖片 ===
-                const excludePatterns = [
-                    'icon', 'logo', 'svg', 'pixel', 'tracking', 'spacer',
-                    'blank', 'globale', 'banner', 'badge', 'flag', 'payment'
-                ];
-                const seenImgs = new Set();
-                const imgSelectors = [
-                    '.primary-images img',
-                    '.product-images img',
-                    '.pdp-images img',
-                    '.product-detail img',
-                    '[class*="carousel"] img',
-                    '[class*="gallery"] img',
-                    'main img[src]'
-                ];
-                for (const sel of imgSelectors) {
-                    document.querySelectorAll(sel).forEach(img => {
-                        let src = img.src || img.dataset.src || '';
-                        if (!src && img.srcset) {
-                            src = img.srcset.split(',')[0].trim().split(' ')[0];
-                        }
-                        if (src && src.startsWith('http') && !seenImgs.has(src)) {
-                            const sl = src.toLowerCase();
-                            if (!excludePatterns.some(p => sl.includes(p))) {
-                                seenImgs.add(src);
-                                result.images.push(src);
-                            }
-                        }
-                    });
-                    if (result.images.length >= 5) break;
-                }
+            if imgs:
+                product.image_url = imgs[0]
+                product.extra_images = imgs[1:]
 
-                // === 商品說明 ===
-                for (const sel of [
-                    '#collapsible-description-1',
-                    '.value.content',
-                    '.product-description',
-                    '.pdp-description'
-                ]) {
-                    const el = document.querySelector(sel);
-                    if (el && el.innerText.trim().length > 20) {
-                        result.description = el.innerText.trim();
-                        break;
-                    }
-                }
+            # === 尺寸 ===
+            sizes = []
+            seen_sizes = set()
+            size_pattern = re.compile(
+                r'^(XXS|XS|S|M|L|XL|2XL|3XL|4XL|ONE\s*SIZE|FREE|OS|\d{2,3})$',
+                re.IGNORECASE
+            )
+            # 嘗試找 size 相關 container
+            size_containers = soup.find_all(
+                class_=re.compile(r'size', re.I)
+            ) + soup.find_all(attrs={"data-attr": "size"})
 
-                return result;
-            }""")
+            for container in size_containers:
+                for el in container.find_all(["button", "label", "li", "span"]):
+                    text = el.get_text(strip=True).upper()
+                    if size_pattern.match(text) and text not in seen_sizes:
+                        seen_sizes.add(text)
+                        sizes.append(text)
 
-            if data:
-                product.title = data.get('title', '')
-                price = data.get('price_jpy', 0)
-                product.price_jpy = price if price and price >= 1000 else None
-                product.description = data.get('description', '')
+            # === 顏色 ===
+            colors = []
+            seen_colors = set()
+            color_containers = soup.find_all(
+                class_=re.compile(r'color', re.I)
+            ) + soup.find_all(attrs={"data-attr": "color"})
 
-                images = data.get('images', [])
-                if images:
-                    product.image_url = images[0]
-                    product.extra_images = images[1:]
+            for container in color_containers:
+                for el in container.find_all(["button", "label", "span"]):
+                    text = (
+                        el.get("title") or
+                        el.get("data-attr-value") or
+                        el.get_text(strip=True)
+                    ).strip()
+                    if text and len(text) < 30 and text not in seen_colors:
+                        seen_colors.add(text)
+                        colors.append(text)
 
-                # variants：尺寸 × 顏色 組合
-                sizes = data.get('sizes', [])
-                colors = data.get('colors', [])
+            # === 商品說明 ===
+            for desc_sel in [
+                {"id": "collapsible-description-1"},
+                {"class": re.compile(r"product-description|pdp-description|value.*content", re.I)},
+            ]:
+                el = soup.find(**{"attrs": desc_sel} if "class" in desc_sel or "id" in desc_sel else desc_sel)
+                if el:
+                    text = el.get_text(separator="\n", strip=True)
+                    if len(text) > 20:
+                        product.description = text
+                        break
 
-                if sizes or colors:
-                    variants = []
-                    if sizes and colors:
-                        for color in colors:
-                            for size in sizes:
-                                variants.append({
-                                    'option1': color,
-                                    'option2': size,
-                                    'title': f"{color} / {size}"
-                                })
-                    elif sizes:
+            # === variants 組合 ===
+            if sizes or colors:
+                variants = []
+                if sizes and colors:
+                    for color in colors:
                         for size in sizes:
                             variants.append({
-                                'option1': size,
-                                'title': size
+                                "color": color,
+                                "size": size,
+                                "sku": f"hm-{color}-{size}".lower().replace(" ", "-"),
+                                "price": product.price_jpy or 0,
+                                "in_stock": True,
+                                "image": product.image_url,
                             })
-                    elif colors:
-                        for color in colors:
-                            variants.append({
-                                'option1': color,
-                                'title': color
-                            })
-                    product.variants = variants
+                elif sizes:
+                    for size in sizes:
+                        variants.append({
+                            "color": "",
+                            "size": size,
+                            "sku": f"hm-{size}".lower(),
+                            "price": product.price_jpy or 0,
+                            "in_stock": True,
+                            "image": product.image_url,
+                        })
+                elif colors:
+                    for color in colors:
+                        variants.append({
+                            "color": color,
+                            "size": "",
+                            "sku": f"hm-{color}".lower().replace(" ", "-"),
+                            "price": product.price_jpy or 0,
+                            "in_stock": True,
+                            "image": product.image_url,
+                        })
+                product.variants = variants
 
-                print(f"[HumanMade] ✓ {product.title} ¥{product.price_jpy} "
-                      f"sizes={sizes} colors={colors} images={len(images)}")
+            print(
+                f"[HumanMade] ✅ {product.title} / ¥{product.price_jpy} / "
+                f"sizes={sizes} / colors={colors} / images={len(imgs)}"
+            )
 
         except Exception as e:
-            print(f"[HumanMade] ✗ 解析失敗 {url}: {e}")
+            print(f"[HumanMade] ❌ 解析失敗 {url}: {type(e).__name__}: {e}")
 
         return product
+
+    async def _humanmade_fetch_html(self, url: str) -> str | None:
+        """使用 SeleniumBase UC driver 取得 JS 渲染後的 HTML"""
+        with self._driver_lock:
+            for attempt in range(2):
+                try:
+                    driver = self._ensure_driver()
+                    if not driver:
+                        return None
+
+                    self._driver_use_count += 1
+                    self._clean_driver_tabs()
+
+                    try:
+                        driver.uc_open_with_reconnect(url, reconnect_time=6)
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__ or "invalid session" in str(e).lower():
+                            self._driver = None
+                            self._create_driver()
+                            continue
+
+                    # 等待頁面渲染，關閉彈窗
+                    html = ""
+                    session_dead = False
+                    for i in range(8):
+                        _time.sleep(2)
+                        try:
+                            # 嘗試關閉 Global-e 彈窗
+                            driver.execute_script("""
+                                const ge = document.getElementById('globalePopupWrapper');
+                                if (ge) ge.remove();
+                                document.querySelectorAll('[class*="globale"], [id*="globale"]').forEach(el => {
+                                    try {
+                                        if (getComputedStyle(el).position === 'fixed') el.remove();
+                                    } catch(e) {}
+                                });
+                            """)
+                        except Exception:
+                            pass
+
+                        try:
+                            html = driver.page_source
+                        except Exception as e:
+                            if "InvalidSession" in type(e).__name__:
+                                session_dead = True
+                                break
+                            continue
+
+                        # 確認頁面已載入（有商品標題區塊 or 有 ¥ 金額）
+                        if i >= 1 and len(html) > 5000 and ('¥' in html or 'product' in html.lower()):
+                            return html
+
+                    if session_dead:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+
+                    if html and len(html) > 5000:
+                        return html
+
+                    return None
+
+                except Exception as e:
+                    if "InvalidSession" in type(e).__name__ and attempt == 0:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+                    print(f"[HumanMade] fetch 失敗 attempt={attempt}: {e}")
+                    return None
+
+        return None
