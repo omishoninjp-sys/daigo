@@ -1,9 +1,10 @@
 """
 NEIGHBORHOOD 爬蟲 Mixin
-neighborhood.jp 需要 Playwright（JS 渲染），庫存從 qua JSON 讀取
+neighborhood.jp 需要 JS 渲染，使用現有 SeleniumBase Chrome driver
 """
 import re
 import json
+import time as _time
 
 from scrapers.base import ProductInfo
 
@@ -13,27 +14,10 @@ class NeighborhoodMixin:
     async def _scrape_neighborhood(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
         try:
-            from playwright.async_api import async_playwright
-            import asyncio
-
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    locale="ja-JP",
-                )
-                page = await ctx.new_page()
-
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    # 等待價格元素出現
-                    try:
-                        await page.wait_for_selector(".product-price", timeout=10000)
-                    except Exception:
-                        pass
-                    html = await page.content()
-                finally:
-                    await browser.close()
+            html = await self._neighborhood_fetch_html(url)
+            if not html:
+                print(f"[NEIGHBORHOOD] ❌ 無法取得 HTML")
+                return product
 
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, "html.parser")
@@ -130,3 +114,60 @@ class NeighborhoodMixin:
             print(f"[NEIGHBORHOOD] ❌ {type(e).__name__}: {e}")
 
         return product
+
+    async def _neighborhood_fetch_html(self, url: str) -> str | None:
+        """使用 SeleniumBase Chrome driver 取得 JS 渲染後的 HTML"""
+        with self._driver_lock:
+            for attempt in range(2):
+                try:
+                    driver = self._ensure_driver()
+                    if not driver:
+                        return None
+
+                    self._driver_use_count += 1
+                    self._clean_driver_tabs()
+
+                    try:
+                        driver.uc_open_with_reconnect(url, reconnect_time=6)
+                    except Exception as e:
+                        err_name = type(e).__name__
+                        if "InvalidSession" in err_name or "invalid session" in str(e).lower():
+                            self._driver = None
+                            self._create_driver()
+                            continue
+
+                    html = ""
+                    session_dead = False
+                    for i in range(8):
+                        _time.sleep(2)
+                        try:
+                            html = driver.page_source
+                        except Exception as e:
+                            if "InvalidSession" in type(e).__name__:
+                                session_dead = True
+                                break
+                            continue
+
+                        # 等待 JS 渲染完成（等到庫存 JSON 出現）
+                        if i >= 1 and 'product-detail-inner-title' in html and len(html) > 5000:
+                            return html
+
+                    if session_dead:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+
+                    if html and len(html) > 5000:
+                        return html
+
+                    return None
+
+                except Exception as e:
+                    err_name = type(e).__name__
+                    if "InvalidSession" in err_name and attempt == 0:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+                    return None
+
+        return None
