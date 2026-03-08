@@ -114,6 +114,12 @@ class HumanMadeMixin:
                 class_=re.compile(r'color', re.I)
             ) + soup.find_all(attrs={"data-attr": "color"})
 
+            # 排除這些不是顏色名稱的文字
+            color_exclude = {
+                "color", "カラー", "色", "colour",
+                "size", "サイズ", "寸法",
+                "select", "選択", "選擇",
+            }
             for container in color_containers:
                 for el in container.find_all(["button", "label", "span"]):
                     text = (
@@ -121,7 +127,9 @@ class HumanMadeMixin:
                         el.get("data-attr-value") or
                         el.get_text(strip=True)
                     ).strip()
-                    if text and len(text) < 30 and text not in seen_colors:
+                    if (text and len(text) < 30
+                            and text not in seen_colors
+                            and text.lower() not in color_exclude):
                         seen_colors.add(text)
                         colors.append(text)
 
