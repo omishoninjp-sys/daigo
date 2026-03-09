@@ -42,17 +42,41 @@ class NeighborhoodMixin:
                     except ValueError:
                         pass
 
-            # ── 圖片 ──────────────────────────────────────
+            # ── 圖片：優先用 Shopify product.json（最可靠）──────
             imgs = []
-            for img in soup.find_all("img"):
-                src = img.get("src") or img.get("data-src") or ""
-                if "cdn.shopify.com" in src and "/products/" in src:
-                    src = re.sub(r'_\d+x\d*(\.\w+)$', r'\1', src)
-                    if src not in imgs:
-                        imgs.append(src)
+            try:
+                import httpx
+                handle = url.rstrip("/").split("/")[-1].split("?")[0]
+                json_url = f"https://www.neighborhood.jp/products/{handle}.json"
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(json_url, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code == 200:
+                        pj = r.json().get("product", {})
+                        for img_obj in pj.get("images", []):
+                            src = img_obj.get("src", "")
+                            src = re.sub(r'_\d+x\d*(\.\w+)(\?|$)', r'\1\2', src)
+                            if src and src not in imgs:
+                                imgs.append(src)
+            except Exception as e:
+                print(f"[NEIGHBORHOOD] product.json 失敗: {e}")
+
+            # Fallback：從 HTML <img> 抓
+            if not imgs:
+                for img in soup.find_all("img"):
+                    src = (img.get("src") or img.get("data-src") or
+                           img.get("data-lazy-src") or "")
+                    if not src:
+                        srcset = img.get("srcset", "")
+                        if srcset:
+                            src = srcset.split(",")[0].strip().split(" ")[0]
+                    if "cdn.shopify.com" in src and "/products/" in src:
+                        src = re.sub(r'_\d+x\d*(\.\w+)$', r'\1', src)
+                        if src not in imgs:
+                            imgs.append(src)
+
             if imgs:
                 product.image_url = imgs[0]
-                product.extra_images = imgs[1:5]
+                product.extra_images = imgs[1:8]
 
             # ── 庫存 JSON（qua 欄位）─────────────────────
             stock_map = {}
