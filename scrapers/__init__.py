@@ -24,11 +24,13 @@ from scrapers.oakley import OakleyMixin
 from scrapers.neighborhood import NeighborhoodMixin
 from scrapers.wtaps import WtapsMixin
 from scrapers.humanmade import HumanMadeMixin
+from scrapers.supreme import SupremeMixin
 
 
 class Scraper(
     DriverMixin,
     HumanMadeMixin,
+    SupremeMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -80,6 +82,8 @@ class Scraper(
             product = await self._scrape_wtaps(url)
         elif platform == "humanmade":
             product = await self._scrape_humanmade(url)
+        elif platform == "supreme":
+            product = await self._scrape_supreme(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:

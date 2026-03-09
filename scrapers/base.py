@@ -63,6 +63,8 @@ def detect_platform(url: str) -> str:
         return "wtaps"
     if "humanmade.jp" in host:
         return "humanmade"
+    if "supreme.com" in host:
+        return "supreme"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
     return "generic"
