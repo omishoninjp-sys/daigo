@@ -89,6 +89,9 @@ class SupremeMixin:
         for img_obj in images:
             src = img_obj.get("src", "")
             if src:
+                # protocol-relative URL の補完
+                if src.startswith("//"):
+                    src = "https:" + src
                 img_id_to_src[img_obj.get("id", 0)] = src
                 img_srcs.append(src)
                 print(f"[Supreme] 圖片 URL: {src[:80]}")
@@ -100,12 +103,14 @@ class SupremeMixin:
         # color → 第一張對應圖片（透過 variant_ids 反查）
         color_img_map: dict[str, str] = {}
         for img_obj in images:
+            raw_src = img_obj.get("src", "")
+            fixed_src = ("https:" + raw_src) if raw_src.startswith("//") else raw_src
             for vid in img_obj.get("variant_ids", []):
                 for v in raw_variants:
                     if v.get("id") == vid:
                         color = v.get("option1", "")
                         if color and color not in color_img_map:
-                            color_img_map[color] = img_obj["src"]
+                            color_img_map[color] = fixed_src
 
         # variants
         for v in raw_variants:
