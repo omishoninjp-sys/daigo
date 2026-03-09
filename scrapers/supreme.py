@@ -28,6 +28,27 @@ class SupremeMixin:
                 # Fallback：HTML 解析
                 self._parse_supreme_from_html(product, html)
 
+            # === 圖片 base64（Supreme CDN 需要 Referer，Shopify 無法直接抓）===
+            if product.image_url:
+                try:
+                    import httpx, base64
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        r = await client.get(
+                            product.image_url,
+                            headers={
+                                "Referer": "https://jp.supreme.com/",
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            },
+                            follow_redirects=True,
+                        )
+                        if r.status_code == 200:
+                            product.image_base64 = base64.b64encode(r.content).decode()
+                            print(f"[Supreme] ✅ 圖片 base64 ({len(product.image_base64)} chars)")
+                        else:
+                            print(f"[Supreme] ⚠️ 圖片下載失敗 {r.status_code}，改用 URL 直接上傳")
+                except Exception as e:
+                    print(f"[Supreme] ⚠️ 圖片 base64 失敗: {e}，改用 URL 直接上傳")
+
             print(
                 f"[Supreme] ✅ {product.title} / ¥{product.price_jpy} / "
                 f"{len(product.variants)} variants / images={1 + len(product.extra_images)}"
@@ -46,13 +67,18 @@ class SupremeMixin:
         """從 Shopify product JSON 物件解析"""
         product.title = pj.get("title", "")
 
-        # 價格：從第一個 variant 取（單位：分 → 元）
+        # 價格：Shopify 有時是整數日圓，有時是「分」單位（÷100）
         raw_variants = pj.get("variants", [])
         if raw_variants:
-            price_str = str(raw_variants[0].get("price", "0"))
+            price_raw = raw_variants[0].get("price", 0)
             try:
-                # Shopify 價格有時是 "12100" (日圓整數) 或 "12100.00"
-                product.price_jpy = int(float(price_str))
+                price_val = int(float(str(price_raw)))
+                # Shopify JS 注入的價格有時是「分」單位（cents）
+                # 判斷：日本商品正常範圍 500〜500000 日圓
+                # 若超過 500000，很可能是 cents → ÷ 100
+                if price_val > 500000:
+                    price_val = price_val // 100
+                product.price_jpy = price_val
             except ValueError:
                 pass
 
@@ -65,6 +91,7 @@ class SupremeMixin:
             if src:
                 img_id_to_src[img_obj.get("id", 0)] = src
                 img_srcs.append(src)
+                print(f"[Supreme] 圖片 URL: {src[:80]}")
 
         if img_srcs:
             product.image_url = img_srcs[0]
@@ -74,7 +101,6 @@ class SupremeMixin:
         color_img_map: dict[str, str] = {}
         for img_obj in images:
             for vid in img_obj.get("variant_ids", []):
-                # 找對應 variant 的 option1
                 for v in raw_variants:
                     if v.get("id") == vid:
                         color = v.get("option1", "")
@@ -86,7 +112,6 @@ class SupremeMixin:
             color = v.get("option1", "") or ""
             size  = v.get("option2", "") or ""
             sku   = v.get("sku", f"sp-{color}-{size}".lower())
-            # variant 自身的 image_id 優先，其次 color_img_map，最後 product.image_url
             img_src = (
                 img_id_to_src.get(v.get("image_id", 0)) or
                 color_img_map.get(color) or
