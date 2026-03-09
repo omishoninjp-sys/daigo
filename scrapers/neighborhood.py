@@ -42,8 +42,9 @@ class NeighborhoodMixin:
                     except ValueError:
                         pass
 
-            # ── 圖片：優先用 Shopify product.json（最可靠）──────
+            # ── product.json：圖片 + variants + 顏色圖片對應 ──
             imgs = []
+            pj_data = None
             try:
                 import httpx
                 handle = url.rstrip("/").split("/")[-1].split("?")[0]
@@ -51,10 +52,9 @@ class NeighborhoodMixin:
                 async with httpx.AsyncClient(timeout=10) as client:
                     r = await client.get(json_url, headers={"User-Agent": "Mozilla/5.0"})
                     if r.status_code == 200:
-                        pj = r.json().get("product", {})
-                        for img_obj in pj.get("images", []):
+                        pj_data = r.json().get("product", {})
+                        for img_obj in pj_data.get("images", []):
                             src = img_obj.get("src", "")
-                            src = re.sub(r'_\d+x\d*(\.\w+)(\?|$)', r'\1\2', src)
                             if src and src not in imgs:
                                 imgs.append(src)
             except Exception as e:
@@ -63,12 +63,7 @@ class NeighborhoodMixin:
             # Fallback：從 HTML <img> 抓
             if not imgs:
                 for img in soup.find_all("img"):
-                    src = (img.get("src") or img.get("data-src") or
-                           img.get("data-lazy-src") or "")
-                    if not src:
-                        srcset = img.get("srcset", "")
-                        if srcset:
-                            src = srcset.split(",")[0].strip().split(" ")[0]
+                    src = (img.get("src") or img.get("data-src") or "")
                     if "cdn.shopify.com" in src and "/products/" in src:
                         src = re.sub(r'_\d+x\d*(\.\w+)$', r'\1', src)
                         if src not in imgs:
@@ -78,59 +73,93 @@ class NeighborhoodMixin:
                 product.image_url = imgs[0]
                 product.extra_images = imgs[1:8]
 
-            # ── 庫存 JSON（qua 欄位）─────────────────────
-            stock_map = {}
-            for script in soup.find_all("script", type="application/json"):
-                raw = (script.string or "").strip()
-                if not raw.startswith("["):
-                    continue
-                try:
-                    items = json.loads(raw)
-                    if isinstance(items, list) and items and "qua" in items[0]:
-                        for item in items:
-                            name = item.get("name", "")
-                            try:
-                                stock_map[name] = int(item.get("qua", "0")) > 0
-                            except (ValueError, TypeError):
-                                stock_map[name] = False
-                        break
-                except (json.JSONDecodeError, KeyError):
-                    continue
+            # ── 從 product.json 直接建 variants + color_img_map ──
+            if pj_data:
+                # image_id -> src
+                img_id_to_src = {
+                    img_obj["id"]: img_obj["src"]
+                    for img_obj in pj_data.get("images", [])
+                    if img_obj.get("id") and img_obj.get("src")
+                }
+                # variant_id -> color (option1)
+                vid_to_color = {
+                    v["id"]: v.get("option1", "")
+                    for v in pj_data.get("variants", [])
+                }
+                # color -> 第一張對應圖片 src（從 images[].variant_ids 反查）
+                color_img_map: dict[str, str] = {}
+                for img_obj in pj_data.get("images", []):
+                    for vid in img_obj.get("variant_ids", []):
+                        color = vid_to_color.get(vid, "")
+                        if color and color not in color_img_map:
+                            color_img_map[color] = img_obj["src"]
 
-            # ── Colors / Sizes ────────────────────────────
-            colors, sizes = [], []
+                # 庫存：用 HTML 的 qua JSON，沒有就預設 True
+                stock_map = {}
+                for script in soup.find_all("script", type="application/json"):
+                    raw = (script.string or "").strip()
+                    if not raw.startswith("["):
+                        continue
+                    try:
+                        items = json.loads(raw)
+                        if isinstance(items, list) and items and "qua" in items[0]:
+                            for item in items:
+                                name = item.get("name", "")
+                                try:
+                                    stock_map[name] = int(item.get("qua", "0")) > 0
+                                except (ValueError, TypeError):
+                                    stock_map[name] = False
+                            break
+                    except (json.JSONDecodeError, KeyError):
+                        continue
 
-            color_div = soup.find("div", id="colorOptions")
-            if color_div:
-                for inp in color_div.find_all("input", type="radio"):
-                    val = inp.get("value", "").strip()
-                    if val and val not in colors:
-                        colors.append(val)
-
-            size_div = soup.find("div", id="sizeOptions")
-            if size_div:
-                for inp in size_div.find_all("input", type="radio"):
-                    val = inp.get("value", "").strip()
-                    if val and val not in sizes:
-                        sizes.append(val)
-
-            # ── 組合 variants ─────────────────────────────
-            if colors or sizes:
-                if not colors: colors = [""]
-                if not sizes:  sizes  = [""]
-
-                for color in colors:
-                    for size in sizes:
-                        key = f"{color} {size}".strip()
-                        in_stock = stock_map.get(key, False)
-                        product.variants.append({
-                            "color": color,
-                            "size": size,
-                            "sku": f"nh-{color}-{size}".lower().replace(" ", "-"),
-                            "price": product.price_jpy or 0,
-                            "in_stock": in_stock,
-                            "image": product.image_url,
-                        })
+                # 直接從 variants 建立，不需 HTML 解析顏色/尺寸
+                for v in pj_data.get("variants", []):
+                    color = v.get("option1", "")
+                    size  = v.get("option2", "")
+                    sku   = v.get("sku", f"nh-{color}-{size}".lower())
+                    key   = f"{color} {size}".strip()
+                    img_src = color_img_map.get(color) or product.image_url
+                    # variant 自身的 image_id 優先
+                    vid_img = img_id_to_src.get(v.get("image_id", 0))
+                    if vid_img:
+                        img_src = vid_img
+                    product.variants.append({
+                        "color": color,
+                        "size":  size,
+                        "sku":   sku,
+                        "price": product.price_jpy or 0,
+                        "in_stock": stock_map.get(key, True),
+                        "image": img_src,
+                    })
+            else:
+                # Fallback：HTML 解析（舊邏輯）
+                stock_map = {}
+                colors, sizes = [], []
+                color_div = soup.find("div", id="colorOptions")
+                if color_div:
+                    for inp in color_div.find_all("input", type="radio"):
+                        val = inp.get("value", "").strip()
+                        if val and val not in colors:
+                            colors.append(val)
+                size_div = soup.find("div", id="sizeOptions")
+                if size_div:
+                    for inp in size_div.find_all("input", type="radio"):
+                        val = inp.get("value", "").strip()
+                        if val and val not in sizes:
+                            sizes.append(val)
+                if colors or sizes:
+                    if not colors: colors = [""]
+                    if not sizes:  sizes  = [""]
+                    for color in colors:
+                        for size in sizes:
+                            product.variants.append({
+                                "color": color, "size": size,
+                                "sku": f"nh-{color}-{size}".lower().replace(" ", "-"),
+                                "price": product.price_jpy or 0,
+                                "in_stock": False,
+                                "image": product.image_url,
+                            })
 
             print(f"[NEIGHBORHOOD] ✅ {product.title} / ¥{product.price_jpy} / {len(product.variants)} variants")
 
