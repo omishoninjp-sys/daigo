@@ -108,62 +108,51 @@ class HumanMadeMixin:
                         sizes.append(text)
 
             # === 顏色 ===
+            # humanmade.jp (SFCC) 結構：
+            #   div[data-attr="color"]
+            #     button.attribute-item--color
+            #       span[data-attr-value="BLACK" style="background-image:url(...)"]
+            #       span#BLACK → "BLACK"
             colors = []
             seen_colors = set()
             color_img_map: dict[str, str] = {}  # color_name -> image_url
-            color_containers = soup.find_all(
-                class_=re.compile(r'color', re.I)
-            ) + soup.find_all(attrs={"data-attr": "color"})
 
-            # 排除這些不是顏色名稱的文字
-            color_exclude = {
-                "color", "カラー", "色", "colour",
-                "size", "サイズ", "寸法",
-                "select", "選択", "選擇",
-            }
-            for container in color_containers:
-                for el in container.find_all(["button", "label", "span", "a"]):
-                    text = (
-                        el.get("title") or
-                        el.get("data-attr-value") or
-                        el.get_text(strip=True)
-                    ).strip()
-                    if (text and len(text) < 30
-                            and text not in seen_colors
-                            and text.lower() not in color_exclude):
-                        seen_colors.add(text)
-                        colors.append(text)
+            color_wrapper = soup.find(attrs={"data-attr": "color"})
+            color_buttons = color_wrapper.find_all("button") if color_wrapper else []
 
-                        # 嘗試抓這個顏色的縮圖
-                        swatch_img = None
-                        img_el = el.find("img")
-                        if img_el:
-                            swatch_img = (
-                                img_el.get("data-src") or
-                                img_el.get("src") or
-                                img_el.get("data-lazy-src") or ""
-                            )
-                        # SFCC 常見：data-swatch-url / data-image / href
-                        if not swatch_img:
-                            swatch_img = (
-                                el.get("data-swatch-url") or
-                                el.get("data-image") or
-                                el.get("data-img") or ""
-                            )
-                        # 嘗試找同層 sibling 的 <img>
-                        if not swatch_img:
-                            parent = el.parent
-                            if parent:
-                                pi = parent.find("img")
-                                if pi:
-                                    swatch_img = (
-                                        pi.get("data-src") or pi.get("src") or ""
-                                    )
+            # Fallback：找 class 含 color 的 container 裡的 button
+            if not color_buttons:
+                for container in soup.find_all(class_=re.compile(r'attribute-item--color', re.I)):
+                    color_buttons.append(container)
 
-                        if swatch_img and swatch_img.startswith("http"):
-                            # 把縮圖升解析度（SFCC 常見 sw=80 → sw=800）
-                            swatch_img = re.sub(r'[?&]sw=\d+', '', swatch_img)
-                            color_img_map[text] = swatch_img
+            for btn in color_buttons:
+                # 顏色名稱：優先從 span[data-attr-value] 取，其次 aria-label
+                swatch_span = btn.find("span", attrs={"data-attr-value": True})
+                if swatch_span:
+                    color_name = swatch_span.get("data-attr-value", "").strip()
+                else:
+                    aria = btn.get("aria-label", "")
+                    # "選択 Color BLACK" → "BLACK"
+                    m_aria = re.search(r'Color\s+(\S+)', aria, re.I)
+                    color_name = m_aria.group(1) if m_aria else btn.get_text(strip=True)
+
+                if not color_name or color_name in seen_colors:
+                    continue
+                seen_colors.add(color_name)
+                colors.append(color_name)
+
+                # 圖片：從 swatch_span 的 style="background-image: url(...)" 取
+                if swatch_span:
+                    style = swatch_span.get("style", "")
+                    m_bg = re.search(
+                        r'background-image\s*:\s*url\([\'"]?([^\'")\s]+)[\'"]?\)',
+                        style
+                    )
+                    if m_bg:
+                        img_path = m_bg.group(1)
+                        if img_path.startswith("/"):
+                            img_path = "https://www.humanmade.jp" + img_path
+                        color_img_map[color_name] = img_path
 
             # === 商品說明 ===
             for desc_sel in [
