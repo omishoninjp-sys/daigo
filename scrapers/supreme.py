@@ -136,18 +136,6 @@ class SupremeMixin:
 
         return product
 
-            print(
-                f"[Supreme] ✅ {product.title} / ¥{product.price_jpy} / "
-                f"{len(product.variants)} variants / images={1 + len(product.extra_images)}"
-            )
-
-        except Exception as e:
-            import traceback
-            print(f"[Supreme] ❌ 解析失敗: {type(e).__name__}: {e}")
-            print(traceback.format_exc())
-
-        return product
-
     # ------------------------------------------------------------------ #
 
     def _parse_supreme_from_json(self, product: ProductInfo, pj: dict):
