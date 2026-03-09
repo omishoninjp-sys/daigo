@@ -76,11 +76,12 @@ class GrailMixin:
                         if src and "cdn.grail.bz" in src and src not in main_imgs:
                             main_imgs.append(src)
 
-            # Fallback：從 cdn.grail.bz/images/goods/ 找大圖（排除 col_ 縮圖）
+            # Fallback：從 cdn.grail.bz/images/goods/ 找大圖（/t/ 路徑轉換為原圖）
             if not main_imgs:
                 for img in soup.find_all("img"):
                     src = img.get("src", "")
-                    if "cdn.grail.bz/images/goods" in src and "/t/" not in src and "col_" not in src:
+                    if "cdn.grail.bz/images/goods" in src:
+                        src = src.replace("/images/goods/t/", "/images/goods/")
                         if src not in main_imgs:
                             main_imgs.append(src)
 
@@ -95,6 +96,11 @@ class GrailMixin:
                     # 顏色圖片
                     color_img_el = li.find("img", id=re.compile(r"color_img_"))
                     color_img = color_img_el.get("src", "") if color_img_el else ""
+                    # /t/ はサムネイルパス → 除去して原寸大取得
+                    # 例: /images/goods/t/ac1909/ac1909_col_11.jpg
+                    #  → /images/goods/ac1909/ac1909_col_11.jpg
+                    if color_img:
+                        color_img = color_img.replace("/images/goods/t/", "/images/goods/")
                     # 顏色名稱
                     color_name_el = li.find("p", class_="txt-info")
                     color_name = color_name_el.get_text(strip=True) if color_name_el else ""
