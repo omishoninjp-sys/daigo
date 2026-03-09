@@ -67,6 +67,8 @@ def detect_platform(url: str) -> str:
         return "supreme"
     if "grail.bz" in host:
         return "grail"
+    if "pokemoncenter-online.com" in host:
+        return "pokemoncenter"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
     return "generic"

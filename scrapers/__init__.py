@@ -26,6 +26,7 @@ from scrapers.wtaps import WtapsMixin
 from scrapers.humanmade import HumanMadeMixin
 from scrapers.supreme import SupremeMixin
 from scrapers.grail import GrailMixin
+from scrapers.pokemoncenter import PokemonCenterMixin
 
 
 class Scraper(
@@ -33,6 +34,7 @@ class Scraper(
     HumanMadeMixin,
     SupremeMixin,
     GrailMixin,
+    PokemonCenterMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -88,6 +90,8 @@ class Scraper(
             product = await self._scrape_supreme(url)
         elif platform == "grail":
             product = await self._scrape_grail(url)
+        elif platform == "pokemoncenter":
+            product = await self._scrape_pokemoncenter(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
