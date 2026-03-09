@@ -21,14 +21,89 @@ class SupremeMixin:
             return product
 
         try:
-            # === 優先用 JS 注入的 product JSON ===
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+
+            # === 從 JS product JSON 取基本資料（標題、價格、尺寸）===
             if product_json:
                 self._parse_supreme_from_json(product, product_json)
-            else:
-                # Fallback：HTML 解析
+
+            # === 從 HTML thumbnail 補充所有顏色和圖片 ===
+            # 結構：<li> 包含同一顏色的所有圖片 button
+            # title="view Find God Football Jersey - Red (image 1 of 3)"
+            color_imgs: dict[str, list[str]] = {}  # color -> [img1, img2, ...]
+
+            thumb_list = soup.find("ul", attrs={"data-testid": "product-image-thumbnails"})
+            if thumb_list:
+                for li in thumb_list.find_all("li", recursive=False):
+                    for btn in li.find_all("button"):
+                        title_attr = btn.get("title", "")
+                        # 解析 "view {product} - {Color} (image X of Y)"
+                        m_color = re.search(r' - ([^(]+)\s*\(image', title_attr)
+                        m_img   = re.search(r'\(image (\d+) of', title_attr)
+                        if not m_color:
+                            continue
+                        color_name = m_color.group(1).strip()
+                        img_el = btn.find("img")
+                        if not img_el:
+                            continue
+                        src = img_el.get("src", "")
+                        if not src:
+                            continue
+                        # 補全 protocol
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        # 去掉縮圖後綴 _90x / _480x 等，取原圖
+                        src = re.sub(r'_\d+x(\.\w+)(\?|$)', r'\1\2', src)
+
+                        color_imgs.setdefault(color_name, [])
+                        if src not in color_imgs[color_name]:
+                            color_imgs[color_name].append(src)
+
+            print(f"[Supreme] 顏色圖片: { {c: len(imgs) for c, imgs in color_imgs.items()} }")
+
+            # === 尺寸從 select 取（比 JSON 可靠）===
+            sizes = []
+            size_select = soup.find("select", attrs={"name": "size"})
+            if size_select:
+                for opt in size_select.find_all("option"):
+                    val = opt.get_text(strip=True)
+                    if val and val != "-- size --":
+                        sizes.append(val)
+
+            # === 重建 variants（顏色 × 尺寸）===
+            if color_imgs and sizes:
+                product.variants = []
+                all_imgs = []
+                color_first_img: dict[str, str] = {}
+
+                for color, imgs in color_imgs.items():
+                    color_first_img[color] = imgs[0] if imgs else product.image_url
+                    for img in imgs:
+                        if img not in all_imgs:
+                            all_imgs.append(img)
+
+                # 主圖用第一個顏色的第一張
+                if all_imgs:
+                    product.image_url = all_imgs[0]
+                    product.extra_images = all_imgs[1:8]
+
+                for color, imgs in color_imgs.items():
+                    img_src = color_first_img.get(color, product.image_url)
+                    for size in sizes:
+                        product.variants.append({
+                            "color": color,
+                            "size":  size,
+                            "sku":   f"sp-{color}-{size}".lower().replace(" ", "-"),
+                            "price": product.price_jpy or 0,
+                            "in_stock": True,
+                            "image": img_src,
+                        })
+
+            elif not product_json:
                 self._parse_supreme_from_html(product, html)
 
-            # === 圖片 base64（Supreme CDN 需要 Referer，Shopify 無法直接抓）===
+            # === 主圖 base64（Supreme CDN 需要 Referer）===
             if product.image_url:
                 try:
                     import httpx, base64
@@ -45,9 +120,21 @@ class SupremeMixin:
                             product.image_base64 = base64.b64encode(r.content).decode()
                             print(f"[Supreme] ✅ 圖片 base64 ({len(product.image_base64)} chars)")
                         else:
-                            print(f"[Supreme] ⚠️ 圖片下載失敗 {r.status_code}，改用 URL 直接上傳")
+                            print(f"[Supreme] ⚠️ 圖片下載失敗 {r.status_code}")
                 except Exception as e:
-                    print(f"[Supreme] ⚠️ 圖片 base64 失敗: {e}，改用 URL 直接上傳")
+                    print(f"[Supreme] ⚠️ 圖片 base64 失敗: {e}")
+
+            print(
+                f"[Supreme] ✅ {product.title} / ¥{product.price_jpy} / "
+                f"{len(product.variants)} variants / images={1 + len(product.extra_images)}"
+            )
+
+        except Exception as e:
+            import traceback
+            print(f"[Supreme] ❌ 解析失敗: {type(e).__name__}: {e}")
+            print(traceback.format_exc())
+
+        return product
 
             print(
                 f"[Supreme] ✅ {product.title} / ¥{product.price_jpy} / "
