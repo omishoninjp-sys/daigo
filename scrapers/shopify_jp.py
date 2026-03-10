@@ -55,9 +55,14 @@ class ShopifyJpMixin:
                         product.description = re.sub(r'<[^>]+>', '', product.description).strip()
 
                     images = prod.get("images", [])
+                    # .js images 是字串陣列, .json images 是 dict 陣列
+                    def _img_src(img):
+                        return img if isinstance(img, str) else img.get("src", "")
+                    def _img_id(img):
+                        return None if isinstance(img, str) else img.get("id")
                     if images:
-                        product.image_url = images[0].get("src", "")
-                        product.extra_images = [img.get("src", "") for img in images[1:5] if img.get("src")]
+                        product.image_url = _img_src(images[0])
+                        product.extra_images = [_img_src(img) for img in images[1:5] if _img_src(img)]
 
                     variants = prod.get("variants", [])
                     if variants:
@@ -68,7 +73,9 @@ class ShopifyJpMixin:
                         options = prod.get("options", [])
                         image_id_map = {}
                         for img in images:
-                            image_id_map[img.get("id")] = img.get("src", "")
+                            iid = _img_id(img)
+                            if iid:
+                                image_id_map[iid] = _img_src(img)
 
                         color_image_seen = {}
 
@@ -113,8 +120,8 @@ class ShopifyJpMixin:
                             img_src = ""
                             if v_image_id and v_image_id in image_id_map:
                                 img_src = image_id_map[v_image_id]
-                            elif featured and featured.get("src"):
-                                img_src = featured["src"]
+                            elif featured:
+                                img_src = featured if isinstance(featured, str) else featured.get("src", "")
 
                             color = variant_info["color"]
                             if img_src and color and color not in color_image_seen:
