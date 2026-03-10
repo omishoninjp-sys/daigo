@@ -174,6 +174,56 @@ class AmazonMixin:
                     [b.get_text(strip=True) for b in bullets if len(b.get_text(strip=True)) > 2]
                 )[:500]
 
+            # ── Variants（三種方法依序嘗試）
+            import json as _json
+            variants_found = []
+
+            # 方法1：dimensionValuesDisplayData JSON
+            twister_match = re.search(r'"dimensionValuesDisplayData"\s*:\s*(\{[^}]+\})', html)
+            if twister_match:
+                try:
+                    dim_data = _json.loads(twister_match.group(1))
+                    for asin_key, opts in dim_data.items():
+                        if isinstance(opts, list) and opts:
+                            vinfo = {"color": "", "size": "", "in_stock": True, "image": ""}
+                            for opt in opts:
+                                opt = str(opt).strip()
+                                if re.match(r'^[\d\s./xcmXCM×ｘ×ml]+$', opt) or any(k in opt.lower() for k in ["cm", "ml", "xl", "xxl"]):
+                                    vinfo["size"] = opt
+                                else:
+                                    vinfo["color"] = opt
+                            variants_found.append(vinfo)
+                    print(f"[Amazon DEBUG] 方法1: {len(variants_found)} variants")
+                except Exception as e:
+                    print(f"[Amazon DEBUG] 方法1 失敗: {e}")
+
+            # 方法2：#variation_ DOM 元素
+            if not variants_found:
+                color_els = soup.select("#variation_color_name li, #variation_style_name li")
+                size_els  = soup.select("#variation_size_name li, #variation_size_type_name li")
+                colors = [el.get("data-value", el.get_text(strip=True)) for el in color_els] or [""]
+                sizes  = [el.get("data-value", el.get_text(strip=True)) for el in size_els]  or [""]
+                for c in colors:
+                    for s in sizes:
+                        variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
+                print(f"[Amazon DEBUG] 方法2: colors={colors} sizes={sizes}")
+
+            # 方法3：li[id^=color_name_/size_name_]
+            if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
+                variants_found = []
+                for el in soup.select("li[id^='color_name_'], li[id^='size_name_']"):
+                    txt = el.get_text(strip=True)
+                    vinfo = {"color": "", "size": "", "in_stock": True, "image": ""}
+                    if re.match(r'^[\d\s./xcmXCM×]+$', txt):
+                        vinfo["size"] = txt
+                    else:
+                        vinfo["color"] = txt
+                    variants_found.append(vinfo)
+                print(f"[Amazon DEBUG] 方法3: {len(variants_found)} variants" if variants_found else "[Amazon DEBUG] 找不到 variants")
+
+            if variants_found:
+                product.variants = variants_found
+
             print(f"[Amazon] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[Amazon] ⚠️ 價格未找到")
 
         except Exception as e:
