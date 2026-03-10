@@ -312,6 +312,61 @@ class ZozotownMixin:
                             vs = result.get('variants', [])
                             print(f"[ZOZO] variant_debug: {vd}")
                             print(f"[ZOZO] variants: {len(vs)} 個")
+
+                        # === 用 GetSizeMappinngList API 修正庫存 ===
+                        gid = (result or {}).get('item_id', '')
+                        if gid:
+                            try:
+                                stock_data = driver.execute_async_script("""
+                                    var callback = arguments[arguments.length - 1];
+                                    var gid = arguments[0];
+                                    var gtid = '';
+                                    var gtcid = '';
+                                    try { gtid = window.__adsInnerGoodspv.item.category_id || ''; } catch(e) {}
+                                    document.querySelectorAll('script:not([src])').forEach(function(s) {
+                                        var t = s.textContent;
+                                        var m = t.match(/gtcid[\'":\\s]+([0-9]+)/);
+                                        if (m && !gtcid) gtcid = m[1];
+                                    });
+                                    if (!gtid) { callback(null); return; }
+                                    var url = '/sp/?command=GetSizeMappinngList&gid=' + gid
+                                            + '&gtid=' + gtid
+                                            + (gtcid ? '&gtcid=' + gtcid : '');
+                                    fetch(url, {credentials: 'include'})
+                                        .then(function(r){ return r.json(); })
+                                        .then(function(d){ callback(d); })
+                                        .catch(function(e){ callback(null); });
+                                """, gid)
+
+                                if stock_data:
+                                    print(f"[ZOZO] GetSizeMappinngList 取得: {str(stock_data)[:300]}")
+                                    stock_list = (stock_data.get('list') or
+                                                  stock_data.get('sizeList') or
+                                                  stock_data.get('result') or [])
+                                    if isinstance(stock_list, dict):
+                                        stock_list = stock_list.get('list') or stock_list.get('sizeList') or []
+                                    did_stock = {}
+                                    for s in (stock_list if isinstance(stock_list, list) else []):
+                                        did = str(s.get('detailId') or s.get('did') or s.get('goodsDetailId') or '')
+                                        size = str(s.get('sizeName') or s.get('size') or s.get('sizeLabel') or '')
+                                        sold = s.get('isSoldOut') or s.get('soldOut') or s.get('soldout') or False
+                                        qty = int(s.get('quantity') or s.get('stock') or s.get('stockCount') or (0 if sold else 1))
+                                        in_stk = (not sold) and (qty > 0)
+                                        if did: did_stock[did] = in_stk
+                                        if size: did_stock[size] = in_stk
+
+                                    if did_stock and result and result.get('variants'):
+                                        for v in result['variants']:
+                                            sku = str(v.get('sku', ''))
+                                            size = str(v.get('size', ''))
+                                            if sku in did_stock:
+                                                v['in_stock'] = did_stock[sku]
+                                            elif size in did_stock:
+                                                v['in_stock'] = did_stock[size]
+                                        print(f"[ZOZO] 庫存修正完成: {did_stock}")
+                            except Exception as e:
+                                print(f"[ZOZO] GetSizeMappinngList 失敗: {e}")
+
                         return result
 
                     if 'access denied' in (title or '').lower() and i >= 2:
