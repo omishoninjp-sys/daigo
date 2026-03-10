@@ -25,6 +25,7 @@ from scrapers.neighborhood import NeighborhoodMixin
 from scrapers.wtaps import WtapsMixin
 from scrapers.humanmade import HumanMadeMixin
 from scrapers.supreme import SupremeMixin
+from scrapers.vermicular import VermicularMixin
 from scrapers.visvim import VisvimMixin
 from scrapers.grail import GrailMixin
 from scrapers.pokemoncenter import PokemonCenterMixin
@@ -34,6 +35,7 @@ class Scraper(
     DriverMixin,
     HumanMadeMixin,
     SupremeMixin,
+    VermicularMixin,
     VisvimMixin,
     GrailMixin,
     PokemonCenterMixin,
@@ -90,6 +92,8 @@ class Scraper(
             product = await self._scrape_humanmade(url)
         elif platform == "supreme":
             product = await self._scrape_supreme(url)
+        elif platform == "vermicular":
+            product = await self._scrape_vermicular(url)
         elif platform == "visvim":
             product = await self._scrape_visvim(url)
         elif platform == "grail":

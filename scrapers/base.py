@@ -65,6 +65,8 @@ def detect_platform(url: str) -> str:
         return "humanmade"
     if "supreme.com" in host:
         return "supreme"
+    if "shop.vermicular.jp" in host:
+        return "vermicular"
     if "shop.visvim.tv" in host:
         return "visvim"
     if "grail.bz" in host:
