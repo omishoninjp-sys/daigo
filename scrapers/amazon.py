@@ -179,21 +179,36 @@ class AmazonMixin:
             variants_found = []
 
             # 方法1：dimensionValuesDisplayData JSON
+            # key = 維度名稱（如 "color_name", "size_name"）
+            # value = 該維度的所有選項值列表
             twister_match = re.search(r'"dimensionValuesDisplayData"\s*:\s*(\{[^}]+\})', html)
             if twister_match:
                 try:
                     dim_data = _json.loads(twister_match.group(1))
-                    for asin_key, opts in dim_data.items():
-                        if isinstance(opts, list) and opts:
-                            vinfo = {"color": "", "size": "", "in_stock": True, "image": ""}
-                            for opt in opts:
-                                opt = str(opt).strip()
-                                if re.match(r'^[\d\s./xcmXCM×ｘ×ml]+$', opt) or any(k in opt.lower() for k in ["cm", "ml", "xl", "xxl"]):
-                                    vinfo["size"] = opt
-                                else:
-                                    vinfo["color"] = opt
-                            variants_found.append(vinfo)
-                    print(f"[Amazon DEBUG] 方法1: {len(variants_found)} variants")
+                    print(f"[Amazon DEBUG] 方法1 dim_data keys: {list(dim_data.keys())}")
+                    # 先收集各維度的值
+                    color_vals = []
+                    size_vals = []
+                    other_vals = []
+                    for dim_key, vals in dim_data.items():
+                        if not isinstance(vals, list): continue
+                        k = dim_key.lower()
+                        if any(x in k for x in ["color", "colour", "カラー", "色"]):
+                            color_vals = [str(v).strip() for v in vals if v]
+                        elif any(x in k for x in ["size", "サイズ", "寸"]):
+                            size_vals = [str(v).strip() for v in vals if v]
+                        else:
+                            other_vals = [str(v).strip() for v in vals if v]
+                    # fallback：沒有明確維度名則全當 color
+                    if not color_vals and not size_vals:
+                        color_vals = other_vals
+                    # 組合成 variants
+                    colors = color_vals or [""]
+                    sizes  = size_vals  or [""]
+                    for c in colors:
+                        for s in sizes:
+                            variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
+                    print(f"[Amazon DEBUG] 方法1: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
                 except Exception as e:
                     print(f"[Amazon DEBUG] 方法1 失敗: {e}")
 
