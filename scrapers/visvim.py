@@ -1,11 +1,37 @@
 """
-visvim WMV Official Web Store 爬蟲 Mixin
-Oracle NetSuite 電商平台，JS 渲染，使用 SeleniumBase UC
+visvim / WMV / ICT 爬蟲 Mixin
+shop.visvim.tv
+
+頁面結構（已從 HTML 驗證）：
+  標題：h1.detail-texts-name
+  價格：div.detail-texts-price → "￥48,400"
+  色彩 variant：table.detail-shoppingbag-list-color（每個 table = 一個顏色）
+    顏色名稱：th > a.carousel-link-item > span
+    顏色大圖：th > a > img[data-thumb]（相對路徑，需補 https://shop.visvim.tv）
+    尺寸：td.detail-shoppingbag-list-size-no（"-" → ONE SIZE）
+    SKU：button[id^='variation_cart_button_'] 的 ID 後綴
+    在庫：button.block-variation-add-cart--btn 存在 = 有庫存
+  商品全圖（carousel）：div.carousel-item img[src]（相對路徑）
+  備援價格：<meta property="etm:goods_detail"> JSON → price 欄位
 """
-import asyncio
+import json
+import re
 import time as _time
 
 from scrapers.base import ProductInfo
+
+BASE = "https://shop.visvim.tv"
+
+
+def _abs(path: str) -> str:
+    """相對路徑補全為絕對 URL"""
+    if not path:
+        return ""
+    if path.startswith("http"):
+        return path
+    if path.startswith("//"):
+        return "https:" + path
+    return BASE + (path if path.startswith("/") else "/" + path)
 
 
 class VisvimMixin:
@@ -13,30 +39,134 @@ class VisvimMixin:
     async def _scrape_visvim(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url, brand="visvim")
 
-        data = await asyncio.get_event_loop().run_in_executor(
-            None, self._fetch_visvim_uc, url
-        )
+        html = await self._visvim_fetch_html(url)
+        if not html:
+            print(f"[visvim] ❌ 無法取得 HTML: {url}")
+            return product
 
-        if data:
-            product.title       = data.get("title", "")
-            product.price_jpy   = data.get("price") or None
-            product.description = data.get("description", "")[:500]
-            images = data.get("images", [])
-            if images:
-                product.image_url    = images[0]
-                product.extra_images = images[1:9]
-            product.variants = data.get("variants", [])
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
 
-        print(
-            f"[visvim] {'✅' if product.title else '⚠️'} "
-            f"{product.title[:40] if product.title else '未取得'} / "
-            f"¥{product.price_jpy} / {len(product.variants)} variants"
-        )
-        for v in product.variants:
-            print(f"  - {v.get('color','')} / {v.get('size','')} / {'有庫存' if v.get('in_stock') else 'Sold Out'}")
+            # === 標題 ===
+            h1 = soup.find("h1", class_="detail-texts-name")
+            if h1:
+                product.title = h1.get_text(strip=True)
+            if not product.title:
+                # fallback: hidden input
+                hidden = soup.find("input", id="hidden_goods_name")
+                if hidden:
+                    product.title = hidden.get("value", "").strip()
+
+            # === 價格：div.detail-texts-price → "￥48,400" ===
+            price_div = soup.find("div", class_="detail-texts-price")
+            if price_div:
+                raw = price_div.get_text(strip=True)
+                m = re.search(r'[\d,]+', raw)
+                if m:
+                    product.price_jpy = int(m.group(0).replace(',', ''))
+
+            # 備援：<meta property="etm:goods_detail"> JSON
+            if not product.price_jpy:
+                meta_el = soup.find("meta", property="etm:goods_detail")
+                if meta_el:
+                    try:
+                        meta_data = json.loads(meta_el.get("content", "{}"))
+                        p = meta_data.get("price", "")
+                        if p:
+                            product.price_jpy = int(str(p).replace(',', ''))
+                    except Exception:
+                        pass
+
+            # === 全圖清單（carousel）：div.carousel-item img[src] ===
+            carousel_imgs = []
+            seen_imgs = set()
+            for item in soup.find_all("div", class_="carousel-item"):
+                img = item.find("img")
+                if not img:
+                    continue
+                src = _abs(img.get("src", ""))
+                if src and "/img/goods/" in src and src not in seen_imgs:
+                    seen_imgs.add(src)
+                    carousel_imgs.append(src)
+
+            # === 顏色 Variants：table.detail-shoppingbag-list-color ===
+            color_tables = soup.find_all("table", class_="detail-shoppingbag-list-color")
+
+            for tbl in color_tables:
+                # 顏色名稱
+                span = tbl.find("th").find("span") if tbl.find("th") else None
+                color_name = span.get_text(strip=True) if span else ""
+
+                # 大圖：data-thumb 屬性（L 尺寸圖）
+                color_img_el = tbl.find("img", {"data-thumb": True})
+                if color_img_el:
+                    color_img = _abs(color_img_el.get("data-thumb", ""))
+                else:
+                    # fallback：img src
+                    color_img_el2 = tbl.find("th").find("img") if tbl.find("th") else None
+                    color_img = _abs(color_img_el2.get("src", "")) if color_img_el2 else ""
+
+                # 尺寸 rows
+                size_rows = tbl.find_all("tr")
+                if not size_rows:
+                    continue
+
+                for row in size_rows:
+                    size_td = row.find("td", class_="detail-shoppingbag-list-size-no")
+                    if not size_td:
+                        continue
+                    size_raw = size_td.get_text(strip=True)
+                    size = "ONE SIZE" if size_raw in ("-", "－", "") else size_raw
+
+                    # SKU：button id="variation_cart_button_{sku}"
+                    btn = row.find("button", id=re.compile(r"^variation_cart_button_"))
+                    sku = ""
+                    in_stock = False
+                    if btn:
+                        btn_id = btn.get("id", "")
+                        sku = btn_id.replace("variation_cart_button_", "")
+                        in_stock = True  # button 存在 = 可加入購物車
+
+                    product.variants.append({
+                        "color":    color_name,
+                        "size":     size,
+                        "sku":      sku,
+                        "price":    product.price_jpy or 0,
+                        "in_stock": in_stock,
+                        "image":    color_img,
+                    })
+
+            # === 設定主圖 / extra_images ===
+            if product.variants:
+                # 主圖 = 第一個有圖的 variant
+                first_img = next(
+                    (v["image"] for v in product.variants if v["image"]), ""
+                )
+                product.image_url = first_img or (carousel_imgs[0] if carousel_imgs else "")
+                # extra_images：carousel 圖（前 8 張，排除主圖）
+                product.extra_images = [
+                    img for img in carousel_imgs if img != product.image_url
+                ][:8]
+            elif carousel_imgs:
+                product.image_url = carousel_imgs[0]
+                product.extra_images = carousel_imgs[1:8]
+
+            print(
+                f"[visvim] ✅ {product.title} / ¥{product.price_jpy} / "
+                f"{len(product.variants)} variants / "
+                f"images={1 + len(product.extra_images)}"
+            )
+
+        except Exception as e:
+            import traceback
+            print(f"[visvim] ❌ 解析失敗: {type(e).__name__}: {e}")
+            print(traceback.format_exc())
+
         return product
 
-    def _fetch_visvim_uc(self, url: str) -> dict | None:
+    async def _visvim_fetch_html(self, url: str) -> str | None:
+        """使用 SeleniumBase UC driver 取得 JS 渲染後 HTML"""
         with self._driver_lock:
             for attempt in range(2):
                 try:
@@ -48,167 +178,48 @@ class VisvimMixin:
                     self._clean_driver_tabs()
 
                     try:
-                        driver.uc_open_with_reconnect(url, reconnect_time=8)
+                        driver.uc_open_with_reconnect(url, reconnect_time=6)
                     except Exception as e:
-                        if "InvalidSession" in type(e).__name__:
+                        if "InvalidSession" in type(e).__name__ or "invalid session" in str(e).lower():
                             self._driver = None
                             self._create_driver()
                             continue
 
-                    for i in range(15):
+                    html = ""
+                    session_dead = False
+                    for i in range(8):
                         _time.sleep(2)
                         try:
-                            html  = driver.page_source
-                            title = driver.title
+                            html = driver.page_source
                         except Exception as e:
                             if "InvalidSession" in type(e).__name__:
+                                session_dead = True
                                 break
                             continue
 
-                        if "Redirecting" in (title or "") and i < 10:
-                            print(f"[visvim] redirect 待機中... ({i+1})")
-                            continue
+                        # 等價格 div 和 color table 都出現
+                        if (i >= 1
+                                and "detail-texts-price" in html
+                                and "detail-shoppingbag-list-color" in html
+                                and len(html) > 8000):
+                            return html
 
-                        has_data = "detail-shoppingbag-list-size-no" in html or "og:title" in html
-                        print(f"[visvim] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
+                    if session_dead:
+                        self._driver = None
+                        self._create_driver()
+                        continue
 
-                        if i >= 1 and has_data:
-                            break
-
-                    result = driver.execute_script("""
-                        var r = {title:'', price:0, images:[], description:'', variants:[], debug:''};
-
-                        // --- タイトル ---
-                        var h1 = document.querySelector('h1');
-                        if (h1) r.title = h1.textContent.trim();
-                        if (!r.title) {
-                            var og = document.querySelector('meta[property="og:title"]');
-                            if (og) r.title = (og.content || '').trim();
-                        }
-
-                        // --- 価格 ---
-                        // ページ内全テキストから ¥XXX,XXX パターンを探す
-                        var allText = document.body.innerText || '';
-                        var priceMatches = allText.match(/¥[\d,]+/g) || [];
-                        priceMatches.forEach(function(pm) {
-                            if (r.price) return;
-                            var p = parseInt(pm.replace(/[¥,]/g, ''));
-                            if (p >= 10000 && p <= 2000000) r.price = p;
-                        });
-                        // JSON-LD fallback
-                        if (!r.price) {
-                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
-                                if (r.price) return;
-                                try {
-                                    var d = JSON.parse(s.textContent);
-                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product';}) || null;
-                                    if (!d || d['@type'] !== 'Product') return;
-                                    var offers = d.offers || {};
-                                    if (Array.isArray(offers)) offers = offers[0] || {};
-                                    if (offers.price) {
-                                        var p = parseInt(String(offers.price).replace(/,/g,''));
-                                        if (p >= 1000) r.price = p;
-                                    }
-                                } catch(e) {}
-                            });
-                        }
-
-                        // --- 画像 ---
-                        var ogImg = document.querySelector('meta[property="og:image"]');
-                        if (ogImg && ogImg.content) r.images.push(ogImg.content);
-
-                        // --- Variants ---
-                        // 戦略: td.detail-shoppingbag-list-size-no を全部取得し、
-                        //       各要素から上に tr → td(兄弟th) をたどってカラー名取得
-                        //
-                        // DOM:
-                        //   table.detail-shoppingbag-list-color
-                        //     tbody > tr
-                        //       th → img + span(カラー名)
-                        //       td
-                        //         table.detail-shoppingbag-list-size
-                        //           tbody > tr
-                        //             td.detail-shoppingbag-list-size-no   ← ここから上へたどる
-                        //             td.detail-shoppingbag-list-size-stock
-                        //             td.detail-shoppingbag-list-size-btn
-
-                        var sizeNoCells = document.querySelectorAll('td.detail-shoppingbag-list-size-no');
-                        r.debug += ' sizeNoCells:' + sizeNoCells.length;
-
-                        sizeNoCells.forEach(function(sizeNoCell) {
-                            var size = sizeNoCell.textContent.trim();
-                            if (!size) return;
-
-                            // 同じ tr の中の stock / btn セル
-                            var sizeRow   = sizeNoCell.parentElement; // <tr>
-                            var stockCell = sizeRow ? sizeRow.querySelector('.detail-shoppingbag-list-size-stock') : null;
-                            var btnCell   = sizeRow ? sizeRow.querySelector('.detail-shoppingbag-list-size-btn')   : null;
-
-                            var stockText = stockCell ? stockCell.textContent.trim() : '';
-                            var inStock   = stockText !== 'Sold Out' && stockText !== 'SOLD OUT';
-
-                            // カラー名を探す:
-                            // sizeNoCell → tr → tbody → table.detail-shoppingbag-list-size
-                            // → td（親） → tr（カラー行） → th → span
-                            var colorName = '';
-                            var colorImg  = '';
-
-                            var sizeTable = sizeNoCell.closest('table');
-                            if (sizeTable) {
-                                var colorTd = sizeTable.parentElement; // <td>
-                                if (colorTd) {
-                                    var colorTr = colorTd.parentElement; // <tr>
-                                    if (colorTr) {
-                                        var th = colorTr.querySelector('th');
-                                        if (th) {
-                                            var span = th.querySelector('span');
-                                            colorName = span ? span.textContent.trim() : '';
-                                            var img = th.querySelector('img');
-                                            if (img) {
-                                                colorImg = img.getAttribute('data-thumb') ||
-                                                           img.getAttribute('data-src') ||
-                                                           img.src || '';
-                                                if (colorImg && !colorImg.startsWith('http')) {
-                                                    colorImg = 'https://shop.visvim.tv' + colorImg;
-                                                }
-                                                // サムネ → ラージ変換
-                                                colorImg = colorImg.replace('_S0.', '_L0.').replace('_400_', '_800_');
-                                                if (colorImg && r.images.indexOf(colorImg) === -1) {
-                                                    r.images.push(colorImg);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            r.variants.push({
-                                color:    colorName,
-                                size:     size,
-                                sku:      (colorName ? colorName + '-' : '') + size,
-                                price:    r.price,
-                                in_stock: inStock,
-                                image:    colorImg
-                            });
-                        });
-
-                        r.debug += ' variants:' + r.variants.length;
-                        return r;
-                    """)
-
-                    if result:
-                        print(f"[visvim] debug: {result.get('debug','')}")
-                        if result.get("title"):
-                            return result
+                    if html and len(html) > 8000:
+                        return html
 
                     return None
 
                 except Exception as e:
-                    print(f"[visvim] SeleniumBase エラー: {type(e).__name__}: {e}")
-                    if attempt == 0:
+                    if "InvalidSession" in type(e).__name__ and attempt == 0:
                         self._driver = None
                         self._create_driver()
                         continue
+                    print(f"[visvim] fetch 失敗 attempt={attempt}: {e}")
                     return None
 
         return None
