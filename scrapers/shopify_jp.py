@@ -1,8 +1,11 @@
 """
 Shopify 日本商店爬蟲 Mixin
-- 價格/圖片/選項：.json API（price 直接是 JPY 字串，price_currency 確認）
-- 庫存 available：.js API（每個 variant 有 available bool）
+- 價格：HTML data-selected-variant price（JPY cents ÷ 100）
+  → .json 會依 IP 回傳外幣（SGD），不可用
+- 圖片/選項：.json API
+- 庫存：.js API（available bool）
 """
+import json
 import re
 from urllib.parse import urlparse
 
@@ -30,7 +33,7 @@ class ShopifyJpMixin:
 
         json_url = f"{base_url}/products/{handle}.json"
         js_url   = f"{base_url}/products/{handle}.js"
-        print(f"[Shopify] 抓取 JSON API: {json_url}")
+        print(f"[Shopify] 抓取頁面: {url}")
 
         try:
             async with httpx.AsyncClient(
@@ -38,62 +41,68 @@ class ShopifyJpMixin:
                 follow_redirects=True,
                 headers={
                     "User-Agent": USER_AGENT,
-                    "Accept": "application/json",
+                    "Accept": "text/html,application/xhtml+xml,application/json",
                     "Accept-Language": "ja,en-US;q=0.9",
                 },
             ) as client:
 
-                # ── 主資料：.json
-                resp = await client.get(json_url)
-                if resp.status_code != 200:
-                    print(f"[Shopify] .json HTTP {resp.status_code}，改用 Playwright")
+                # ── 1. 抓 HTML，取 data-selected-variant（永遠是 JPY cents）
+                html_resp = await client.get(url)
+                if html_resp.status_code != 200:
+                    return await self._scrape_with_playwright(url)
+                html = html_resp.text
+
+                sv_match = re.search(r'data-selected-variant[^>]*>(\{[^<]+\})', html)
+                if not sv_match:
+                    print("[Shopify] 找不到 data-selected-variant，改用 Playwright")
                     return await self._scrape_with_playwright(url)
 
-                data = resp.json()
-                prod = data.get("product", data)
+                sv = json.loads(sv_match.group(1))
+                price_cents = sv.get("price", 0)
+                product.price_jpy = price_cents // 100
+                print(f"[Shopify DEBUG] data-selected-variant cents={price_cents} → ¥{product.price_jpy}")
 
-                # ── 庫存：.js（variant id → available）
+                # ── 2. .json 取圖片/選項/商品資訊（不取 price）
+                images = []
+                options = []
+                variants_json = []
+                try:
+                    jr = await client.get(json_url, headers={"Accept": "application/json"})
+                    if jr.status_code == 200:
+                        prod = jr.json().get("product", {})
+                        product.title = prod.get("title", "")
+                        product.brand = prod.get("vendor", "")
+                        body = prod.get("body_html") or ""
+                        product.description = re.sub(r'<[^>]+>', '', body).strip()[:500]
+                        images = prod.get("images", [])
+                        options = prod.get("options", [])
+                        variants_json = prod.get("variants", [])
+                        if images:
+                            product.image_url = images[0]["src"]
+                            product.extra_images = [img["src"] for img in images[1:5]]
+                except Exception as e:
+                    print(f"[Shopify] .json 失敗: {e}")
+
+                # title fallback from HTML
+                if not product.title:
+                    t = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html)
+                    product.title = t.group(1).strip() if t else ""
+
+                # ── 3. .js 取庫存 available
                 available_map = {}
                 try:
-                    js_resp = await client.get(js_url)
-                    if js_resp.status_code == 200:
-                        for v in js_resp.json().get("variants", []):
+                    jsr = await client.get(js_url, headers={"Accept": "application/json"})
+                    if jsr.status_code == 200:
+                        for v in jsr.json().get("variants", []):
                             available_map[v["id"]] = v.get("available", False)
                 except Exception:
                     pass
 
-                # ── 商品基本資料
-                product.title = prod.get("title", "")
-                product.brand = prod.get("vendor", "")
-                body = prod.get("body_html") or ""
-                product.description = re.sub(r'<[^>]+>', '', body).strip()[:500]
-
-                # ── 圖片
-                images = prod.get("images", [])
-                if images:
-                    product.image_url = images[0]["src"]
-                    product.extra_images = [img["src"] for img in images[1:5]]
-
-                # ── Variants
-                options = prod.get("options", [])  # [{name, position, values}]
-
-                for v in prod.get("variants", []):
+                # ── 4. 建立 variants
+                for v in variants_json:
                     vid = v["id"]
-
-                    # 價格：直接是 JPY 字串
-                    price_str = v.get("price", "0")
-                    currency  = v.get("price_currency", "JPY")
-                    price_jpy = int(float(price_str))
-                    print(f"[Shopify DEBUG] variant {vid} price={price_str!r} {currency} → ¥{price_jpy}")
-
-                    # 第一個 variant 設為商品價格
-                    if not product.price_jpy:
-                        product.price_jpy = price_jpy
-
-                    # 庫存
                     in_stock = available_map.get(vid, True)
 
-                    # Color / Size
                     option1 = v.get("option1", "") or ""
                     option2 = v.get("option2", "") or ""
                     option3 = v.get("option3", "") or ""
@@ -110,7 +119,6 @@ class ShopifyJpMixin:
                         elif not color:
                             color = val
 
-                    # 圖片：根據 image_id 對應
                     img_src = ""
                     img_id = v.get("image_id")
                     if img_id:
