@@ -1,18 +1,31 @@
 """
 Shopify 日本商店爬蟲 Mixin
-- 價格：HTML data-selected-variant price（JPY cents ÷ 100）
-  → .json 會依 IP 回傳外幣（SGD），不可用
-- 圖片/選項：.json API
-- 庫存：.js API（available bool）
+價格策略（依序嘗試）：
+  1. Cookie localization=JP + Accept-Language: ja
+  2. URL 加 ?currency=JPY
+  兩種方式都加 DEBUG log 顯示實際抓到的 raw price
 """
 import json
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode, urlunparse, parse_qs, urljoin
 
 import httpx
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
+
+
+def _extract_price_from_html(html: str) -> tuple[int, str]:
+    """從 data-selected-variant 取 price cents，回傳 (cents, raw_str)"""
+    sv_match = re.search(r'data-selected-variant[^>]*>(\{[^<]+\})', html)
+    if not sv_match:
+        return 0, "NOT_FOUND"
+    try:
+        sv = json.loads(sv_match.group(1))
+        cents = sv.get("price", 0)
+        return cents, str(cents)
+    except Exception as e:
+        return 0, f"PARSE_ERROR:{e}"
 
 
 class ShopifyJpMixin:
@@ -33,41 +46,65 @@ class ShopifyJpMixin:
 
         json_url = f"{base_url}/products/{handle}.json"
         js_url   = f"{base_url}/products/{handle}.js"
-        print(f"[Shopify] 抓取頁面: {url}")
+
+        # ── 方法1：Cookie localization=JP
+        headers_with_cookie = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "ja-JP,ja;q=0.9",
+            "Cookie": "localization=JP; cart_currency=JPY",
+        }
+
+        # ── 方法2：URL + currency=JPY
+        url_with_currency = f"{url}{'&' if '?' in url else '?'}currency=JPY"
 
         try:
             async with httpx.AsyncClient(
                 timeout=SCRAPE_TIMEOUT,
                 follow_redirects=True,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml,application/json",
-                    "Accept-Language": "ja,en-US;q=0.9",
-                },
+                headers={"User-Agent": USER_AGENT},
             ) as client:
 
-                # ── 1. 抓 HTML，取 data-selected-variant（永遠是 JPY cents）
-                html_resp = await client.get(url)
-                if html_resp.status_code != 200:
-                    return await self._scrape_with_playwright(url)
-                html = html_resp.text
+                # ══ 方法1：Cookie ══
+                print(f"[Shopify] 方法1 Cookie(localization=JP): {url}")
+                r1 = await client.get(url, headers=headers_with_cookie)
+                cents1, raw1 = _extract_price_from_html(r1.text)
+                price1 = cents1 // 100 if cents1 > 10000 else cents1
+                print(f"[Shopify DEBUG] 方法1 raw={raw1!r} → ¥{price1}")
 
-                sv_match = re.search(r'data-selected-variant[^>]*>(\{[^<]+\})', html)
-                if not sv_match:
-                    print("[Shopify] 找不到 data-selected-variant，改用 Playwright")
-                    return await self._scrape_with_playwright(url)
+                # ══ 方法2：?currency=JPY ══
+                print(f"[Shopify] 方法2 ?currency=JPY: {url_with_currency}")
+                r2 = await client.get(url_with_currency, headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "ja-JP,ja;q=0.9",
+                })
+                cents2, raw2 = _extract_price_from_html(r2.text)
+                price2 = cents2 // 100 if cents2 > 10000 else cents2
+                print(f"[Shopify DEBUG] 方法2 raw={raw2!r} → ¥{price2}")
 
-                sv = json.loads(sv_match.group(1))
-                price_cents = sv.get("price", 0)
-                product.price_jpy = price_cents // 100
-                print(f"[Shopify DEBUG] data-selected-variant cents={price_cents} → ¥{product.price_jpy}")
+                # ══ 決定使用哪個 ══
+                # 優先選較大的（SGD 會比 JPY 小很多）
+                if price1 > price2:
+                    product.price_jpy = price1
+                    print(f"[Shopify DEBUG] 採用方法1 ¥{price1}")
+                    html = r1.text
+                elif price2 > price1:
+                    product.price_jpy = price2
+                    print(f"[Shopify DEBUG] 採用方法2 ¥{price2}")
+                    html = r2.text
+                else:
+                    product.price_jpy = price1
+                    print(f"[Shopify DEBUG] 兩方法相同 ¥{price1}")
+                    html = r1.text
 
-                # ── 2. .json 取圖片/選項/商品資訊（不取 price）
-                images = []
-                options = []
-                variants_json = []
+                # ── .json 取圖片/選項/商品資訊
+                images, options, variants_json = [], [], []
                 try:
-                    jr = await client.get(json_url, headers={"Accept": "application/json"})
+                    jr = await client.get(json_url, headers={
+                        "Accept": "application/json",
+                        "Cookie": "localization=JP; cart_currency=JPY",
+                    })
                     if jr.status_code == 200:
                         prod = jr.json().get("product", {})
                         product.title = prod.get("title", "")
@@ -83,12 +120,11 @@ class ShopifyJpMixin:
                 except Exception as e:
                     print(f"[Shopify] .json 失敗: {e}")
 
-                # title fallback from HTML
                 if not product.title:
                     t = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html)
                     product.title = t.group(1).strip() if t else ""
 
-                # ── 3. .js 取庫存 available
+                # ── .js 取庫存
                 available_map = {}
                 try:
                     jsr = await client.get(js_url, headers={"Accept": "application/json"})
@@ -98,11 +134,10 @@ class ShopifyJpMixin:
                 except Exception:
                     pass
 
-                # ── 4. 建立 variants
+                # ── 建立 variants
                 for v in variants_json:
                     vid = v["id"]
                     in_stock = available_map.get(vid, True)
-
                     option1 = v.get("option1", "") or ""
                     option2 = v.get("option2", "") or ""
                     option3 = v.get("option3", "") or ""
