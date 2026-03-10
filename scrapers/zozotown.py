@@ -201,7 +201,6 @@ class ZozotownMixin:
                                         if (!size) return;
 
                                         var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
-                                        var inStock = !soldOut && (fullText.indexOf('在庫あり') !== -1 || fullText.indexOf('カートに入れる') !== -1 || /残り\d/.test(fullText));
 
                                         var sku = '';
                                         var form = li.querySelector('form');
@@ -217,7 +216,7 @@ class ZozotownMixin:
                                             size: size,
                                             sku: sku,
                                             price: r.price,
-                                            in_stock: inStock && !soldOut,
+                                            in_stock: !soldOut,
                                             image: colorImage
                                         });
                                     });
@@ -233,7 +232,6 @@ class ZozotownMixin:
                                         if (!size) return;
 
                                         var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
-                                        var inStock = !soldOut && (fullText.indexOf('在庫あり') !== -1 || fullText.indexOf('カートに入れる') !== -1 || /残り\d/.test(fullText));
                                         var sku = '';
                                         var form = li.querySelector('form');
                                         if (form) {
@@ -248,7 +246,7 @@ class ZozotownMixin:
                                             size: size,
                                             sku: sku,
                                             price: r.price,
-                                            in_stock: inStock && !soldOut,
+                                            in_stock: !soldOut,
                                             image: ''
                                         });
                                     });
