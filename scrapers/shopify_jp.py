@@ -1,11 +1,8 @@
 """
 Shopify 日本商店爬蟲 Mixin
-資料來源：HTML 內嵌 <script type="application/ld+json">
-- price: 已是日圓字串（"29700"），priceCurrency 確認為 JPY
-- availability: InStock / OutOfStock
-- image: 直接完整 URL
+- 價格/圖片/選項：.json API（price 直接是 JPY 字串，price_currency 確認）
+- 庫存 available：.js API（每個 variant 有 available bool）
 """
-import json
 import re
 from urllib.parse import urlparse
 
@@ -22,7 +19,18 @@ class ShopifyJpMixin:
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.hostname}"
 
-        print(f"[Shopify] 抓取 HTML: {url}")
+        path_parts = parsed.path.strip("/").split("/")
+        handle = ""
+        if "products" in path_parts:
+            idx = path_parts.index("products")
+            handle = path_parts[idx + 1] if idx + 1 < len(path_parts) else ""
+
+        if not handle:
+            return await self._scrape_with_playwright(url)
+
+        json_url = f"{base_url}/products/{handle}.json"
+        js_url   = f"{base_url}/products/{handle}.js"
+        print(f"[Shopify] 抓取 JSON API: {json_url}")
 
         try:
             async with httpx.AsyncClient(
@@ -30,102 +38,96 @@ class ShopifyJpMixin:
                 follow_redirects=True,
                 headers={
                     "User-Agent": USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept": "application/json",
                     "Accept-Language": "ja,en-US;q=0.9",
                 },
             ) as client:
-                resp = await client.get(url)
+
+                # ── 主資料：.json
+                resp = await client.get(json_url)
                 if resp.status_code != 200:
-                    print(f"[Shopify] HTTP {resp.status_code}，改用 Playwright")
+                    print(f"[Shopify] .json HTTP {resp.status_code}，改用 Playwright")
                     return await self._scrape_with_playwright(url)
 
-                html = resp.text
+                data = resp.json()
+                prod = data.get("product", data)
 
-                # ── 抓 JSON-LD（含完整 price JPY、availability、image）
-                # 抓所有 ld+json script，找 @type=ProductGroup 的那個
-                all_ld_scripts = re.findall(
-                    r'<script\s+type="application/ld\+json">(.*?)</script>',
-                    html, re.DOTALL
-                )
-                ld = None
-                for s in all_ld_scripts:
-                    try:
-                        obj = json.loads(s.strip())
-                        if obj.get("@type") == "ProductGroup":
-                            ld = obj
-                            break
-                    except Exception:
-                        pass
+                # ── 庫存：.js（variant id → available）
+                available_map = {}
+                try:
+                    js_resp = await client.get(js_url)
+                    if js_resp.status_code == 200:
+                        for v in js_resp.json().get("variants", []):
+                            available_map[v["id"]] = v.get("available", False)
+                except Exception:
+                    pass
 
-                if not ld:
-                    print("[Shopify] 找不到 JSON-LD ProductGroup，改用 Playwright")
-                    return await self._scrape_with_playwright(url)
+                # ── 商品基本資料
+                product.title = prod.get("title", "")
+                product.brand = prod.get("vendor", "")
+                body = prod.get("body_html") or ""
+                product.description = re.sub(r'<[^>]+>', '', body).strip()[:500]
 
-                product.title = ld.get("name", "")
-                brand_obj = ld.get("brand", {})
-                product.brand = brand_obj.get("name", "") if isinstance(brand_obj, dict) else ""
-                product.description = ld.get("description", "")[:500]
+                # ── 圖片
+                images = prod.get("images", [])
+                if images:
+                    product.image_url = images[0]["src"]
+                    product.extra_images = [img["src"] for img in images[1:5]]
 
-                variants_ld = ld.get("hasVariant", [])
-                if not variants_ld:
-                    print("[Shopify] JSON-LD 無 hasVariant，改用 Playwright")
-                    return await self._scrape_with_playwright(url)
+                # ── Variants
+                options = prod.get("options", [])  # [{name, position, values}]
 
-                # 第一個 variant 的價格（已是 JPY 字串，直接轉 int）
-                first_offers = variants_ld[0].get("offers", {})
-                price_str = first_offers.get("price", "0")
-                currency = first_offers.get("priceCurrency", "JPY")
-                product.price_jpy = int(float(price_str))
-                print(f"[Shopify DEBUG] price={price_str!r} {currency} → ¥{product.price_jpy}")
+                for v in prod.get("variants", []):
+                    vid = v["id"]
 
-                # 第一張圖片
-                first_img = variants_ld[0].get("image", "")
-                if first_img:
-                    # 移除 width 參數，取原圖
-                    product.image_url = first_img.split("&width=")[0].split("?width=")[0]
+                    # 價格：直接是 JPY 字串
+                    price_str = v.get("price", "0")
+                    currency  = v.get("price_currency", "JPY")
+                    price_jpy = int(float(price_str))
+                    print(f"[Shopify DEBUG] variant {vid} price={price_str!r} {currency} → ¥{price_jpy}")
 
-                # 額外圖片：從 modal img 標籤抓（避免重複）
-                modal_imgs = re.findall(
-                    r'<img[^>]+class="global-media-settings[^"]*"[^>]+src="([^"?]+)',
-                    html
-                )
-                seen = {product.image_url}
-                for src in modal_imgs:
-                    s = "https:" + src if src.startswith("//") else src
-                    if s and s not in seen and len(product.extra_images) < 4:
-                        seen.add(s)
-                        product.extra_images.append(s)
+                    # 第一個 variant 設為商品價格
+                    if not product.price_jpy:
+                        product.price_jpy = price_jpy
 
-                # Variants
-                for v in variants_ld:
-                    offers = v.get("offers", {})
-                    avail = offers.get("availability", "")
-                    in_stock = "InStock" in avail
+                    # 庫存
+                    in_stock = available_map.get(vid, True)
 
-                    # name 格式：「PRODUCT NAME - option1 / option2」
-                    full_name = v.get("name", "")
-                    options_part = full_name.split(" - ", 1)[-1] if " - " in full_name else ""
-                    parts = [p.strip() for p in options_part.split("/")] if options_part else []
+                    # Color / Size
+                    option1 = v.get("option1", "") or ""
+                    option2 = v.get("option2", "") or ""
+                    option3 = v.get("option3", "") or ""
+                    color, size = "", ""
 
-                    vinfo = {
-                        "color": "",
-                        "size": "",
+                    for opt in options:
+                        name = opt.get("name", "").lower()
+                        pos  = opt.get("position", 1)
+                        val  = option1 if pos == 1 else (option2 if pos == 2 else option3)
+                        if any(k in name for k in ["color", "colour", "カラー", "色"]):
+                            color = val
+                        elif any(k in name for k in ["size", "サイズ", "寸"]):
+                            size = val
+                        elif not color:
+                            color = val
+
+                    # 圖片：根據 image_id 對應
+                    img_src = ""
+                    img_id = v.get("image_id")
+                    if img_id:
+                        for img in images:
+                            if img["id"] == img_id:
+                                img_src = img["src"]
+                                break
+                    if not img_src and images:
+                        img_src = images[0]["src"]
+
+                    product.variants.append({
+                        "color":    color,
+                        "size":     size,
                         "in_stock": in_stock,
-                        "image": v.get("image", "").split("&width=")[0].split("?width=")[0],
-                        "sku": v.get("sku", ""),
-                    }
-
-                    # 判斷 size vs color
-                    for p in parts:
-                        p = p.strip()
-                        if re.match(r'^[0-9XSMLxsml]+$', p):
-                            vinfo["size"] = p
-                        elif not vinfo["color"]:
-                            vinfo["color"] = p
-                        else:
-                            vinfo["size"] = p
-
-                    product.variants.append(vinfo)
+                        "image":    img_src,
+                        "sku":      v.get("sku", ""),
+                    })
 
                 print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy} ({len(product.variants)} variants)")
                 return product
