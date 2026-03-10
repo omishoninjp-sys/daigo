@@ -90,6 +90,13 @@ class PokemonCenterMixin:
                 product.image_url = imgs[0]
                 product.extra_images = imgs[1:8]
 
+            # === 庫存：<input id="availability" value="true/false"> ===
+            avail_el = soup.find("input", id="availability")
+            in_stock = True  # default
+            if avail_el:
+                in_stock = avail_el.get("value", "true").strip().lower() == "true"
+            print(f"[PokemonCenter] 庫存狀態: {'有庫存' if in_stock else '❌ 無庫存'}")
+
             # === Variants ===
             # variation-buttons-container 有內容時解析選項
             var_container = soup.find("div", class_="variation-buttons-container")
@@ -109,10 +116,12 @@ class PokemonCenterMixin:
                         "size":  v,
                         "sku":   f"poke-{v}".lower().replace(" ", "-"),
                         "price": product.price_jpy or 0,
-                        "in_stock": True,
+                        "in_stock": in_stock,
                         "image": product.image_url,
                     })
-            # variant なし → 単一商品として登録（variants 空のまま）
+            # variant なし → 単一商品（variants 空のまま、in_stock を product に記録）
+            if not parsed_variants:
+                product.in_stock = in_stock
 
             print(
                 f"[PokemonCenter] ✅ {product.title} / ¥{product.price_jpy} / "

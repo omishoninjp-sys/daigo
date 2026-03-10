@@ -24,6 +24,7 @@ class ProductInfo:
     variants: list = field(default_factory=list)
     image_base64: str = ""   # 當 Shopify 無法直接下載圖片時，用 base64 上傳
     is_adult: bool = False   # 成人商品標記
+    in_stock: bool = True    # 商品整體庫存（無 variants 時使用）
 
     def to_dict(self):
         d = asdict(self)
