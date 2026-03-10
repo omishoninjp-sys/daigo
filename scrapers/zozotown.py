@@ -345,25 +345,34 @@ class ZozotownMixin:
                                                   stock_data.get('result') or [])
                                     if isinstance(stock_list, dict):
                                         stock_list = stock_list.get('list') or stock_list.get('sizeList') or []
-                                    did_stock = {}
+                                    did_stock = {}      # detailId → in_stock
+                                    color_size_stock = {}  # "colorName|sizeName" → in_stock
                                     for s in (stock_list if isinstance(stock_list, list) else []):
                                         did = str(s.get('detailId') or s.get('did') or s.get('goodsDetailId') or '')
+                                        color = str(s.get('colorName') or s.get('color') or s.get('colorLabel') or '')
                                         size = str(s.get('sizeName') or s.get('size') or s.get('sizeLabel') or '')
                                         sold = s.get('isSoldOut') or s.get('soldOut') or s.get('soldout') or False
                                         qty = int(s.get('quantity') or s.get('stock') or s.get('stockCount') or (0 if sold else 1))
                                         in_stk = (not sold) and (qty > 0)
-                                        if did: did_stock[did] = in_stk
-                                        if size: did_stock[size] = in_stk
+                                        if did:
+                                            did_stock[did] = in_stk
+                                        if color and size:
+                                            color_size_stock[color + '|' + size] = in_stk
 
-                                    if did_stock and result and result.get('variants'):
+                                    if (did_stock or color_size_stock) and result and result.get('variants'):
                                         for v in result['variants']:
                                             sku = str(v.get('sku', ''))
+                                            color = str(v.get('color', ''))
                                             size = str(v.get('size', ''))
+                                            cs_key = color + '|' + size
                                             if sku in did_stock:
+                                                # 最精確：detailId 直接匹配
                                                 v['in_stock'] = did_stock[sku]
-                                            elif size in did_stock:
-                                                v['in_stock'] = did_stock[size]
-                                        print(f"[ZOZO] 庫存修正完成: {did_stock}")
+                                            elif cs_key in color_size_stock:
+                                                # 次精確：顏色+尺寸匹配
+                                                v['in_stock'] = color_size_stock[cs_key]
+                                            # 不 fallback size-only，避免跨顏色污染
+                                        print(f"[ZOZO] 庫存修正完成 did:{len(did_stock)} cs:{len(color_size_stock)}")
                             except Exception as e:
                                 print(f"[ZOZO] GetSizeMappinngList 失敗: {e}")
 
