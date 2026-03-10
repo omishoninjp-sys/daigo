@@ -50,6 +50,27 @@ COUNTRY_FLAG = {
     "JP": "🇯🇵", "US": "🇺🇸",
 }
 
+def trim_title(title: str) -> str:
+    """
+    把 Shopify 商品名稱縮短成適合 ticker 顯示的長度。
+    格式通常是「日本代購｜品牌 商品名 - 細節｜來源站」
+    → 只取中間那段，最多 20 字
+    """
+    # 去掉「日本代購｜」前綴
+    if "｜" in title:
+        parts = title.split("｜")
+        # 取第二段（品牌+商品名）
+        core = parts[1] if len(parts) > 1 else parts[0]
+    else:
+        core = title
+    # 去掉「 - 細節描述」後的部分
+    if " - " in core:
+        core = core.split(" - ")[0]
+    # 超過 20 字截斷
+    if len(core) > 20:
+        core = core[:20] + "…"
+    return core.strip()
+
 def time_ago_zh(s: str) -> str:
     try:
         dt   = datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -83,7 +104,7 @@ async def fetch_real_orders() -> list[dict]:
         result.append({
             "flag":    flag,
             "region":  city_zh,
-            "product": items[0]["title"],
+            "product": trim_title(items[0]["title"]),
             "time":    time_ago_zh(order.get("created_at", "")),
         })
     return result
@@ -125,7 +146,7 @@ async def fetch_recent_products() -> list[dict]:
         result.append({
             "flag":    flag,
             "region":  city,
-            "product": p.get("title", ""),
+            "product": trim_title(p.get("title", "")),
             "time":    time_ago_zh(p["created_at"]),
         })
     return result
