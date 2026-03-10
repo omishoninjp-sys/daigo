@@ -80,9 +80,14 @@ class ShopifyJpMixin:
 
                             variant_info = {"color": "", "size": "", "in_stock": available, "image": ""}
 
-                            for opt in options:
-                                opt_name = (opt.get("name", "") or "").lower()
-                                opt_pos = opt.get("position", 0)
+                            for i, opt in enumerate(options):
+                                # .js: options 是字串陣列; .json: options 是 dict 陣列
+                                if isinstance(opt, dict):
+                                    opt_name = (opt.get("name", "") or "").lower()
+                                    opt_pos = opt.get("position", i + 1)
+                                else:
+                                    opt_name = str(opt).lower()
+                                    opt_pos = i + 1
                                 val = ""
                                 if opt_pos == 1: val = option1
                                 elif opt_pos == 2: val = option2
