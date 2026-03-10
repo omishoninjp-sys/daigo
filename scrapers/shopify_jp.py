@@ -117,6 +117,7 @@ class ShopifyJpMixin:
                         if images:
                             product.image_url = images[0]["src"]
                             product.extra_images = [img["src"] for img in images[1:5]]
+                        print(f"[Shopify DEBUG] images count={len(images)}, extra={len(product.extra_images)}")
                 except Exception as e:
                     print(f"[Shopify] .json 失敗: {e}")
 
@@ -131,13 +132,17 @@ class ShopifyJpMixin:
                     if jsr.status_code == 200:
                         for v in jsr.json().get("variants", []):
                             available_map[v["id"]] = v.get("available", False)
-                except Exception:
-                    pass
+                        print(f"[Shopify DEBUG] available_map: { {k: v for k, v in available_map.items()} }")
+                    else:
+                        print(f"[Shopify DEBUG] .js HTTP {jsr.status_code}，庫存 fallback False")
+                except Exception as e:
+                    print(f"[Shopify DEBUG] .js 例外: {e}，庫存 fallback False")
 
                 # ── 建立 variants
                 for v in variants_json:
                     vid = v["id"]
-                    in_stock = available_map.get(vid, True)
+                    in_stock = available_map.get(vid, False)
+                    print(f"[Shopify DEBUG] variant {vid} in_stock={in_stock}")
                     option1 = v.get("option1", "") or ""
                     option2 = v.get("option2", "") or ""
                     option3 = v.get("option3", "") or ""
