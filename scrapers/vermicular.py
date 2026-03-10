@@ -45,39 +45,27 @@ class VermicularMixin:
             h1 = soup.find("h1")
             if h1:
                 product.title = h1.get_text(strip=True)
-            # fallback: <title> tag（格納 "商品名 | Vermicular"）
             if not product.title:
                 title_tag = soup.find("title")
                 if title_tag:
                     raw = title_tag.get_text(strip=True)
                     product.title = raw.split("|")[0].strip()
 
-            # === 價格：span.MainContents_priceArea_price_number__bwKjr → "¥18,590" ===
+            # === 價格 ===
             price_el = soup.find("span", class_=re.compile(r"priceArea_price_number"))
             if price_el:
                 m = re.search(r'[\d,]+', price_el.get_text())
                 if m:
                     product.price_jpy = int(m.group(0).replace(',', ''))
 
-            # === 當前顏色名稱：p.MainContents_colorArea_header > span:last ===
-            # HTML: <p><span>カラー</span><span>/</span><span>オーク</span></p>
-            color_header = soup.find("p", class_=re.compile(r"colorArea_header"))
-            current_color = ""
-            if color_header:
-                spans = color_header.find_all("span")
-                if len(spans) >= 3:
-                    current_color = spans[-1].get_text(strip=True)
-
-            # === 當前尺寸：div.ChoiceBorderItem__current 裡的文字 ===
+            # === 當前尺寸 ===
             current_size_el = soup.find("div", class_=re.compile(r"ChoiceBorderItem__current"))
             current_size = ""
             if current_size_el:
                 inner = current_size_el.find("div")
-                current_size = (inner or current_size_el).get_text(strip=True)
-                # HTML encode 修正 EGG & TOAST
-                current_size = current_size.replace("&amp;", "&")
+                current_size = (inner or current_size_el).get_text(strip=True).replace("&amp;", "&")
 
-            # === 圖片：img.MainImages_item_img（跳過 video 元素）===
+            # === 圖片（主圖 + sub）===
             imgs = []
             seen = set()
             for img in soup.find_all("img", class_=re.compile(r"MainImages_item_img")):
@@ -85,7 +73,6 @@ class VermicularMixin:
                 if src and src not in seen and "/static/photo/item/" in src:
                     seen.add(src)
                     imgs.append(src)
-            # video poster 也加入
             for video in soup.find_all("video", class_=re.compile(r"MainImages_item_img")):
                 poster = video.get("poster", "")
                 if poster and poster not in seen:
@@ -96,31 +83,100 @@ class VermicularMixin:
                 product.image_url = imgs[0]
                 product.extra_images = imgs[1:8]
 
-            # === 顏色 swatch 圖（當前顏色） ===
-            color_img = ""
-            # 找被選中的（active）顏色 item
+            # === 收集所有顏色 URL ===
+            # a.MainContents_colorArea_group_colorItem__O4ga1[href]
+            color_urls = []
+            seen_hrefs = set()
             for a_el in soup.find_all("a", class_=re.compile(r"colorArea_group_colorItem")):
                 href = a_el.get("href", "")
-                # 判斷是否為當前頁面的 URL（URL 末段相同）
-                if url.rstrip("/").endswith(href.rstrip("/")):
-                    img_el = a_el.find("img")
-                    if img_el:
-                        color_img = _abs(img_el.get("src", ""))
-                    break
-            # fallback：直接取第一個 color swatch
-            if not color_img:
-                first_swatch = soup.find("a", class_=re.compile(r"colorArea_group_colorItem"))
-                if first_swatch:
-                    img_el = first_swatch.find("img")
-                    if img_el:
-                        color_img = _abs(img_el.get("src", ""))
+                if href and href not in seen_hrefs:
+                    seen_hrefs.add(href)
+                    full = "https://shop.vermicular.jp" + href if href.startswith("/") else href
+                    color_urls.append(full)
 
-            # === 組合 variant（此頁只有一個） ===
-            if current_color or current_size:
+            print(f"[Vermicular] 發現 {len(color_urls)} 個顏色 URL: {color_urls}")
+
+            # === 爬各顏色頁取得 color + swatch 圖 ===
+            async def _scrape_color_page(color_url: str) -> dict | None:
+                """回傳 {"color", "size", "sku", "image"} 或 None"""
+                try:
+                    c_html = await self._vermicular_fetch_html(color_url)
+                    if not c_html:
+                        return None
+                    c_soup = BeautifulSoup(c_html, "html.parser")
+
+                    # 顏色名
+                    c_header = c_soup.find("p", class_=re.compile(r"colorArea_header"))
+                    color_name = ""
+                    if c_header:
+                        spans = c_header.find_all("span")
+                        if len(spans) >= 3:
+                            color_name = spans[-1].get_text(strip=True)
+
+                    # swatch 圖（當前被選中的 colorItem）
+                    swatch_img = ""
+                    for a in c_soup.find_all("a", class_=re.compile(r"colorArea_group_colorItem")):
+                        href = a.get("href", "")
+                        if color_url.rstrip("/").endswith(href.rstrip("/")):
+                            img_el = a.find("img")
+                            if img_el:
+                                src = img_el.get("src", "")
+                                swatch_img = _abs(src)
+                            break
+
+                    # 尺寸
+                    size_el = c_soup.find("div", class_=re.compile(r"ChoiceBorderItem__current"))
+                    size = ""
+                    if size_el:
+                        inner = size_el.find("div")
+                        size = (inner or size_el).get_text(strip=True).replace("&amp;", "&")
+
+                    sku = color_url.rstrip("/").rsplit("/", 1)[-1]
+                    return {
+                        "color": color_name,
+                        "size": size or current_size,
+                        "sku": sku,
+                        "image": swatch_img,
+                    }
+                except Exception as e:
+                    print(f"[Vermicular] 顏色頁爬取失敗 {color_url}: {e}")
+                    return None
+
+            # 如果有多個顏色 URL，逐一爬取
+            if len(color_urls) > 1:
+                for c_url in color_urls:
+                    v = await _scrape_color_page(c_url)
+                    if v:
+                        product.variants.append({
+                            "color":    v["color"],
+                            "size":     v["size"],
+                            "sku":      v["sku"],
+                            "price":    product.price_jpy or 0,
+                            "in_stock": True,
+                            "image":    v["image"],
+                        })
+            else:
+                # 只有一個顏色，用當前頁資料
+                color_header = soup.find("p", class_=re.compile(r"colorArea_header"))
+                current_color = ""
+                if color_header:
+                    spans = color_header.find_all("span")
+                    if len(spans) >= 3:
+                        current_color = spans[-1].get_text(strip=True)
+
+                color_img = ""
+                for a_el in soup.find_all("a", class_=re.compile(r"colorArea_group_colorItem")):
+                    href = a_el.get("href", "")
+                    if url.rstrip("/").endswith(href.rstrip("/")):
+                        img_el = a_el.find("img")
+                        if img_el:
+                            color_img = _abs(img_el.get("src", ""))
+                        break
+
                 product.variants.append({
                     "color":    current_color,
                     "size":     current_size,
-                    "sku":      url.rstrip("/").rsplit("/", 1)[-1],  # e.g. "I00002783"
+                    "sku":      url.rstrip("/").rsplit("/", 1)[-1],
                     "price":    product.price_jpy or 0,
                     "in_stock": True,
                     "image":    color_img or product.image_url,
@@ -128,7 +184,7 @@ class VermicularMixin:
 
             print(
                 f"[Vermicular] ✅ {product.title} / ¥{product.price_jpy} / "
-                f"color={current_color} size={current_size} / images={len(imgs)}"
+                f"{len(product.variants)} variants / images={len(imgs)}"
             )
 
         except Exception as e:
