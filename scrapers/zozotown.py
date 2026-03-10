@@ -200,8 +200,8 @@ class ZozotownMixin:
                                         var size = sizeMatch ? sizeMatch[1].trim() : '';
                                         if (!size) return;
 
-                                        var inStock = fullText.indexOf('在庫あり') !== -1;
-                                        var soldOut = fullText.indexOf('SOLD') !== -1;
+                                        var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
+                                        var inStock = !soldOut && (fullText.indexOf('在庫あり') !== -1 || fullText.indexOf('カートに入れる') !== -1 || /残り\d/.test(fullText));
 
                                         var sku = '';
                                         var form = li.querySelector('form');
@@ -232,8 +232,8 @@ class ZozotownMixin:
                                         var size = sizeMatch ? sizeMatch[1].trim() : '';
                                         if (!size) return;
 
-                                        var inStock = fullText.indexOf('在庫あり') !== -1;
-                                        var soldOut = fullText.indexOf('SOLD') !== -1;
+                                        var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
+                                        var inStock = !soldOut && (fullText.indexOf('在庫あり') !== -1 || fullText.indexOf('カートに入れる') !== -1 || /残り\d/.test(fullText));
                                         var sku = '';
                                         var form = li.querySelector('form');
                                         if (form) {
@@ -315,7 +315,6 @@ class ZozotownMixin:
 
                         # === 用 GetSizeMappinngList API 修正庫存 ===
                         gid = (result or {}).get('item_id', '')
-                        print(f"[ZOZO] item_id={gid!r} result_keys={list((result or {}).keys())}")
                         if gid:
                             try:
                                 stock_data = driver.execute_async_script("""
