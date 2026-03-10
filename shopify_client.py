@@ -69,10 +69,12 @@ class ShopifyClient:
                 else:
                     variant_selling_price = price_jpy
 
+                in_stock = v.get("in_stock", True)
                 sv = {
                     "price": str(variant_selling_price),
-                    "inventory_management": None,
-                    "inventory_policy": "continue",
+                    "inventory_management": "shopify",
+                    "inventory_policy": "deny",
+                    "inventory_quantity": 1 if in_stock else 0,
                     "requires_shipping": True,
                 }
                 if has_color and has_size:
@@ -103,8 +105,9 @@ class ShopifyClient:
         if not shopify_variants:
             shopify_variants = [{
                 "price": str(price_jpy),
-                "inventory_management": None,
-                "inventory_policy": "continue",
+                "inventory_management": "shopify",
+                "inventory_policy": "deny",
+                "inventory_quantity": 1,
                 "requires_shipping": True,
             }]
 
