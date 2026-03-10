@@ -1,6 +1,6 @@
 """
 Shopify 日本商店爬蟲 Mixin
-使用 Shopify JSON API（/products/handle.json）
+使用 /products/handle.js（含 available 和 JPY cents 價格）
 """
 import re
 from urllib.parse import urlparse
@@ -28,142 +28,126 @@ class ShopifyJpMixin:
         if not handle:
             return await self._scrape_with_playwright(url)
 
-        json_url  = f"{base_url}/products/{handle}.json"
-        js_url    = f"{base_url}/products/{handle}.js"
+        js_url   = f"{base_url}/products/{handle}.js"
+        json_url = f"{base_url}/products/{handle}.json"
         print(f"[Shopify] 嘗試 JSON API: {json_url}")
+
+        def _abs(src):
+            if not src: return ""
+            if src.startswith("http"): return src
+            return base_url + (src if src.startswith("/") else "/" + src)
 
         try:
             async with httpx.AsyncClient(
                 timeout=SCRAPE_TIMEOUT,
                 follow_redirects=True,
                 headers={
-                    'User-Agent': USER_AGENT,
-                    'Accept': 'application/json',
-                    'Accept-Language': 'ja,en-US;q=0.9',
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                    "Accept-Language": "ja,en-US;q=0.9",
                 },
             ) as client:
-                resp = await client.get(json_url)
-                # 同時取 .js 以取得 available 欄位
-                js_available = {}
-                js_price_jpy = None
+
+                # ── 抓 .js（主要資料，含 available 和 JPY cents 價格）
+                js_resp = await client.get(js_url)
+                if js_resp.status_code != 200:
+                    return await self._scrape_with_playwright(url)
+
+                js = js_resp.json()
+                prod = js.get("product", js) if "product" in js else js
+
+                product.title = prod.get("title", "")
+                product.brand = prod.get("vendor", "")
+                product.description = (prod.get("body_html") or "")[:500]
+                if product.description:
+                    product.description = re.sub(r'<[^>]+>', '', product.description).strip()
+
+                def _img_src(img):
+                    return img if isinstance(img, str) else (img.get("src") or "")
+                def _img_id(img):
+                    return None if isinstance(img, str) else img.get("id")
+
+                js_images = prod.get("images", [])
+                if js_images:
+                    product.image_url = _abs(_img_src(js_images[0]))
+                    product.extra_images = [_abs(_img_src(i)) for i in js_images[1:5] if _img_src(i)]
+
+                # ── 補充 .json 的 image_id→src 對應表
+                image_id_map = {}
                 try:
-                    js_resp = await client.get(js_url)
-                    if js_resp.status_code == 200:
-                        js_data = js_resp.json()
-                        js_prod = js_data.get("product", js_data) if "product" in js_data else js_data
-                        js_variants = js_prod.get("variants", [])
-                        for v in js_variants:
-                            vid = v.get("id")
-                            if vid is not None:
-                                js_available[vid] = v.get("available", False)
-                        # .js price 是 cents，除以100得到 JPY
-                        if js_variants:
-                            raw_cents = normalize_price(js_variants[0].get("price", ""))
-                            if raw_cents and raw_cents > 1000:
-                                js_price_jpy = raw_cents // 100
+                    json_resp = await client.get(json_url)
+                    if json_resp.status_code == 200:
+                        json_prod = json_resp.json().get("product", {})
+                        for img in json_prod.get("images", []):
+                            iid = img.get("id")
+                            src = img.get("src", "")
+                            if iid and src:
+                                image_id_map[iid] = src
+                        if not product.image_url and json_prod.get("images"):
+                            product.image_url = _abs(json_prod["images"][0].get("src", ""))
                 except Exception:
                     pass
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    prod = data.get("product", data) if "product" in data else data
+                # ── Variants
+                variants = prod.get("variants", [])
+                options  = prod.get("options", [])
 
-                    product.title = prod.get("title", "")
-                    product.brand = prod.get("vendor", "")
-                    product.description = (prod.get("body_html") or "")[:500]
-                    if product.description:
-                        product.description = re.sub(r'<[^>]+>', '', product.description).strip()
+                if variants:
+                    # .js price 是 JPY cents（如 4950000 = ¥49,500）
+                    raw = normalize_price(variants[0].get("price", ""))
+                    if raw:
+                        product.price_jpy = raw // 100 if raw > 10000 else raw
 
-                    images = prod.get("images", [])
-                    # .js images 是字串陣列, .json images 是 dict 陣列
-                    def _img_src(img):
-                        return img if isinstance(img, str) else img.get("src", "")
-                    def _img_id(img):
-                        return None if isinstance(img, str) else img.get("id")
-                    def _abs_url(src):
-                        if not src: return ""
-                        if src.startswith("http"): return src
-                        return base_url + src if src.startswith("/") else base_url + "/" + src
+                color_image_seen = {}
 
-                    if images:
-                        product.image_url = _abs_url(_img_src(images[0]))
-                        product.extra_images = [_abs_url(_img_src(img)) for img in images[1:5] if _img_src(img)]
+                for v in variants:
+                    option1   = v.get("option1", "") or ""
+                    option2   = v.get("option2", "") or ""
+                    option3   = v.get("option3", "") or ""
+                    available = v.get("available", True)
 
-                    variants = prod.get("variants", [])
-                    if variants:
-                        first_price = variants[0].get("price", "")
-                        if first_price:
-                            raw = normalize_price(first_price)
-                            # .json price 可能是外幣（USD），優先用 .js cents ÷ 100
-                            product.price_jpy = js_price_jpy if js_price_jpy else raw
+                    vinfo = {"color": "", "size": "", "in_stock": available, "image": ""}
 
-                        options = prod.get("options", [])
-                        image_id_map = {}
-                        for img in images:
-                            iid = _img_id(img)
-                            if iid:
-                                image_id_map[iid] = _img_src(img)
+                    for i, opt in enumerate(options):
+                        opt_name = (opt if isinstance(opt, str) else opt.get("name", "")).lower()
+                        opt_pos  = (i + 1) if isinstance(opt, str) else opt.get("position", i + 1)
+                        val = option1 if opt_pos == 1 else (option2 if opt_pos == 2 else option3)
 
-                        color_image_seen = {}
+                        if any(k in opt_name for k in ["色", "color", "カラー", "colour"]):
+                            vinfo["color"] = val
+                        elif any(k in opt_name for k in ["サイズ", "size", "寸"]):
+                            vinfo["size"] = val
+                        elif not vinfo["color"]:
+                            vinfo["color"] = val
 
-                        for v in variants:
-                            option1 = v.get("option1", "") or ""
-                            option2 = v.get("option2", "") or ""
-                            option3 = v.get("option3", "") or ""
-                            vid = v.get("id")
-                            available = js_available.get(vid, v.get("available", True))
+                    title = v.get("title", "")
+                    if not vinfo["color"] and not vinfo["size"] and title:
+                        if re.match(r'^[XSML0-9]+$', title.upper().strip()):
+                            vinfo["size"] = title
+                        else:
+                            vinfo["color"] = title
 
-                            variant_info = {"color": "", "size": "", "in_stock": available, "image": ""}
+                    v_img_id = v.get("image_id")
+                    featured = v.get("featured_image") or {}
+                    img_src = ""
+                    if v_img_id and v_img_id in image_id_map:
+                        img_src = _abs(image_id_map[v_img_id])
+                    elif featured:
+                        img_src = _abs(featured if isinstance(featured, str) else featured.get("src", ""))
 
-                            for i, opt in enumerate(options):
-                                # .js: options 是字串陣列; .json: options 是 dict 陣列
-                                if isinstance(opt, dict):
-                                    opt_name = (opt.get("name", "") or "").lower()
-                                    opt_pos = opt.get("position", i + 1)
-                                else:
-                                    opt_name = str(opt).lower()
-                                    opt_pos = i + 1
-                                val = ""
-                                if opt_pos == 1: val = option1
-                                elif opt_pos == 2: val = option2
-                                elif opt_pos == 3: val = option3
+                    color = vinfo["color"]
+                    if img_src and color and color not in color_image_seen:
+                        color_image_seen[color] = img_src
+                    if color and color in color_image_seen:
+                        vinfo["image"] = color_image_seen[color]
+                    elif img_src:
+                        vinfo["image"] = img_src
 
-                                if any(k in opt_name for k in ["色", "color", "カラー", "colour"]):
-                                    variant_info["color"] = val
-                                elif any(k in opt_name for k in ["サイズ", "size", "寸"]):
-                                    variant_info["size"] = val
-                                elif not variant_info["color"]:
-                                    variant_info["color"] = val
+                    product.variants.append(vinfo)
 
-                            title = v.get("title", "")
-                            if not variant_info["color"] and not variant_info["size"] and title:
-                                if re.match(r'^[XSML0-9]+$', title.upper().strip()):
-                                    variant_info["size"] = title
-                                else:
-                                    variant_info["color"] = title
+                print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy}" if product.price_jpy else f"[Shopify] ✅ {product.title[:40]}")
+                return product
 
-                            v_image_id = v.get("image_id")
-                            featured = v.get("featured_image", {}) or {}
-
-                            img_src = ""
-                            if v_image_id and v_image_id in image_id_map:
-                                img_src = _abs_url(image_id_map[v_image_id])
-                            elif featured:
-                                img_src = _abs_url(featured if isinstance(featured, str) else featured.get("src", ""))
-
-                            color = variant_info["color"]
-                            if img_src and color and color not in color_image_seen:
-                                color_image_seen[color] = img_src
-
-                            if color and color in color_image_seen:
-                                variant_info["image"] = color_image_seen[color]
-                            elif img_src:
-                                variant_info["image"] = img_src
-
-                            product.variants.append(variant_info)
-
-                    print(f"[Shopify] ✅ {product.title[:40]} / ¥{product.price_jpy}" if product.price_jpy else f"[Shopify] ✅ {product.title[:40]}")
-                    return product
         except Exception as e:
             print(f"[Shopify] JSON API 失敗: {type(e).__name__}: {e}")
 
