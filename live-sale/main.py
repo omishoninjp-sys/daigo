@@ -2,11 +2,10 @@
 GOYOUTATI — 即時訂單通知 API
 部署在 Zeabur，供 Shopify 前端呼叫
 
-環境變數需要設定：
+環境變數：
   SHOPIFY_STORE_DOMAIN     e.g. goyoutati.myshopify.com
-  SHOPIFY_CLIENT_ID        Dev Dashboard 的「用戶端 ID」
-  SHOPIFY_CLIENT_SECRET    Dev Dashboard 的「用戶端密碼」(shpss_xxx)
-  SHOPIFY_COLLECTION_ID    （選填）鎖定某個系列 ID，空白則不過濾
+  SHOPIFY_ADMIN_TOKEN      shpca_xxxx（現有的舊版 token 直接用）
+  SHOPIFY_COLLECTION_ID    （選填）鎖定某個系列 ID
   ALLOWED_ORIGIN           e.g. https://www.goyoutati.com
 """
 
@@ -21,8 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 
 SHOPIFY_DOMAIN = os.environ["SHOPIFY_STORE_DOMAIN"]
-CLIENT_ID      = os.environ["SHOPIFY_CLIENT_ID"]
-CLIENT_SECRET  = os.environ["SHOPIFY_CLIENT_SECRET"]
+ADMIN_TOKEN    = os.environ["SHOPIFY_ADMIN_TOKEN"]
 COLLECTION_ID  = os.getenv("SHOPIFY_COLLECTION_ID", "")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 
@@ -33,37 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Token 快取 ──
-_token_cache: dict = {"token": None, "expires_at": 0}
-
-# ── 資料快取（2分鐘）──
 _data_cache: dict = {"data": None, "ts": 0}
 CACHE_TTL = 120
-
-
-async def get_access_token() -> str:
-    now = time.time()
-    if _token_cache["token"] and now < _token_cache["expires_at"] - 300:
-        return _token_cache["token"]
-
-    url = f"https://{SHOPIFY_DOMAIN}/admin/oauth/access_token"
-    payload = {
-        "client_id":     CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "grant_type":    "client_credentials",
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url, json=payload)
-
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Token exchange failed: {r.text}")
-
-    data = r.json()
-    _token_cache["token"]      = data["access_token"]
-    expires_in                 = data.get("expires_in", 86400)
-    _token_cache["expires_at"] = now + expires_in
-    return _token_cache["token"]
-
 
 REGION_MAP = {
     "Taipei": "台北市", "New Taipei": "新北市", "Taoyuan": "桃園市",
@@ -81,9 +50,9 @@ COUNTRY_FLAG = {
     "JP": "🇯🇵", "US": "🇺🇸",
 }
 
-def time_ago_zh(created_at_str: str) -> str:
+def time_ago_zh(s: str) -> str:
     try:
-        dt   = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        dt   = datetime.fromisoformat(s.replace("Z", "+00:00"))
         diff = int((datetime.now(timezone.utc) - dt).total_seconds())
     except Exception:
         return "剛剛"
@@ -92,23 +61,23 @@ def time_ago_zh(created_at_str: str) -> str:
     elif diff < 86400: return f"{diff // 3600} 小時前"
     else:              return f"{diff // 86400} 天前"
 
+HEADERS = {"X-Shopify-Access-Token": ADMIN_TOKEN}
 
-async def fetch_real_orders(token: str) -> list[dict]:
+async def fetch_real_orders() -> list[dict]:
     url = (
         f"https://{SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json"
         "?status=any&limit=15&fields=id,created_at,billing_address,line_items"
     )
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url, headers={"X-Shopify-Access-Token": token})
+        r = await client.get(url, headers=HEADERS)
     if r.status_code != 200:
         return []
-
     result = []
     for order in r.json().get("orders", []):
-        addr         = order.get("billing_address") or {}
-        city_zh      = REGION_MAP.get(addr.get("city", ""), addr.get("city", "")) or "台灣"
-        flag         = COUNTRY_FLAG.get(addr.get("country_code", ""), "🌏")
-        items        = order.get("line_items", [])
+        addr     = order.get("billing_address") or {}
+        city_zh  = REGION_MAP.get(addr.get("city", ""), addr.get("city", "")) or "台灣"
+        flag     = COUNTRY_FLAG.get(addr.get("country_code", ""), "🌏")
+        items    = order.get("line_items", [])
         if not items or not items[0].get("title"):
             continue
         result.append({
@@ -119,8 +88,7 @@ async def fetch_real_orders(token: str) -> list[dict]:
         })
     return result
 
-
-async def fetch_recent_products(token: str) -> list[dict]:
+async def fetch_recent_products() -> list[dict]:
     if COLLECTION_ID:
         url = (
             f"https://{SHOPIFY_DOMAIN}/admin/api/2024-01/products.json"
@@ -132,9 +100,8 @@ async def fetch_recent_products(token: str) -> list[dict]:
             f"https://{SHOPIFY_DOMAIN}/admin/api/2024-01/products.json"
             "?limit=20&fields=id,title,created_at,status"
         )
-
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url, headers={"X-Shopify-Access-Token": token})
+        r = await client.get(url, headers=HEADERS)
     if r.status_code != 200:
         return []
 
@@ -145,26 +112,23 @@ async def fetch_recent_products(token: str) -> list[dict]:
         ("新加坡", "🇸🇬"), ("吉隆坡", "🇲🇾"),
     ]
     result = []
-    for i, product in enumerate(r.json().get("products", [])):
-        if product.get("status") != "active":
+    for i, p in enumerate(r.json().get("products", [])):
+        if p.get("status") != "active":
             continue
-        created_str = product.get("created_at", "")
         try:
-            dt   = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-            diff = (now - dt).total_seconds()
+            dt   = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
+            if (now - dt).total_seconds() > 86400:
+                continue
         except Exception:
-            continue
-        if diff > 86400:
             continue
         city, flag = cities[i % len(cities)]
         result.append({
             "flag":    flag,
             "region":  city,
-            "product": product.get("title", ""),
-            "time":    time_ago_zh(created_str),
+            "product": p.get("title", ""),
+            "time":    time_ago_zh(p["created_at"]),
         })
     return result
-
 
 @app.get("/api/recent-orders")
 async def recent_orders():
@@ -172,12 +136,10 @@ async def recent_orders():
     if _data_cache["data"] and (now - _data_cache["ts"]) < CACHE_TTL:
         return {"orders": _data_cache["data"], "cached": True}
 
-    token    = await get_access_token()
-    orders   = await fetch_real_orders(token)
-    products = await fetch_recent_products(token)
+    orders   = await fetch_real_orders()
+    products = await fetch_recent_products()
 
-    # 每 2 筆真實訂單穿插 1 筆商品通知
-    combined = []
+    combined  = []
     prod_iter = iter(products)
     for i, o in enumerate(orders):
         combined.append(o)
@@ -192,7 +154,6 @@ async def recent_orders():
     _data_cache["data"] = final
     _data_cache["ts"]   = now
     return {"orders": final, "cached": False}
-
 
 @app.get("/health")
 async def health():
