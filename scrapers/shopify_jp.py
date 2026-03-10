@@ -45,15 +45,22 @@ class ShopifyJpMixin:
                 resp = await client.get(json_url)
                 # 同時取 .js 以取得 available 欄位
                 js_available = {}
+                js_price_jpy = None
                 try:
                     js_resp = await client.get(js_url)
                     if js_resp.status_code == 200:
                         js_data = js_resp.json()
                         js_prod = js_data.get("product", js_data) if "product" in js_data else js_data
-                        for v in js_prod.get("variants", []):
+                        js_variants = js_prod.get("variants", [])
+                        for v in js_variants:
                             vid = v.get("id")
                             if vid is not None:
                                 js_available[vid] = v.get("available", False)
+                        # .js price 是 cents，除以100得到 JPY
+                        if js_variants:
+                            raw_cents = normalize_price(js_variants[0].get("price", ""))
+                            if raw_cents and raw_cents > 1000:
+                                js_price_jpy = raw_cents // 100
                 except Exception:
                     pass
 
@@ -86,7 +93,9 @@ class ShopifyJpMixin:
                     if variants:
                         first_price = variants[0].get("price", "")
                         if first_price:
-                            product.price_jpy = normalize_price(first_price)
+                            raw = normalize_price(first_price)
+                            # .json price 可能是外幣（USD），優先用 .js cents ÷ 100
+                            product.price_jpy = js_price_jpy if js_price_jpy else raw
 
                         options = prod.get("options", [])
                         image_id_map = {}
