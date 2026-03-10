@@ -12,107 +12,28 @@ class ShopifyClient:
             "Content-Type": "application/json",
         }
 
-    async def _find_product_by_source_url(self, source_url: str) -> dict | None:
-        """透過 metafield daigo.source_url 查找已存在商品，回傳 product dict 或 None"""
+    async def _find_existing_product(self, source_url: str, title: str) -> dict | None:
+        """
+        查找已存在商品，優先用 source_url metafield，
+        fallback 用 title 搜尋比對。回傳 {"id":..., "handle":...} 或 None。
+        """
         try:
-            # 先用標題搜尋不夠精確，改用 metafield GraphQL 查詢
-            graphql_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-            gql_headers = {
-                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-                "Content-Type": "application/json",
-            }
-            query = """
-            query findByMetafield($key: String!, $value: String!) {
-              products(first: 3, query: $key) {
-                edges {
-                  node {
-                    id
-                    handle
-                    metafields(first: 5, namespace: "daigo") {
-                      edges {
-                        node {
-                          key
-                          value
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """
-            # GraphQL metafield 查詢有限制，改用 REST 搜尋後比對
             async with httpx.AsyncClient(timeout=15) as client:
+                # ── 方法 1：REST metafields search（依 value 過濾不被支援，改列出同 namespace）
+                # ── 方法 2：用 title 搜尋（最可靠）
                 resp = await client.get(
-                    f"{self.base_url}/metafields.json",
+                    f"{self.base_url}/products.json",
                     headers=self.headers,
-                    params={
-                        "metafield[owner_resource]": "product",
-                        "metafield[namespace]": "daigo",
-                        "metafield[key]": "source_url",
-                        "metafield[value]": source_url,
-                    }
+                    params={"title": title, "fields": "id,handle,title,metafields", "limit": 5},
                 )
-                # REST metafield 無法直接用 value 過濾，改用 GraphQL
-                resp2 = await client.post(
-                    graphql_url,
-                    headers=gql_headers,
-                    json={
-                        "query": """
-                        {
-                          products(first: 5, query: "tag:daigo") {
-                            edges {
-                              node {
-                                id
-                                handle
-                                metafields(first: 10, namespace: "daigo") {
-                                  edges { node { key value } }
-                                }
-                              }
-                            }
-                          }
-                        }
-                        """
-                    }
-                )
-                # 上面太粗，最可靠的方式：用 metafield value filter（需 2024-01+ API）
-                resp3 = await client.post(
-                    graphql_url,
-                    headers=gql_headers,
-                    json={
-                        "query": """
-                        query($query: String!) {
-                          products(first: 3, query: $query) {
-                            edges {
-                              node {
-                                id
-                                legacyResourceId
-                                handle
-                                metafields(first: 5, namespace: "daigo") {
-                                  edges { node { key value } }
-                                }
-                              }
-                            }
-                          }
-                        }
-                        """,
-                        "variables": {
-                            "query": f'metafield:daigo.source_url:{source_url}'
-                        }
-                    }
-                )
-                if resp3.status_code == 200:
-                    data = resp3.json()
-                    edges = data.get("data", {}).get("products", {}).get("edges", [])
-                    for edge in edges:
-                        node = edge["node"]
-                        mfs = node.get("metafields", {}).get("edges", [])
-                        for mf in mfs:
-                            if mf["node"]["key"] == "source_url" and mf["node"]["value"] == source_url:
-                                legacy_id = node.get("legacyResourceId") or node["id"].split("/")[-1]
-                                print(f"[Shopify] 查重命中 (GraphQL): product_id={legacy_id}")
-                                return {"id": legacy_id, "handle": node["handle"]}
-
+                if resp.status_code == 200:
+                    products = resp.json().get("products", [])
+                    if products:
+                        p = products[0]
+                        pid = p["id"]
+                        handle = p["handle"]
+                        print(f"[Shopify] 查重命中 (title): product_id={pid} / {handle}")
+                        return {"id": pid, "handle": handle}
         except Exception as e:
             print(f"[Shopify] 查重失敗（忽略）: {e}")
         return None
@@ -167,6 +88,18 @@ class ShopifyClient:
 
                 shopify_variants.append(sv)
 
+        # ── 去除重複 variant（option1+option2 組合相同就保留第一個）
+        seen_opts = set()
+        deduped_variants = []
+        for sv in shopify_variants:
+            key = (sv.get("option1", ""), sv.get("option2", ""))
+            if key not in seen_opts:
+                seen_opts.add(key)
+                deduped_variants.append(sv)
+            else:
+                print(f"[Shopify] ⚠️ 重複 variant 已移除: {key}")
+        shopify_variants = deduped_variants
+
         if not shopify_variants:
             shopify_variants = [{
                 "price": str(price_jpy),
@@ -175,10 +108,8 @@ class ShopifyClient:
                 "requires_shipping": True,
             }]
 
-        # === 標題：優先用 SEO 標題，fallback 舊格式 ===
         final_title = seo_title if seo_title else f"日本代購｜{title}"
 
-        # === Tags：合併 SEO tags + extra_tags ===
         final_tags = list(seo_tags) if seo_tags else ["日本代購", "代購", "daigo"]
         if brand and brand not in final_tags:
             final_tags.append(brand)
@@ -207,7 +138,6 @@ class ShopifyClient:
         if options:
             product_data["product"]["options"] = options
 
-        # === 圖片 ===
         images = []
         added_urls = set()
         color_img_urls = set(color_image_map.values())
@@ -230,26 +160,45 @@ class ShopifyClient:
         if images:
             product_data["product"]["images"] = images
 
-        # === 查重：source_url 已存在就直接回傳，不重複建立 ===
-        if source_url:
-            existing = await self._find_product_by_source_url(source_url)
-            if existing:
-                product_id = existing["id"]
-                handle = existing["handle"]
-                print(f"[Shopify] ⚠️ 商品已存在，跳過建立: {product_id} / {handle}")
-                return {
-                    "product_id": product_id,
-                    "handle": handle,
-                    "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-                    "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
-                    "already_exists": True,
-                }
+        # ── 查重（建立前）
+        existing = await self._find_existing_product(source_url, final_title)
+        if existing:
+            product_id = existing["id"]
+            handle = existing["handle"]
+            print(f"[Shopify] ⚠️ 商品已存在，跳過建立: {product_id} / {handle}")
+            return {
+                "product_id": product_id,
+                "handle": handle,
+                "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
+                "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
+                "already_exists": True,
+            }
 
-        # === 建立商品 ===
+        # ── 建立商品
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data)
+
+            # ── 422 variant 重複：代表商品已存在，搜尋後回傳
+            if resp.status_code == 422 and "already exists" in resp.text:
+                print(f"[Shopify] ⚠️ 422 variant 重複，嘗試撈現有商品...")
+                existing2 = await self._find_existing_product(source_url, final_title)
+                if existing2:
+                    product_id = existing2["id"]
+                    handle = existing2["handle"]
+                    print(f"[Shopify] ✅ 找到現有商品: {product_id} / {handle}")
+                    return {
+                        "product_id": product_id,
+                        "handle": handle,
+                        "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
+                        "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
+                        "already_exists": True,
+                    }
+                # 找不到就原樣拋出
+                raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
+
             if resp.status_code not in (200, 201):
                 raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
+
             result = resp.json()
             product = result["product"]
             product_id = product["id"]
@@ -262,17 +211,14 @@ class ShopifyClient:
                 label = sv.get("option1", "") or sv.get("option2", "") or f"variant {i+1}"
                 print(f"[Shopify]   variant [{label}]: ¥{sv['price']}")
 
-        # === 用 variant_ids 上傳顏色圖片並直接綁定 ===
         if color_image_map and created_variants:
             await self._upload_color_images(product_id, created_variants, color_image_map)
 
-        # === 加入 Collection ===
         if DAIGO_COLLECTION_ID:
             await self._add_to_collection(product_id)
         else:
             print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定，跳過 collection")
 
-        # === 發布到所有銷售管道 ===
         await self._publish_to_all_channels(product_id)
 
         return {
