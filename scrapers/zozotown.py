@@ -315,6 +315,7 @@ class ZozotownMixin:
 
                         # === 用 GetSizeMappinngList API 修正庫存 ===
                         gid = (result or {}).get('item_id', '')
+                        print(f"[ZOZO] item_id={gid!r} result_keys={list((result or {}).keys())}")
                         if gid:
                             try:
                                 stock_data = driver.execute_async_script("""
