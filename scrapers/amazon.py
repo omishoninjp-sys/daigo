@@ -178,31 +178,26 @@ class AmazonMixin:
             import json as _json
             variants_found = []
 
-            # 方法1：dimensionValuesDisplayData JSON
-            # key = 維度名稱（如 "color_name", "size_name"）
-            # value = 該維度的所有選項值列表
-            twister_match = re.search(r'"dimensionValuesDisplayData"\s*:\s*(\{[^}]+\})', html)
+            # 方法1：twisterData.dimensions（含全部選項和維度名稱）
+            # 格式：{"dimensions": [{"name": "color_name", "values": [...], ...}]}
+            twister_match = re.search(r'var twisterData\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
+            if not twister_match:
+                twister_match = re.search(r'"twisterData"\s*:\s*(\{.+?\})', html, re.DOTALL)
             if twister_match:
                 try:
-                    dim_data = _json.loads(twister_match.group(1))
-                    print(f"[Amazon DEBUG] 方法1 dim_data keys: {list(dim_data.keys())}")
-                    # 先收集各維度的值
-                    color_vals = []
-                    size_vals = []
-                    other_vals = []
-                    for dim_key, vals in dim_data.items():
-                        if not isinstance(vals, list): continue
-                        k = dim_key.lower()
-                        if any(x in k for x in ["color", "colour", "カラー", "色"]):
-                            color_vals = [str(v).strip() for v in vals if v]
-                        elif any(x in k for x in ["size", "サイズ", "寸"]):
-                            size_vals = [str(v).strip() for v in vals if v]
-                        else:
-                            other_vals = [str(v).strip() for v in vals if v]
-                    # fallback：沒有明確維度名則全當 color
-                    if not color_vals and not size_vals:
-                        color_vals = other_vals
-                    # 組合成 variants
+                    twister = _json.loads(twister_match.group(1))
+                    dimensions = twister.get("dimensions", [])
+                    print(f"[Amazon DEBUG] 方法1 dimensions: {[d.get('name') for d in dimensions]}")
+                    color_vals, size_vals = [], []
+                    for dim in dimensions:
+                        name = dim.get("name", "").lower()
+                        vals = [v.get("value", "") for v in dim.get("values", []) if v.get("value")]
+                        if any(x in name for x in ["color", "colour", "カラー", "色", "style"]):
+                            color_vals = vals
+                        elif any(x in name for x in ["size", "サイズ", "寸"]):
+                            size_vals = vals
+                        elif not color_vals:
+                            color_vals = vals
                     colors = color_vals or [""]
                     sizes  = size_vals  or [""]
                     for c in colors:
