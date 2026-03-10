@@ -28,7 +28,8 @@ class ShopifyJpMixin:
         if not handle:
             return await self._scrape_with_playwright(url)
 
-        json_url = f"{base_url}/products/{handle}.js"
+        json_url  = f"{base_url}/products/{handle}.json"
+        js_url    = f"{base_url}/products/{handle}.js"
         print(f"[Shopify] 嘗試 JSON API: {json_url}")
 
         try:
@@ -42,10 +43,22 @@ class ShopifyJpMixin:
                 },
             ) as client:
                 resp = await client.get(json_url)
+                # 同時取 .js 以取得 available 欄位
+                js_available = {}
+                try:
+                    js_resp = await client.get(js_url)
+                    if js_resp.status_code == 200:
+                        js_data = js_resp.json()
+                        js_prod = js_data.get("product", js_data) if "product" in js_data else js_data
+                        for v in js_prod.get("variants", []):
+                            vid = v.get("id")
+                            if vid is not None:
+                                js_available[vid] = v.get("available", False)
+                except Exception:
+                    pass
 
                 if resp.status_code == 200:
                     data = resp.json()
-                    # .js 直接回傳 product 物件，.json 有 product wrapper
                     prod = data.get("product", data) if "product" in data else data
 
                     product.title = prod.get("title", "")
@@ -60,9 +73,14 @@ class ShopifyJpMixin:
                         return img if isinstance(img, str) else img.get("src", "")
                     def _img_id(img):
                         return None if isinstance(img, str) else img.get("id")
+                    def _abs_url(src):
+                        if not src: return ""
+                        if src.startswith("http"): return src
+                        return base_url + src if src.startswith("/") else base_url + "/" + src
+
                     if images:
-                        product.image_url = _img_src(images[0])
-                        product.extra_images = [_img_src(img) for img in images[1:5] if _img_src(img)]
+                        product.image_url = _abs_url(_img_src(images[0]))
+                        product.extra_images = [_abs_url(_img_src(img)) for img in images[1:5] if _img_src(img)]
 
                     variants = prod.get("variants", [])
                     if variants:
@@ -83,7 +101,8 @@ class ShopifyJpMixin:
                             option1 = v.get("option1", "") or ""
                             option2 = v.get("option2", "") or ""
                             option3 = v.get("option3", "") or ""
-                            available = v.get("available", False)
+                            vid = v.get("id")
+                            available = js_available.get(vid, v.get("available", True))
 
                             variant_info = {"color": "", "size": "", "in_stock": available, "image": ""}
 
@@ -119,9 +138,9 @@ class ShopifyJpMixin:
 
                             img_src = ""
                             if v_image_id and v_image_id in image_id_map:
-                                img_src = image_id_map[v_image_id]
+                                img_src = _abs_url(image_id_map[v_image_id])
                             elif featured:
-                                img_src = featured if isinstance(featured, str) else featured.get("src", "")
+                                img_src = _abs_url(featured if isinstance(featured, str) else featured.get("src", ""))
 
                             color = variant_info["color"]
                             if img_src and color and color not in color_image_seen:
