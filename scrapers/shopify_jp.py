@@ -28,7 +28,7 @@ class ShopifyJpMixin:
         if not handle:
             return await self._scrape_with_playwright(url)
 
-        json_url = f"{base_url}/products/{handle}.json"
+        json_url = f"{base_url}/products/{handle}.js"
         print(f"[Shopify] 嘗試 JSON API: {json_url}")
 
         try:
@@ -45,7 +45,8 @@ class ShopifyJpMixin:
 
                 if resp.status_code == 200:
                     data = resp.json()
-                    prod = data.get("product", {})
+                    # .js 直接回傳 product 物件，.json 有 product wrapper
+                    prod = data.get("product", data) if "product" in data else data
 
                     product.title = prod.get("title", "")
                     product.brand = prod.get("vendor", "")
