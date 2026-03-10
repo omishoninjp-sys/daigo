@@ -152,7 +152,26 @@ class ShopifyClient:
             images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
             print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
         elif image_url:
-            images.append({"src": image_url, "position": 1})
+            # 先嘗試下載圖片轉 base64，避免 Cloudflare/Akamai 擋 Shopify 直接抓圖
+            import base64 as _b64
+            _img_attachment = None
+            try:
+                _headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": image_url,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                }
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                    _r = await _c.get(image_url, headers=_headers)
+                    ct = _r.headers.get("content-type", "image/jpeg")
+                    if _r.status_code == 200 and "image" in ct:
+                        _img_attachment = _b64.b64encode(_r.content).decode()
+            except Exception as _e:
+                print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
+            if _img_attachment:
+                images.append({"attachment": _img_attachment, "position": 1})
+            else:
+                images.append({"src": image_url, "position": 1})
             added_urls.add(image_url)
 
         if extra_images:
