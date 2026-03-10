@@ -207,16 +207,44 @@ class AmazonMixin:
                 except Exception as e:
                     print(f"[Amazon DEBUG] 方法1 失敗: {e}")
 
-            # 方法2：#variation_ DOM 元素
+            # 方法2：#variation_ DOM 元素（多種 selector 嘗試）
             if not variants_found:
-                color_els = soup.select("#variation_color_name li, #variation_style_name li")
-                size_els  = soup.select("#variation_size_name li, #variation_size_type_name li")
-                colors = [el.get("data-value", el.get_text(strip=True)) for el in color_els] or [""]
-                sizes  = [el.get("data-value", el.get_text(strip=True)) for el in size_els]  or [""]
+                # 尺寸：button swatch / li / select option
+                size_vals = []
+                for sel in [
+                    "#variation_size_name ul li",
+                    "#variation_size_name .a-button-text",
+                    "#native_dropdown_selected_size_name option",
+                    "[data-action='twister-swatch'][data-dp-url*='size'] span",
+                ]:
+                    els = soup.select(sel)
+                    if els:
+                        size_vals = [el.get("data-value", el.get_text(strip=True)).strip() for el in els if el.get_text(strip=True).strip()]
+                        if size_vals:
+                            print(f"[Amazon DEBUG] 方法2 size selector={sel!r}: {size_vals}")
+                            break
+
+                # 顏色：image swatch / li / select option
+                color_vals = []
+                for sel in [
+                    "#variation_color_name ul li",
+                    "#variation_color_name .a-button-text",
+                    "#native_dropdown_selected_color_name option",
+                    "#variation_style_name ul li",
+                ]:
+                    els = soup.select(sel)
+                    if els:
+                        color_vals = [el.get("data-value", el.get("title", el.get_text(strip=True))).strip() for el in els if el.get("data-value") or el.get_text(strip=True).strip()]
+                        if color_vals:
+                            print(f"[Amazon DEBUG] 方法2 color selector={sel!r}: {color_vals}")
+                            break
+
+                colors = color_vals or [""]
+                sizes  = size_vals  or [""]
                 for c in colors:
                     for s in sizes:
                         variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
-                print(f"[Amazon DEBUG] 方法2: colors={colors} sizes={sizes}")
+                print(f"[Amazon DEBUG] 方法2: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
 
             # 方法3：li[id^=color_name_/size_name_]
             if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
@@ -229,7 +257,69 @@ class AmazonMixin:
                     else:
                         vinfo["color"] = txt
                     variants_found.append(vinfo)
-                print(f"[Amazon DEBUG] 方法3: {len(variants_found)} variants" if variants_found else "[Amazon DEBUG] 找不到 variants")
+                print(f"[Amazon DEBUG] 方法3: {len(variants_found)} variants" if variants_found else "[Amazon DEBUG] 方法3: 找不到")
+
+            # 方法4：從 inline script 搜尋 variationDisplayLabels / asin_variation_values
+            if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
+                variants_found = []
+                color_vals, size_vals = [], []
+
+                # 4a: "variationDisplayLabels": {"size_name": {...}, "color_name": {...}}
+                vdl_match = re.search(r'"variationDisplayLabels"\s*:\s*(\{.+?\})\s*,\s*"', html, re.DOTALL)
+                if vdl_match:
+                    try:
+                        vdl = _json.loads(vdl_match.group(1))
+                        for k, v in vdl.items():
+                            k_lower = k.lower()
+                            vals = list(v.values()) if isinstance(v, dict) else []
+                            if any(x in k_lower for x in ["color", "colour", "style"]):
+                                color_vals = [str(x) for x in vals]
+                            elif "size" in k_lower:
+                                size_vals = [str(x) for x in vals]
+                        print(f"[Amazon DEBUG] 方法4a variationDisplayLabels: colors={color_vals} sizes={size_vals}")
+                    except Exception:
+                        pass
+
+                # 4b: "dimensionValues":[{"name":"size_name","values":["S","M","L"]}]
+                if not color_vals and not size_vals:
+                    dv_match = re.search(r'"dimensionValues"\s*:\s*(\[.+?\])\s*[,}]', html, re.DOTALL)
+                    if dv_match:
+                        try:
+                            dv = _json.loads(dv_match.group(1))
+                            for dim in dv:
+                                name = dim.get("name", "").lower()
+                                vals = dim.get("values", [])
+                                if any(x in name for x in ["color", "colour", "style"]):
+                                    color_vals = vals
+                                elif "size" in name:
+                                    size_vals = vals
+                                elif not color_vals:
+                                    color_vals = vals
+                            print(f"[Amazon DEBUG] 方法4b dimensionValues: colors={color_vals} sizes={size_vals}")
+                        except Exception:
+                            pass
+
+                # 4c: 從 button text 抓（#twister-plus-buying-options 或 span.selection）
+                if not color_vals and not size_vals:
+                    for sel in ["#twister span.a-button-text", ".twisterSwatchText"]:
+                        els = soup.select(sel)
+                        if els:
+                            txts = [e.get_text(strip=True) for e in els if e.get_text(strip=True)]
+                            if txts:
+                                color_vals = txts
+                                print(f"[Amazon DEBUG] 方法4c button text: {txts}")
+                                break
+
+                colors = color_vals or [""]
+                sizes  = size_vals  or [""]
+                for c in colors:
+                    for s in sizes:
+                        variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
+                if variants_found and any(v["color"] or v["size"] for v in variants_found):
+                    print(f"[Amazon DEBUG] 方法4: {len(variants_found)} variants")
+                else:
+                    variants_found = []
+                    print(f"[Amazon DEBUG] 找不到 variants")
 
             if variants_found:
                 product.variants = variants_found
