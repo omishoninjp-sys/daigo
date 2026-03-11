@@ -213,11 +213,13 @@ class AmazonMixin:
                 color_els = soup.select("#inline-twister-row-color_name li.inline-twister-swatch")
                 size_els  = soup.select("#inline-twister-row-size_name li.inline-twister-swatch")
                 colors, sizes = [], []
+                # 過濾掉「展開按鈕」文字
+                EXCLUDE_COLOR = {"利用可能なオプションを表示", "すべてのオプションを表示", "展開", ""}
                 for el in color_els:
                     if "swatch-prototype" in el.get("class", []): continue
                     txt = el.select_one(".swatch-title-text")
                     val = txt.get_text(strip=True) if txt else el.get_text(strip=True)
-                    if val: colors.append(val)
+                    if val and val not in EXCLUDE_COLOR: colors.append(val)
                 for el in size_els:
                     if "swatch-prototype" in el.get("class", []): continue
                     val = el.get_text(strip=True)

@@ -121,9 +121,19 @@ ADULT_KEYWORDS = [
 
 def detect_adult(product: ProductInfo) -> bool:
     """偵測是否為成人商品"""
+    import re as _re
     text = f"{product.title} {product.description} {product.source_url}".lower()
+    # 需要全字匹配的關鍵字（避免 SM 誤判 SMART 等）
+    WHOLE_WORD_KW = {"sm", "r-18", "r18", "18禁"}
     for kw in ADULT_KEYWORDS:
-        if kw.lower() in text:
-            print(f"[Adult] ⚠️ 偵測到成人商品關鍵字: '{kw}'")
-            return True
+        kw_lower = kw.lower()
+        if kw_lower in WHOLE_WORD_KW:
+            # 用 word boundary 或前後非字母數字
+            if _re.search(r'(?<![a-z0-9])' + _re.escape(kw_lower) + r'(?![a-z0-9])', text):
+                print(f"[Adult] ⚠️ 偵測到成人商品關鍵字: '{kw}'")
+                return True
+        else:
+            if kw_lower in text:
+                print(f"[Adult] ⚠️ 偵測到成人商品關鍵字: '{kw}'")
+                return True
     return False
