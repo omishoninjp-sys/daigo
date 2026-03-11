@@ -23,6 +23,8 @@ class UniqloMixin:
 
         product_code = m.group(1)
         product_id = re.sub(r'[^0-9]', '', product_code.split('-')[0])
+        # E483767-000 → E483767（色コード除去、全色取得用）
+        base_code = re.sub(r'-[0-9]+$', '', product_code)
 
         color_from_url = ""
         cm = re.search(r'colorDisplayCode=(\w+)', url)
@@ -75,10 +77,12 @@ class UniqloMixin:
                 "X-Requested-With": "XMLHttpRequest",
             }
 
+            # base_code (E483767) を最優先 → 全色・全サイズ取得
             api_urls = [
+                f"https://www.uniqlo.com/jp/api/commerce/v5/ja/products?productIds={base_code}&withPrices=true&withStocks=true&withColors=true&withSizes=true",
                 f"https://www.uniqlo.com/jp/api/commerce/v5/ja/products?productIds={product_code}&withPrices=true&withStocks=true&withColors=true&withSizes=true&httpFailure=true",
                 f"https://www.uniqlo.com/jp/api/commerce/v5/ja/products?productIds={product_id}&withPrices=true&withStocks=true&withColors=true&withSizes=true",
-                f"https://www.uniqlo.com/jp/api/commerce/v3/ja/products?productIds={product_code}",
+                f"https://www.uniqlo.com/jp/api/commerce/v3/ja/products?productIds={base_code}",
             ]
 
             for api_url in api_urls:
@@ -96,6 +100,7 @@ class UniqloMixin:
                             return product
                         elif product.price_jpy:
                             print(f"[Uniqlo] API 取得價格 ¥{product.price_jpy:,} 但無 variants，繼續 fallback")
+
                             break
                         else:
                             print(f"[Uniqlo] API 回傳但未找到價格")
@@ -183,7 +188,8 @@ class UniqloMixin:
         elif "products" in data:
             items = data["products"]
 
-        prod = items.get(product_code) or items.get(product_id)
+        _base = re.sub(r'-[0-9]+$', '', product_code)
+        prod = items.get(product_code) or items.get(_base) or items.get(product_id)
         if not prod:
             for k, v in items.items():
                 if product_id in str(k):
@@ -198,6 +204,19 @@ class UniqloMixin:
         if not prod:
             print(f"[Uniqlo] API 回傳中找不到商品: keys={list(data.keys())[:5]}")
             return product
+
+        # デバッグ：prod 構造確認
+        print(f"[Uniqlo] DEBUG prod keys: {list(prod.keys())[:15]}")
+        _c = prod.get('colors')
+        _s = prod.get('sizes')
+        _l = prod.get('l2s') or prod.get('stocks') or []
+        print(f"[Uniqlo] DEBUG colors type={type(_c).__name__} len={len(_c) if _c else 0}")
+        print(f"[Uniqlo] DEBUG sizes type={type(_s).__name__} len={len(_s) if _s else 0}")
+        print(f"[Uniqlo] DEBUG l2s len={len(_l)}")
+        if isinstance(_c, list) and _c:
+            print(f"[Uniqlo] DEBUG colors[0]={_c[0]}")
+        if isinstance(_s, list) and _s:
+            print(f"[Uniqlo] DEBUG sizes[0]={_s[0]}")
 
         name = prod.get("name") or prod.get("productName") or prod.get("title") or ""
         if name:
@@ -282,6 +301,59 @@ class UniqloMixin:
                         "color": color_name,
                         "size": size_name,
                         "sku": sku,
+                        "price": product.price_jpy or 0,
+                        "in_stock": in_stock,
+                        "image": color_img,
+                    })
+
+        # ── colors/sizes がリスト形式の場合（v5 API の新形式）
+        if not variants and isinstance(colors, list) and isinstance(sizes, list) and colors and sizes:
+            # images から色コード→画像URL のマップを作成
+            color_img_map = {}
+            images_data = prod.get("images", {})
+            if isinstance(images_data, dict):
+                # chip 画像を色コードでマップ
+                for img_key in ["chip", "main"]:
+                    img_list = images_data.get(img_key, []) or []
+                    if isinstance(img_list, list):
+                        for img in img_list:
+                            if isinstance(img, dict):
+                                dc = img.get("colorDisplayCode", "") or img.get("displayCode", "")
+                                u = img.get("url") or img.get("image") or ""
+                                if dc and u and dc not in color_img_map:
+                                    color_img_map[dc] = u
+
+            # plds から在庫マップを作成（color_display_code + size_display_code → in_stock）
+            stock_map = {}
+            for pld in (prod.get("plds") or []):
+                if not isinstance(pld, dict):
+                    continue
+                cd = str(pld.get("colorDisplayCode", "") or "")
+                sd = str(pld.get("sizeDisplayCode", "") or "")
+                # stockStatus: 0=在庫あり, 1=残りわずか, 2=在庫なし
+                status = pld.get("stockStatus", 0)
+                if cd and sd:
+                    stock_map[(cd, sd)] = (status < 2)
+
+            for color_info in colors:
+                if not isinstance(color_info, dict):
+                    continue
+                color_dc = str(color_info.get("displayCode", "") or "")
+                color_name = color_info.get("name") or color_dc
+                color_img = color_img_map.get(color_dc, "")
+                if not color_img:
+                    color_img = f"https://image.uniqlo.com/UQ/ST3/AsianCommon/imagesgoods/{product_id}/chip/goods_{color_dc}_{product_id}_chip.jpg"
+
+                for size_info in sizes:
+                    if not isinstance(size_info, dict):
+                        continue
+                    size_dc = str(size_info.get("displayCode", "") or "")
+                    size_name = size_info.get("name") or size_dc
+                    in_stock = stock_map.get((color_dc, size_dc), True)
+                    variants.append({
+                        "color": f"{color_dc} {color_name}",
+                        "size": size_name,
+                        "sku": f"{product_id}-{color_dc}-{size_name}",
                         "price": product.price_jpy or 0,
                         "in_stock": in_stock,
                         "image": color_img,
