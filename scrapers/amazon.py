@@ -12,6 +12,54 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
 
 
+def _extract_json_at_key(src: str, key: str):
+    """
+    用括號計數從 HTML 中安全提取指定 key 的 JSON object 或 array。
+    比 regex 更可靠，不受巢狀 {} 影響。
+    """
+    import json as _j
+    marker = f'"{key}"'
+    pos = src.find(marker)
+    if pos == -1:
+        return None
+    colon = src.find(':', pos + len(marker))
+    if colon == -1:
+        return None
+    i = colon + 1
+    while i < len(src) and src[i] in ' \t\r\n':
+        i += 1
+    if i >= len(src) or src[i] not in '{[':
+        return None
+    open_b = src[i]
+    close_b = '}' if open_b == '{' else ']'
+    depth = 0
+    in_str = False
+    escape = False
+    for j in range(i, min(i + 500_000, len(src))):
+        c = src[j]
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_str:
+            escape = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if c == open_b:
+            depth += 1
+        elif c == close_b:
+            depth -= 1
+            if depth == 0:
+                try:
+                    return _j.loads(src[i:j + 1])
+                except Exception:
+                    return None
+    return None
+
+
 class AmazonMixin:
 
     async def _scrape_amazon(self, url: str) -> ProductInfo:
@@ -174,46 +222,120 @@ class AmazonMixin:
                     [b.get_text(strip=True) for b in bullets if len(b.get_text(strip=True)) > 2]
                 )[:500]
 
-            # ── Variants（三種方法依序嘗試）
+            # ══════════════════════════════════════════════════════
+            # Variants（依序嘗試，方法0成功就不繼續）
+            # ══════════════════════════════════════════════════════
             import json as _json
             variants_found = []
 
-            # 方法1：twisterData.dimensions（含全部選項和維度名稱）
-            # 格式：{"dimensions": [{"name": "color_name", "values": [...], ...}]}
-            twister_match = re.search(r'var twisterData\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
-            if not twister_match:
-                twister_match = re.search(r'"twisterData"\s*:\s*(\{.+?\})', html, re.DOTALL)
-            if twister_match:
-                try:
-                    twister = _json.loads(twister_match.group(1))
-                    dimensions = twister.get("dimensions", [])
-                    print(f"[Amazon DEBUG] 方法1 dimensions: {[d.get('name') for d in dimensions]}")
-                    color_vals, size_vals = [], []
-                    for dim in dimensions:
-                        name = dim.get("name", "").lower()
-                        vals = [v.get("value", "") for v in dim.get("values", []) if v.get("value")]
-                        if any(x in name for x in ["color", "colour", "カラー", "色", "style"]):
-                            color_vals = vals
-                        elif any(x in name for x in ["size", "サイズ", "寸"]):
-                            size_vals = vals
-                        elif not color_vals:
-                            color_vals = vals
-                    colors = color_vals or [""]
-                    sizes  = size_vals  or [""]
-                    for c in colors:
-                        for s in sizes:
-                            variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
-                    print(f"[Amazon DEBUG] 方法1: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
-                except Exception as e:
-                    print(f"[Amazon DEBUG] 方法1 失敗: {e}")
+            # ────────────────────────────────────────────────────
+            # 方法0：dimensionValuesDisplayData（最可靠）
+            # 直接列舉每個有效 ASIN 對應的實際選項組合，
+            # 不依賴 DOM visibility，所有 variants 都在 JS 裡。
+            # 格式：{ "ASIN": ["val_dim0", "val_dim1", ...], ... }
+            # ────────────────────────────────────────────────────
+            dvdd = _extract_json_at_key(html, "dimensionValuesDisplayData")
+            print(f"[Amazon DEBUG] 方法0 dvdd entries={len(dvdd) if dvdd else 0}")
 
-            # 方法2：inline-twister-row（新版 Amazon 行動版選項 DOM）
+            if dvdd and isinstance(dvdd, dict):
+                # 取得維度順序（dim_names[i] 對應 dvdd[asin][i]）
+                dim_names = []
+
+                # 優先從 twisterData.dimensions 取
+                twister = _extract_json_at_key(html, "twisterData")
+                if twister and isinstance(twister, dict):
+                    for d in twister.get("dimensions", []):
+                        dim_names.append(d.get("name", ""))
+
+                # 備援：dimensionToDisplayNameMap 的 key 順序
+                if not dim_names:
+                    dtdnm = _extract_json_at_key(html, "dimensionToDisplayNameMap")
+                    if dtdnm and isinstance(dtdnm, dict):
+                        dim_names = list(dtdnm.keys())
+
+                print(f"[Amazon DEBUG] 方法0 dim_names={dim_names}")
+
+                # 判斷哪個 index 是 color，哪個是 size
+                color_idx = -1
+                size_idx = -1
+                for i, name in enumerate(dim_names):
+                    nl = name.lower()
+                    if any(k in nl for k in ["color", "colour", "カラー", "色", "style"]):
+                        color_idx = i
+                    elif any(k in nl for k in ["size", "サイズ", "寸"]):
+                        size_idx = i
+
+                # 維度名稱判斷失敗時用位置啟發式
+                if color_idx == -1 and size_idx == -1:
+                    sample = next(iter(dvdd.values()), [])
+                    if isinstance(sample, list):
+                        if len(sample) == 1:
+                            size_idx = 0       # 單維度 → size
+                        elif len(sample) >= 2:
+                            color_idx = 0      # 多維度 → 0=color, 1=size
+                            size_idx = 1
+
+                for asin, vals in dvdd.items():
+                    if not isinstance(vals, list):
+                        continue
+                    color, size = "", ""
+                    if color_idx >= 0 and color_idx < len(vals):
+                        color = str(vals[color_idx])
+                    if size_idx >= 0 and size_idx < len(vals):
+                        size = str(vals[size_idx])
+                    # 單維度且 color_idx/size_idx 都沒設定時的 fallback
+                    if not color and not size and len(vals) >= 1:
+                        size = str(vals[0])
+                    variants_found.append({
+                        "color": color,
+                        "size":  size,
+                        "sku":   asin,   # ASIN 當 SKU
+                        "in_stock": True,
+                        "image": "",
+                    })
+
+                print(f"[Amazon DEBUG] 方法0: {len(variants_found)} variants "
+                      f"(color_idx={color_idx}, size_idx={size_idx})")
+
+            # ────────────────────────────────────────────────────
+            # 方法1：twisterData.dimensions（cross-product，方法0失敗時）
+            # ────────────────────────────────────────────────────
+            if not variants_found:
+                twister_match = re.search(r'var twisterData\s*=\s*(\{.+?\})\s*;', html, re.DOTALL)
+                if not twister_match:
+                    twister_match = re.search(r'"twisterData"\s*:\s*(\{.+?\})', html, re.DOTALL)
+                if twister_match:
+                    try:
+                        twister = _json.loads(twister_match.group(1))
+                        dimensions = twister.get("dimensions", [])
+                        print(f"[Amazon DEBUG] 方法1 dimensions: {[d.get('name') for d in dimensions]}")
+                        color_vals, size_vals = [], []
+                        for dim in dimensions:
+                            name = dim.get("name", "").lower()
+                            vals = [v.get("value", "") for v in dim.get("values", []) if v.get("value")]
+                            if any(x in name for x in ["color", "colour", "カラー", "色", "style"]):
+                                color_vals = vals
+                            elif any(x in name for x in ["size", "サイズ", "寸"]):
+                                size_vals = vals
+                            elif not color_vals:
+                                color_vals = vals
+                        colors = color_vals or [""]
+                        sizes  = size_vals  or [""]
+                        for c in colors:
+                            for s in sizes:
+                                variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
+                        print(f"[Amazon DEBUG] 方法1: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
+                    except Exception as e:
+                        print(f"[Amazon DEBUG] 方法1 失敗: {e}")
+
+            # ────────────────────────────────────────────────────
+            # 方法2：inline-twister-row DOM
+            # ────────────────────────────────────────────────────
             if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
                 variants_found = []
                 color_els = soup.select("#inline-twister-row-color_name li.inline-twister-swatch")
                 size_els  = soup.select("#inline-twister-row-size_name li.inline-twister-swatch")
                 colors, sizes = [], []
-                # 過濾掉「展開按鈕」文字
                 EXCLUDE_COLOR = {"利用可能なオプションを表示", "すべてのオプションを表示", "展開", ""}
                 for el in color_els:
                     if "swatch-prototype" in el.get("class", []): continue
@@ -230,9 +352,8 @@ class AmazonMixin:
                         for s in (sizes or [""]):
                             variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
 
-            # 方法2b：#variation_ DOM 元素（多種 selector 嘗試）
+            # 方法2b：#variation_ DOM
             if not variants_found:
-                # 尺寸：button swatch / li / select option
                 size_vals = []
                 for sel in [
                     "#variation_size_name ul li",
@@ -244,10 +365,8 @@ class AmazonMixin:
                     if els:
                         size_vals = [el.get("data-value", el.get_text(strip=True)).strip() for el in els if el.get_text(strip=True).strip()]
                         if size_vals:
-                            print(f"[Amazon DEBUG] 方法2 size selector={sel!r}: {size_vals}")
+                            print(f"[Amazon DEBUG] 方法2b size selector={sel!r}: {size_vals}")
                             break
-
-                # 顏色：image swatch / li / select option
                 color_vals = []
                 for sel in [
                     "#variation_color_name ul li",
@@ -259,15 +378,14 @@ class AmazonMixin:
                     if els:
                         color_vals = [el.get("data-value", el.get("title", el.get_text(strip=True))).strip() for el in els if el.get("data-value") or el.get_text(strip=True).strip()]
                         if color_vals:
-                            print(f"[Amazon DEBUG] 方法2 color selector={sel!r}: {color_vals}")
+                            print(f"[Amazon DEBUG] 方法2b color selector={sel!r}: {color_vals}")
                             break
-
                 colors = color_vals or [""]
                 sizes  = size_vals  or [""]
                 for c in colors:
                     for s in sizes:
                         variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
-                print(f"[Amazon DEBUG] 方法2: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
+                print(f"[Amazon DEBUG] 方法2b: colors={color_vals} sizes={size_vals} → {len(variants_found)} variants")
 
             # 方法3：li[id^=color_name_/size_name_]
             if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
@@ -282,12 +400,11 @@ class AmazonMixin:
                     variants_found.append(vinfo)
                 print(f"[Amazon DEBUG] 方法3: {len(variants_found)} variants" if variants_found else "[Amazon DEBUG] 方法3: 找不到")
 
-            # 方法4：從 inline script 搜尋 variationDisplayLabels / asin_variation_values
+            # 方法4：variationDisplayLabels / dimensionValues
             if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
                 variants_found = []
                 color_vals, size_vals = [], []
 
-                # 4a: "variationDisplayLabels": {"size_name": {...}, "color_name": {...}}
                 vdl_match = re.search(r'"variationDisplayLabels"\s*:\s*(\{.+?\})\s*,\s*"', html, re.DOTALL)
                 if vdl_match:
                     try:
@@ -303,7 +420,6 @@ class AmazonMixin:
                     except Exception:
                         pass
 
-                # 4b: "dimensionValues":[{"name":"size_name","values":["S","M","L"]}]
                 if not color_vals and not size_vals:
                     dv_match = re.search(r'"dimensionValues"\s*:\s*(\[.+?\])\s*[,}]', html, re.DOTALL)
                     if dv_match:
@@ -322,7 +438,6 @@ class AmazonMixin:
                         except Exception:
                             pass
 
-                # 4c: 從 button text 抓（#twister-plus-buying-options 或 span.selection）
                 if not color_vals and not size_vals:
                     for sel in ["#twister span.a-button-text", ".twisterSwatchText"]:
                         els = soup.select(sel)
