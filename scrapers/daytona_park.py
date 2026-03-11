@@ -148,36 +148,30 @@ class DaytonaParkMixin:
 
     async def _playwright_get_html(self, url: str) -> str:
         """
-        Playwright でページ HTML を取得して返す。
-        DriverMixin の self._driver / self._page を流用。
-        既存の _scrape_with_playwright と同じ仕組み。
+        SeleniumBase DriverMixin の Chrome UC で HTML を取得して返す。
+        JSON-LD は静的 HTML に含まれるので JS 完全実行は不要。
         """
+        import asyncio
+        return await asyncio.to_thread(self._sb_get_html, url)
+
+    def _sb_get_html(self, url: str) -> str:
+        """同期：SeleniumBase で URL を開いて page_source を返す"""
         try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox"],
-                )
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                    locale="ja-JP",
-                    extra_http_headers={
-                        "Accept-Language": "ja-JP,ja;q=0.9",
-                    },
-                )
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                # JSON-LD が <head> にあるので domcontentloaded で十分
-                html = await page.content()
-                await browser.close()
-                return html
+            driver = self._ensure_driver()
+            if not driver:
+                print("[DaytonaPark] ❌ driver 取得失敗")
+                return ""
+            self._clean_driver_tabs()
+            driver.get(url)
+            # <script type="application/ld+json"> は domcontentloaded 時点で存在する
+            # 最低限の待機（重い JS を待つ必要はない）
+            import time
+            time.sleep(2)
+            html = driver.page_source
+            self._driver_use_count += 1
+            return html
         except Exception as e:
-            print(f"[DaytonaPark] Playwright 失敗: {type(e).__name__}: {e}")
+            print(f"[DaytonaPark] SeleniumBase 失敗: {type(e).__name__}: {e}")
             return ""
 
 
