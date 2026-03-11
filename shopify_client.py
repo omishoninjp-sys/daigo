@@ -58,6 +58,10 @@ class ShopifyClient:
                     r'\d+\s*(?:cm|mm|inch|インチ)',
                     r'[SsMmLlXx]{1,3}サイズ',
                     r'^\s*[SsMmLlXx]{1,3}\s*$',
+                    r'^\s*F\s*$',           # フリーサイズ「F」
+                    r'^\s*FREE\s*$',        # FREE
+                    r'^\s*フリー\s*$',      # フリー
+                    r'^\s*\d{2,3}\s*$',   # 数字サイズ（65, 70, 80...）
                 ]
                 color_words = [
                     "シルバー", "ブラック", "ホワイト", "レッド", "ブルー", "ゴールド",
