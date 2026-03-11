@@ -31,6 +31,7 @@ from scrapers.visvim import VisvimMixin
 from scrapers.grail import GrailMixin
 from scrapers.pokemoncenter import PokemonCenterMixin
 from scrapers.daytona_park import DaytonaParkMixin  # ← 新增
+from scrapers.runway import RunwayMixin
 
 
 class Scraper(
@@ -43,6 +44,7 @@ class Scraper(
     GrailMixin,
     PokemonCenterMixin,
     DaytonaParkMixin,  # ← 新增
+    RunwayMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -108,6 +110,8 @@ class Scraper(
             product = await self._scrape_pokemoncenter(url)
         elif platform == "daytona_park":  # ← 新增
             product = await self._scrape_daytona_park(url)
+        elif platform == "runway":
+            product = await self._scrape_runway(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
