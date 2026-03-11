@@ -78,6 +78,8 @@ def detect_platform(url: str) -> str:
         return "grail"
     if "pokemoncenter-online.com" in host:
         return "pokemoncenter"
+    if "daytona-park.com" in host:  # ← 新增
+        return "daytona_park"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
     return "generic"
