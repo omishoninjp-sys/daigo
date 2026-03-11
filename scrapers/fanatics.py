@@ -35,17 +35,22 @@ class FanaticsMixin:
 
             with SB(uc=True, headless=True, locale_code="ja") as sb:
                 try:
-                    sb.uc_open_with_reconnect(url, reconnect_time=6)
+                    sb.uc_open_with_reconnect(url, reconnect_time=10)
                 except Exception:
                     sb.open(url)
 
+                # 等待商品標題或 JSON-LD 出現（Zeabur 環境 JS 渲染較慢）
                 try:
                     sb.wait_for_element_present(
-                        'h1, script#__NEXT_DATA__, script[type="application/ld+json"]',
-                        timeout=20
+                        'script[type="application/ld+json"]',
+                        timeout=30
                     )
                 except Exception:
                     pass
+
+                # 額外等待確保 JS 完整執行
+                import time
+                time.sleep(3)
 
                 html  = sb.get_page_source()
                 title = sb.get_title()
@@ -68,6 +73,13 @@ class FanaticsMixin:
     def _parse_fanatics_html(self, html: str, url: str) -> dict | None:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
+
+        # DEBUG
+        ld_scripts = soup.find_all("script", type="application/ld+json")
+        print(f"[Fanatics] JSON-LD 數量: {len(ld_scripts)}")
+        for i, s in enumerate(ld_scripts[:3]):
+            print(f"[Fanatics] LD[{i}]: {(s.string or '')[:300]}")
+        # END DEBUG
 
         result = {
             "title": "",
@@ -99,7 +111,11 @@ class FanaticsMixin:
                 print(f"[Fanatics] __NEXT_DATA__ 解析失敗: {e}")
 
         # ── 方法 2: JSON-LD ──────────────────────────────────────────
-        for script in soup.find_all("script", type="application/ld+json"):
+        ld_scripts = soup.find_all("script", type="application/ld+json")
+        print(f"[Fanatics] JSON-LD scripts 數量: {len(ld_scripts)}")
+        for i, s in enumerate(ld_scripts[:3]):
+            print(f"[Fanatics] JSON-LD[{i}] 前200字: {(s.string or '')[:200]}")
+        for script in ld_scripts:
             try:
                 data = json.loads(script.string or "")
                 items = data if isinstance(data, list) else [data]
