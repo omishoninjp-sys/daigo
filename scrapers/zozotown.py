@@ -21,7 +21,7 @@ class ZozotownMixin:
             )
             if data and data.get("title"):
                 product.title = data.get("title", "")
-                product.price_jpy = data.get("price", 0) or None
+                product.price_jpy = int(data.get("price", 0) * 1.1) or None
                 product.brand = data.get("brand", "")
                 product.description = data.get("description", "")[:500]
                 images = data.get("images", [])
@@ -30,6 +30,9 @@ class ZozotownMixin:
                     product.extra_images = images[1:9]
                 variants = data.get("variants", [])
                 if variants:
+                    for v in variants:
+                        if v.get('price'):
+                            v['price'] = int(v['price'] * 1.1)
                     product.variants = variants
             else:
                 print("[ZOZO] ⚠️ 未取得資料")
@@ -406,7 +409,7 @@ class ZozotownMixin:
                 return None
 
             product.title = data.get("title", "")
-            product.price_jpy = data.get("price", 0) or None
+            product.price_jpy = int(data.get("price", 0) * 1.1) or None
             product.brand = data.get("brand", "")
             product.description = data.get("description", "")[:500]
             images = data.get("images", [])
