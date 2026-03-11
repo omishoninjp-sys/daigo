@@ -19,8 +19,6 @@ class ShopifyClient:
         """
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                # ── 方法 1：REST metafields search（依 value 過濾不被支援，改列出同 namespace）
-                # ── 方法 2：用 title 搜尋（最可靠）
                 resp = await client.get(
                     f"{self.base_url}/products.json",
                     headers=self.headers,
@@ -50,10 +48,43 @@ class ShopifyClient:
             has_color = any(v.get("color") for v in variants)
             has_size = any(v.get("size") for v in variants)
 
+            # ── 動態決定 option 名稱
+            # Amazon 有時把尺寸放在「カラー」維度、顏色放在「サイズ」維度（命名錯誤）
+            # 所以這裡根據值的實際內容判斷，而不是信任欄位名稱
+            import re as _re
+
+            def _vals_look_like_size(field):
+                size_pats = [
+                    r'\d+\s*(?:cm|mm|inch|インチ)',
+                    r'[SsMmLlXx]{1,3}サイズ',
+                    r'^\s*[SsMmLlXx]{1,3}\s*$',
+                ]
+                color_words = [
+                    "シルバー", "ブラック", "ホワイト", "レッド", "ブルー", "ゴールド",
+                    "ピンク", "グレー", "グリーン", "ナチュラル", "ベージュ", "ブラウン",
+                    "オレンジ", "イエロー", "ネイビー", "パープル", "クリア",
+                    "silver", "black", "white", "red", "blue", "gold",
+                ]
+                vals = [v.get(field, "") for v in variants if v.get(field)]
+                s, c = 0, 0
+                for val in vals:
+                    if any(_re.search(p, val, _re.IGNORECASE) for p in size_pats):
+                        s += 1
+                    if any(cw.lower() in val.lower() for cw in color_words):
+                        c += 1
+                return s > c
+
+            color_is_actually_size = has_color and _vals_look_like_size("color")
+            size_is_actually_color = has_size and not _vals_look_like_size("size")
+
             if has_color:
-                options.append({"name": "カラー"})
+                label = "サイズ" if color_is_actually_size else "カラー"
+                options.append({"name": label})
+                print(f"[Shopify] option1 → {label} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
             if has_size:
-                options.append({"name": "サイズ"})
+                label = "カラー" if size_is_actually_color else "サイズ"
+                options.append({"name": label})
+                print(f"[Shopify] option2 → {label} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
 
             for v in variants:
                 color = v.get("color", "")
@@ -155,7 +186,6 @@ class ShopifyClient:
             images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
             print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
         elif image_url:
-            # 先嘗試下載圖片轉 base64，避免 Cloudflare/Akamai 擋 Shopify 直接抓圖
             import base64 as _b64
             _img_attachment = None
             try:
@@ -206,7 +236,6 @@ class ShopifyClient:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data)
 
-            # ── 422 variant 重複：代表商品已存在，搜尋後回傳
             if resp.status_code == 422 and "already exists" in resp.text:
                 print(f"[Shopify] ⚠️ 422 variant 重複，嘗試撈現有商品...")
                 existing2 = await self._find_existing_product(source_url, final_title)
@@ -221,7 +250,6 @@ class ShopifyClient:
                         "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
                         "already_exists": True,
                     }
-                # 找不到就原樣拋出
                 raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
 
             if resp.status_code not in (200, 201):

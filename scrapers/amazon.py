@@ -60,6 +60,53 @@ def _extract_json_at_key(src: str, key: str):
     return None
 
 
+def _dim_looks_like_size(vals: list) -> bool:
+    """
+    判斷一個維度的值列表是否「看起來像尺寸」。
+    - 含數字+cm/mm：Sサイズ 約43cm、30mm → True
+    - 含 S/M/L/XL 等尺碼縮寫 → True
+    - 含典型顏色詞（シルバー、ブラック、ホワイト、レッド...）→ False
+    沒有明確特徵時回傳 False（預設當成 color）。
+    """
+    if not vals:
+        return False
+
+    SIZE_PATTERNS = [
+        r'\d+\s*(?:cm|mm|inch|インチ)',   # 43cm, 30mm
+        r'[SsMmLlXx]{1,3}サイズ',         # Sサイズ, XLサイズ
+        r'^\s*[SsMmLlXx]{1,3}\s*$',       # 純粹 S / M / L / XL
+        r'[SsMmLlXx]{1,3}\s*\d+',         # S43, L51
+        r'^\s*\d+[./]\d+\s*$',            # 24.5 / 38/40
+        r'^\s*\d+\s*$',                   # 純數字（腰圍、容量等）
+    ]
+    COLOR_WORDS = [
+        "シルバー", "silver", "ゴールド", "gold",
+        "ブラック", "black", "ホワイト", "white",
+        "レッド", "red", "ブルー", "blue",
+        "ピンク", "pink", "グレー", "grey", "gray",
+        "グリーン", "green", "パープル", "purple",
+        "ベージュ", "beige", "ブラウン", "brown",
+        "オレンジ", "orange", "イエロー", "yellow",
+        "ネイビー", "navy", "カーキ", "khaki",
+        "クリア", "clear", "透明",
+    ]
+
+    size_score = 0
+    color_score = 0
+    for v in vals:
+        vl = v.lower()
+        for pat in SIZE_PATTERNS:
+            if re.search(pat, v, re.IGNORECASE):
+                size_score += 1
+                break
+        for cw in COLOR_WORDS:
+            if cw.lower() in vl:
+                color_score += 1
+                break
+
+    return size_score > color_score
+
+
 class AmazonMixin:
 
     async def _scrape_amazon(self, url: str) -> ProductInfo:
@@ -265,15 +312,34 @@ class AmazonMixin:
                     elif any(k in nl for k in ["size", "サイズ", "寸"]):
                         size_idx = i
 
-                # 維度名稱判斷失敗時用位置啟發式
+                # 維度名稱判斷失敗時：先用值內容辨識，再用位置啟發式
                 if color_idx == -1 and size_idx == -1:
                     sample = next(iter(dvdd.values()), [])
                     if isinstance(sample, list):
                         if len(sample) == 1:
-                            size_idx = 0       # 單維度 → size
+                            # 單維度：看值像 size 還是 color
+                            all_vals_0 = [str(v[0]) for v in dvdd.values() if isinstance(v, list) and len(v) > 0]
+                            if _dim_looks_like_size(all_vals_0):
+                                size_idx = 0
+                            else:
+                                color_idx = 0
                         elif len(sample) >= 2:
-                            color_idx = 0      # 多維度 → 0=color, 1=size
-                            size_idx = 1
+                            # 多維度：用值內容判斷每個維度
+                            all_vals_0 = [str(v[0]) for v in dvdd.values() if isinstance(v, list) and len(v) > 0]
+                            all_vals_1 = [str(v[1]) for v in dvdd.values() if isinstance(v, list) and len(v) > 1]
+                            dim0_is_size  = _dim_looks_like_size(all_vals_0)
+                            dim1_is_size  = _dim_looks_like_size(all_vals_1)
+                            if dim0_is_size and not dim1_is_size:
+                                size_idx  = 0
+                                color_idx = 1
+                            elif dim1_is_size and not dim0_is_size:
+                                color_idx = 0
+                                size_idx  = 1
+                            else:
+                                # 無法判斷，保留預設 0=color 1=size
+                                color_idx = 0
+                                size_idx  = 1
+                    print(f"[Amazon DEBUG] 方法0 值內容辨識: color_idx={color_idx}, size_idx={size_idx}")
 
                 for asin, vals in dvdd.items():
                     if not isinstance(vals, list):
