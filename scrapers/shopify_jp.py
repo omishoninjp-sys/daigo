@@ -118,6 +118,16 @@ class ShopifyJpMixin:
                             product.image_url = images[0]["src"]
                             product.extra_images = [img["src"] for img in images[1:5]]
                         print(f"[Shopify DEBUG] images count={len(images)}, extra={len(product.extra_images)}")
+
+                        # 価格が取れていない場合 → variants[0].price から取得
+                        if not product.price_jpy and variants_json:
+                            raw_price = variants_json[0].get("price", "0")
+                            try:
+                                cents = int(str(raw_price).replace(",", "").replace(".", ""))
+                                product.price_jpy = cents // 100 if cents > 100000 else cents
+                                print(f"[Shopify DEBUG] .json variant price フォールバック → ¥{product.price_jpy}")
+                            except Exception as pe:
+                                print(f"[Shopify DEBUG] variant price 解析失敗: {pe}")
                 except Exception as e:
                     print(f"[Shopify] .json 失敗: {e}")
 
