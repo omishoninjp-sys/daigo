@@ -44,27 +44,28 @@ class DaytonaParkMixin:
     async def _scrape_daytona_park(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
 
-        # item_code from URL
-        m = re.search(r"/item/(\d+)", url)
+        # item_code from URL（# fragment 除去してから）
+        clean_url = url.split("#")[0].strip()
+        m = re.search(r"/item/(\d+)", clean_url)
         if not m:
-            print(f"[DaytonaPark] ❌ URL 格式不符: {url}")
+            print(f"[DaytonaPark] ❌ URL 格式不符: {clean_url}")
             return product
         item_code = m.group(1)
 
         # ── HTML 取得
         try:
             async with httpx.AsyncClient(
-                timeout=20,
+                timeout=httpx.Timeout(30.0, connect=10.0),
                 follow_redirects=True,
                 verify=False,
             ) as client:
-                resp = await client.get(url, headers=_HEADERS)
+                resp = await client.get(clean_url, headers=_HEADERS)
                 if resp.status_code != 200:
-                    print(f"[DaytonaPark] HTTP {resp.status_code}: {url}")
+                    print(f"[DaytonaPark] HTTP {resp.status_code}: {clean_url}")
                     return product
                 html = resp.text
         except Exception as e:
-            print(f"[DaytonaPark] httpx 失敗: {e}")
+            print(f"[DaytonaPark] httpx 失敗: {type(e).__name__}: {e!r}")
             return product
 
         soup = BeautifulSoup(html, "html.parser")
