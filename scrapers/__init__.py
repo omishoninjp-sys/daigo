@@ -33,6 +33,7 @@ from scrapers.pokemoncenter import PokemonCenterMixin
 from scrapers.daytona_park import DaytonaParkMixin  # ← 新增
 from scrapers.runway import RunwayMixin
 from scrapers.takaratomy import TakaratomyMixin
+from scrapers.newbalance import NewBalanceMixin
 
 
 class Scraper(
@@ -47,6 +48,7 @@ class Scraper(
     DaytonaParkMixin,  # ← 新增
     RunwayMixin,
     TakaratomyMixin,
+    NewBalanceMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -116,6 +118,8 @@ class Scraper(
             product = await self._scrape_runway(url)
         elif platform == "takaratomy":
             product = await self._scrape_takaratomy(url)
+        elif platform == "newbalance":
+            product = await self._scrape_newbalance(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:

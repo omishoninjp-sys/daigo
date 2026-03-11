@@ -84,6 +84,8 @@ def detect_platform(url: str) -> str:
         return "runway"
     if "takaratomy.co.jp" in host:
         return "takaratomy"
+    if "newbalance.jp" in host:
+        return "newbalance"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
     return "generic"
