@@ -207,7 +207,28 @@ class AmazonMixin:
                 except Exception as e:
                     print(f"[Amazon DEBUG] 方法1 失敗: {e}")
 
-            # 方法2：#variation_ DOM 元素（多種 selector 嘗試）
+            # 方法2：inline-twister-row（新版 Amazon 行動版選項 DOM）
+            if not variants_found or all(not v["color"] and not v["size"] for v in variants_found):
+                variants_found = []
+                color_els = soup.select("#inline-twister-row-color_name li.inline-twister-swatch")
+                size_els  = soup.select("#inline-twister-row-size_name li.inline-twister-swatch")
+                colors, sizes = [], []
+                for el in color_els:
+                    if "swatch-prototype" in el.get("class", []): continue
+                    txt = el.select_one(".swatch-title-text")
+                    val = txt.get_text(strip=True) if txt else el.get_text(strip=True)
+                    if val: colors.append(val)
+                for el in size_els:
+                    if "swatch-prototype" in el.get("class", []): continue
+                    val = el.get_text(strip=True)
+                    if val: sizes.append(val)
+                print(f"[Amazon DEBUG] 方法2 inline-twister: colors={colors} sizes={sizes}")
+                if colors or sizes:
+                    for c in (colors or [""]):
+                        for s in (sizes or [""]):
+                            variants_found.append({"color": c, "size": s, "in_stock": True, "image": ""})
+
+            # 方法2b：#variation_ DOM 元素（多種 selector 嘗試）
             if not variants_found:
                 # 尺寸：button swatch / li / select option
                 size_vals = []
