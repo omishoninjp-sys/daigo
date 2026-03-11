@@ -50,14 +50,19 @@ class FanaticsMixin:
                 html  = sb.get_page_source()
                 title = sb.get_title()
 
+            print(f"[Fanatics] page title={title!r}, html_len={len(html)}")
             if "Access Denied" in title or "access denied" in title.lower():
                 print(f"[Fanatics] ❌ Cloudflare 封鎖（title={title!r}）")
+                # html 前 500 字看結構
+                print(f"[Fanatics] HTML 片段: {html[:500]}")
                 return None
 
             return self._parse_fanatics_html(html, url)
 
         except Exception as e:
+            import traceback
             print(f"[Fanatics] ❌ SeleniumBase 錯誤: {type(e).__name__}: {e}")
+            print(traceback.format_exc()[:800])
             return None
 
     def _parse_fanatics_html(self, html: str, url: str) -> dict | None:
