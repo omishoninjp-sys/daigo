@@ -119,16 +119,10 @@ class PokemonCenterMixin:
                         "in_stock": in_stock,
                         "image": product.image_url,
                     })
-            # variant なし → 単一 variant を作って in_stock を正しく渡す
+            # variant なし → variants 空のまま、in_stock だけ product に記録
+            # Shopify は variants 空なら選択不要の単品として扱う
             if not parsed_variants:
-                product.variants.append({
-                    "color": "",
-                    "size":  "FREE",
-                    "sku":   "",
-                    "price": product.price_jpy or 0,
-                    "in_stock": in_stock,
-                    "image": product.image_url,
-                })
+                product.in_stock = in_stock
 
             print(
                 f"[PokemonCenter] ✅ {product.title} / ¥{product.price_jpy} / "

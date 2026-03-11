@@ -300,6 +300,7 @@ async def create_order(req: CreateOrderRequest):
             variants=product.variants, image_base64=product.image_base64,
             extra_tags=["18+", "adult"] if product.is_adult else None,
             seo_title=seo_title, seo_tags=seo_tags,
+            in_stock=product.in_stock,
         )
 
         return CreateOrderResponse(

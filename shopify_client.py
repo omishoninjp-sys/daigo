@@ -39,7 +39,7 @@ class ShopifyClient:
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
-                                    seo_title="", seo_tags=None):
+                                    seo_title="", seo_tags=None, in_stock=True):
         shopify_variants = []
         options = []
         color_image_map = {}
@@ -138,11 +138,12 @@ class ShopifyClient:
         shopify_variants = deduped_variants
 
         if not shopify_variants:
+            # variants 空の単品 → in_stock パラメータで庫存設定
             shopify_variants = [{
                 "price": str(price_jpy),
                 "inventory_management": "shopify",
                 "inventory_policy": "deny",
-                "inventory_quantity": 1,
+                "inventory_quantity": 1 if in_stock else 0,
                 "requires_shipping": True,
             }]
 
@@ -157,7 +158,7 @@ class ShopifyClient:
                     final_tags.append(t)
 
         # === 判斷庫存狀態 → 缺貨設為 draft ===
-        all_out_of_stock = bool(variants) and all(not v.get("in_stock", True) for v in variants)
+        all_out_of_stock = (bool(variants) and all(not v.get("in_stock", True) for v in variants)) or (not variants and not in_stock)
         product_status = "draft" if all_out_of_stock else "active"
         if all_out_of_stock:
             print(f"[Shopify] ⚠️ 所有 variants 缺貨，設為 draft（不公開）")
