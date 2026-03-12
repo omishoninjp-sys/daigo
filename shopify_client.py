@@ -159,11 +159,11 @@ class ShopifyClient:
                 if t not in final_tags:
                     final_tags.append(t)
 
-        # === 判斷庫存狀態 → 缺貨設為 draft ===
+        # === 庫存狀態判斷 → 缺貨仍設為 active，讓客人看到商品並聯繫店家 ===
         all_out_of_stock = (bool(variants) and all(not v.get("in_stock", True) for v in variants)) or (not variants and not in_stock)
-        product_status = "draft" if all_out_of_stock else "active"
+        product_status = "active"
         if all_out_of_stock:
-            print(f"[Shopify] ⚠️ 所有 variants 缺貨，設為 draft（不公開）")
+            print(f"[Shopify] ⚠️ 所有 variants 缺貨，仍設為 active（庫存為0，讓客人聯繫詢問）")
 
         product_data = {
             "product": {
