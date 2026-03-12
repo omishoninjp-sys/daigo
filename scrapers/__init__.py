@@ -34,6 +34,7 @@ from scrapers.daytona_park import DaytonaParkMixin  # ← 新增
 from scrapers.runway import RunwayMixin
 from scrapers.takaratomy import TakaratomyMixin
 from scrapers.newbalance import NewBalanceMixin
+from scrapers.adidas import AdidasMixin
 from scrapers.fanatics import FanaticsMixin
 from scrapers.ysl import YSLMixin
 
@@ -51,6 +52,7 @@ class Scraper(
     RunwayMixin,
     TakaratomyMixin,
     NewBalanceMixin,
+    AdidasMixin,
     FanaticsMixin,
     YSLMixin,
     GenericMixin,
@@ -124,6 +126,8 @@ class Scraper(
             product = await self._scrape_takaratomy(url)
         elif platform == "newbalance":
             product = await self._scrape_newbalance(url)
+        elif platform == "adidas":
+            product = await self._scrape_adidas(url)
         elif platform == "fanatics":
             product = await self._scrape_fanatics(url)
         elif platform == "ysl":
