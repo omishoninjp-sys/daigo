@@ -62,6 +62,8 @@ class ShopifyClient:
                     r'^\s*FREE\s*$',        # FREE
                     r'^\s*フリー\s*$',      # フリー
                     r'^\s*\d{1,3}\s*$',   # 数字サイズ（0, 1, 2, 3, 65, 70, 80...）
+                    r'^[A-Z]{1,2}/\d*[SsMLlXx]{1,3}$',  # J/S, J/M, J/XL, J/2XL（adidas JP）
+                    r'^\d+[SsMLlXx]$',                   # 25S, 32L 等
                 ]
                 color_words = [
                     "シルバー", "ブラック", "ホワイト", "レッド", "ブルー", "ゴールド",
