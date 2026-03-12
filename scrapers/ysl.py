@@ -155,7 +155,7 @@ class YSLMixin:
         seen: set[str] = set()
         images: list[str] = []
 
-        for img in soup.select(".c-carousel__item img[src]"):
+        for img in soup.select(".c-product-detail-image__main .c-carousel__item img[src]"):
             src = img.get("src", "")
             if "dw/image/v2" not in src:
                 continue
@@ -181,6 +181,7 @@ class YSLMixin:
             sku   = (swatch.get("data-js-pid")            or "").strip()
             color = (swatch.get("data-js-title")           or "").strip()
             img   = (swatch.get("data-js-productimgsrc")   or "").strip()
+            img   = img.split("?")[0] + "?sw=800&sfrm=jpg&q=90" if img else ""
 
             if not sku or sku in seen:
                 continue
@@ -190,7 +191,6 @@ class YSLMixin:
 
             variants.append({
                 "color":    color,
-                "size":     "ONE SIZE",
                 "sku":      sku,
                 "price":    base_price,
                 "in_stock": not is_disabled,
