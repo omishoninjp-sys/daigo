@@ -90,6 +90,8 @@ def detect_platform(url: str) -> str:
         return "newbalance"
     if "adidas.jp" in host:
         return "adidas"
+    if "graniph.com" in host:
+        return "graniph"
     if "fanatics.jp" in host:
         return "fanatics"
     if "mercari.com" in host or "jp.mercari.com" in host:

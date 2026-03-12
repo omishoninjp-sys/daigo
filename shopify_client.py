@@ -106,12 +106,12 @@ class ShopifyClient:
                 else:
                     variant_selling_price = price_jpy
 
-                in_stock = v.get("in_stock", True)
+                v_in_stock = v.get("in_stock", True)
                 sv = {
                     "price": str(variant_selling_price),
                     "inventory_management": "shopify",
                     "inventory_policy": "deny",
-                    "inventory_quantity": 1 if in_stock else 0,
+                    "inventory_quantity": 1 if v_in_stock else 0,
                     "requires_shipping": True,
                 }
                 if has_color and has_size:
@@ -391,6 +391,104 @@ class ShopifyClient:
                     print(f"[Shopify] ⚠️ Collection 加入失敗 ({resp.status_code}): {resp.text[:200]}")
         except Exception as e:
             print(f"[Shopify] Collection error: {e}")
+
+    async def cleanup_old_daigo_products(self, days: int = 10) -> dict:
+        """
+        刪除指定系列（DAIGO_COLLECTION_ID）中超過 N 天的商品。
+        只動這個系列的商品，不影響其他系列。
+        """
+        from datetime import datetime, timezone, timedelta
+
+        if not DAIGO_COLLECTION_ID:
+            return {
+                "deleted_count": 0, "deleted_ids": [], "skipped_count": 0,
+                "error_count": 1, "errors": ["DAIGO_COLLECTION_ID 未設定，中止清理"],
+                "cutoff_date": "",
+            }
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        deleted = []
+        errors = []
+        skipped = 0
+        page_info = None
+        fetched = 0
+
+        print(f"[Cleanup] 開始清理：Collection {DAIGO_COLLECTION_ID}，刪除 {days} 天前 ({cutoff.strftime('%Y-%m-%d %H:%M UTC')}) 的商品")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                # 只查詢指定 collection 內的商品
+                params = {
+                    "collection_id": DAIGO_COLLECTION_ID,
+                    "fields": "id,title,created_at,status",
+                    "limit": 250,
+                }
+                if page_info:
+                    params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status"}
+
+                resp = await client.get(
+                    f"{self.base_url}/products.json",
+                    headers=self.headers,
+                    params=params,
+                )
+                if resp.status_code != 200:
+                    print(f"[Cleanup] ❌ 無法取得商品列表: {resp.status_code}")
+                    break
+
+                products = resp.json().get("products", [])
+                fetched += len(products)
+
+                for p in products:
+                    pid = p["id"]
+                    created_raw = p.get("created_at", "")
+                    title_short = p.get("title", "")[:40]
+
+                    try:
+                        created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        skipped += 1
+                        continue
+
+                    if created_at >= cutoff:
+                        skipped += 1
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+                    print(f"[Cleanup] 🗑️  刪除商品 {pid}（{age_days} 天前）: {title_short}")
+
+                    del_resp = await client.delete(
+                        f"{self.base_url}/products/{pid}.json",
+                        headers=self.headers,
+                    )
+                    if del_resp.status_code == 200:
+                        deleted.append(pid)
+                        print(f"[Cleanup] ✅ 已刪除: {pid}")
+                    else:
+                        msg = f"product_id={pid}, status={del_resp.status_code}, body={del_resp.text[:100]}"
+                        errors.append(msg)
+                        print(f"[Cleanup] ❌ 刪除失敗: {msg}")
+
+                # 處理分頁 Link header
+                link_header = resp.headers.get("Link", "")
+                if 'rel="next"' in link_header:
+                    import re as _re
+                    m = _re.search(r'page_info=([^&>]+).*?rel="next"', link_header)
+                    page_info = m.group(1) if m else None
+                else:
+                    page_info = None
+
+                if not page_info or not products:
+                    break
+
+        print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，錯誤 {len(errors)} 件")
+        return {
+            "deleted_count": len(deleted),
+            "deleted_ids": deleted,
+            "skipped_count": skipped,
+            "error_count": len(errors),
+            "errors": errors,
+            "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+        }
 
     def _build_description(self, description, source_url, original_price_jpy):
         parts = []
