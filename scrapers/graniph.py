@@ -163,46 +163,61 @@ class GraniphMixin:
 
     # ── 尺寸解析 ─────────────────────────────────────────────
     def _graniph_parse_sizes(self, soup, product: ProductInfo) -> list:
-        color = ""  # graniph 通常單色
+        """
+        graniph の実際の DOM 構造：
+        <div class="p-products-detail-option-size__list item-detail-cart">
+            <label class="few " for="02">       ← few=残りわずか, soldout=在庫なし
+                <span translate="no">S</span>
+                <span class="...">残り1点</span>
+            </label>
+            <label class="soldout " for="03">
+                <span translate="no">M</span>
+                <span class="...">在庫なし</span>
+            </label>
+        """
+        color = ""
         price = product.price_jpy or 0
         variants = []
         seen = set()
 
-        size_pat = re.compile(
-            r'^(XXS|XS|SS|S|M|L|XL|2XL|3XL|4XL|LL|3L|4L|ONE\s*SIZE|FREE|OS|\d{2,3}(?:cm)?)$',
-            re.IGNORECASE
-        )
+        # ターゲットコンテナを直接指定（class 名で完全一致）
+        container = soup.find(class_=re.compile(r'p-products-detail-option-size__list'))
+        if not container:
+            print(f"[Graniph] ⚠️ 找不到尺寸容器")
+            return variants
 
-        # 找 size 相關容器
-        size_containers = (
-            soup.find_all(class_=re.compile(r'size', re.I)) +
-            soup.find_all(attrs={"data-attr": "size"}) +
-            soup.find_all("ul", class_=re.compile(r'size|variant', re.I))
-        )
+        for label in container.find_all("label"):
+            # サイズ名: translate="no" の span から取得
+            size_span = label.find("span", attrs={"translate": "no"})
+            if not size_span:
+                continue
+            size_txt = size_span.get_text(strip=True)
+            if not size_txt or size_txt in seen:
+                continue
 
-        for container in size_containers:
-            for el in container.find_all(["button", "label", "li", "span", "a"]):
-                txt = el.get_text(strip=True).upper()
-                if size_pat.match(txt) and txt not in seen:
-                    seen.add(txt)
-                    # 判斷是否售完：class 含 sold-out / disabled / unavailable
-                    cls = " ".join(el.get("class") or []).lower()
-                    disabled = el.get("disabled") is not None
-                    in_stock = not disabled and not any(
-                        kw in cls for kw in ["sold-out", "soldout", "disabled", "unavailable", "out-of-stock"]
-                    )
-                    variants.append({
-                        "color": color,
-                        "size": txt,
-                        "price": price,
-                        "in_stock": in_stock,
-                    })
+            # 在庫判定: label の class に "soldout" が含まれるか
+            label_classes = " ".join(label.get("class") or []).lower()
+            in_stock = "soldout" not in label_classes
 
-        # 若找到 variants 則商品整體庫存 = 任一有貨
+            seen.add(size_txt)
+            variants.append({
+                "color": color,
+                "size": size_txt,
+                "price": price,
+                "in_stock": in_stock,
+            })
+
         if variants:
             product.in_stock = any(v["in_stock"] for v in variants)
+            out_str = ", ".join(
+                f"{v['size']}({'○' if v['in_stock'] else '✕'})" for v in variants
+            )
+            print(f"[Graniph] 尺寸: {out_str}")
+        else:
+            print(f"[Graniph] ⚠️ 找不到尺寸（container 存在但無 label）")
 
         return variants
+
 
     # ── 圖片 URL 構造 ─────────────────────────────────────────
     def _graniph_build_image_urls(self, item_code: str, soup) -> list:
@@ -250,21 +265,27 @@ class GraniphMixin:
             driver = self._create_driver()
             driver.uc_open_with_reconnect(url, reconnect_time=6)
 
-            # 等待 JS 渲染：price 出現為止（最多 20s）
+            # 等待 JS 渲染：price + title + size 全部出現才算 ready（最多 20s）
             for i in range(10):
                 _time.sleep(2)
                 html = driver.page_source or ""
                 has_price = bool(re.search(r'[¥￥]\s*[\d,]{4,}', html))
                 has_title = "<h1" in html
-                # 第一次 scroll 觸發 lazy render
+                has_size = bool(re.search(
+                    r'(?:class=["\'][^"\']*size[^"\']*["\']|>(?:S|M|L|XL|SS|XS|FREE)<)',
+                    html, re.I
+                ))
                 if i == 1:
                     try:
                         driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 3);")
                     except Exception:
                         pass
-                if has_price and has_title:
+                # 最低 3 回（6 秒）は待つ。その後 price + title + size が揃えば終了
+                if i >= 2 and has_price and has_title and has_size:
                     print(f"[Graniph] HTML ready (i={i})")
                     break
+                if i == 9:
+                    print(f"[Graniph] HTML ready (timeout, i={i}) price={has_price} title={has_title} size={has_size}")
 
             return driver.page_source or ""
         except Exception as e:

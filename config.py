@@ -13,6 +13,7 @@ DAIGO_COLLECTION_ID = os.getenv("DAIGO_COLLECTION_ID", "")
 STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
 # ZOZOTOWN 憭?祈嚗憛恬??嚗?
 ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # 摰
 PRICING_TIERS = [
     (0,      3000,    1.40),
@@ -38,6 +39,6 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "1800"))
 # 雿萇?
 MAX_CONCURRENT_SCRAPES = int(os.getenv("MAX_CONCURRENT_SCRAPES", "3"))
 SCRAPE_QUEUE_TIMEOUT = int(os.getenv("SCRAPE_QUEUE_TIMEOUT", "90"))
-# API 摰
-API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
+# 商品自動刪除（天數，0 = 停用）
+DAIGO_AUTO_DELETE_DAYS = int(os.getenv("DAIGO_AUTO_DELETE_DAYS", "30"))
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")
