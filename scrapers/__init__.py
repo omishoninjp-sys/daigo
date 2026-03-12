@@ -35,6 +35,7 @@ from scrapers.runway import RunwayMixin
 from scrapers.takaratomy import TakaratomyMixin
 from scrapers.newbalance import NewBalanceMixin
 from scrapers.fanatics import FanaticsMixin
+from scrapers.ysl import YSLMixin
 
 
 class Scraper(
@@ -51,6 +52,7 @@ class Scraper(
     TakaratomyMixin,
     NewBalanceMixin,
     FanaticsMixin,
+    YSLMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -124,6 +126,8 @@ class Scraper(
             product = await self._scrape_newbalance(url)
         elif platform == "fanatics":
             product = await self._scrape_fanatics(url)
+        elif platform == "ysl":
+            product = await self._scrape_ysl(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:

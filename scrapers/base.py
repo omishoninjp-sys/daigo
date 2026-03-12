@@ -40,6 +40,8 @@ class ProductInfo:
 
 def detect_platform(url: str) -> str:
     host = (urlparse(url).hostname or "").lower()
+    if "yslb.jp" in host:
+        return "ysl"
     if "gu-global.com" in host:
         return "gu"
     if "zozo" in host:
