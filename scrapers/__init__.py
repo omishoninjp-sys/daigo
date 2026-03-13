@@ -38,6 +38,7 @@ from scrapers.adidas import AdidasMixin
 from scrapers.graniph import GraniphMixin
 from scrapers.fanatics import FanaticsMixin
 from scrapers.ysl import YSLMixin
+from scrapers.rakuten import RakutenMixin
 
 
 class Scraper(
@@ -57,6 +58,7 @@ class Scraper(
     GraniphMixin,
     FanaticsMixin,
     YSLMixin,
+    RakutenMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -136,6 +138,8 @@ class Scraper(
             product = await self._scrape_fanatics(url)
         elif platform == "ysl":
             product = await self._scrape_ysl(url)
+        elif platform == "rakuten":
+            product = await self._scrape_rakuten(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
