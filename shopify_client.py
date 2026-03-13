@@ -491,13 +491,43 @@ class ShopifyClient:
         }
 
     def _build_description(self, description, source_url, original_price_jpy):
-        parts = []
-        if description:
-            parts.append(f"<p>{description}</p>")
-        parts.append('<div class="daigo-info" style="margin-top:16px;padding:12px;background:#f9f9f9;border-radius:8px;font-size:14px;">')
-        parts.append('<p style="margin:0 0 8px 0;"><strong>🛒 代購商品資訊</strong></p>')
+        source_link = ""
         if source_url:
-            parts.append(f'<p style="margin:0;"><a href="{source_url}" target="_blank" rel="nofollow">查看原始商品頁面 →</a></p>')
-        parts.append("</div>")
-        parts.append('<p style="margin-top:12px;font-size:13px;color:#666;">※ 本商品為日本代購，下單後約 7-14 個工作天到貨。國際運費 ¥1,000/kg（0.5kg 區間），包稅、不收材積，貨到後另行請款。</p>')
-        return "\n".join(parts)
+            source_link = f'<p><a href="{source_url}" target="_blank" rel="nofollow">查看原始商品頁面 →</a></p>'
+
+        return f"""
+<h2>服務說明</h2>
+<p>此為代購商品，由本服務代為向日本購入後轉運至台灣，非現貨販售。下單後將依商品頁說明的運費結構另行收取國際運費。</p>
+
+{source_link}
+
+<h2>購買流程</h2>
+<ol>
+  <li><strong>提供商品連結或下單</strong><br>直接在本站下單，或私訊提供日本商品連結</li>
+  <li><strong>本服務代購並集運至台灣倉</strong><br>商品可免費集運存放最長一個月</li>
+  <li><strong>出貨通知 → 到府配送</strong><br>準備出貨時私訊客服，系統自動合併訂單一併出貨</li>
+  <li><strong>台灣收件</strong><br>預計從日本出貨後 5~7 個工作天內到台灣</li>
+</ol>
+
+<h2>國際運費（空運・包稅）</h2>
+<p>✓ 含關稅　✓ 含台灣配送費　✓ 只收實重　✓ 無材積費</p>
+<p>起運 1 kg，未滿 1 kg 以 1 kg 計算，每增加 0.5 kg 加收 ¥500。</p>
+<table>
+  <tbody>
+    <tr><td>≦ 1.0 kg</td><td>¥1,000 ≈ NT$200</td></tr>
+    <tr><td>1.1 ~ 1.5 kg</td><td>¥1,500 ≈ NT$300</td></tr>
+    <tr><td>1.6 ~ 2.0 kg</td><td>¥2,000 ≈ NT$400</td></tr>
+    <tr><td>2.1 ~ 2.5 kg</td><td>¥2,500 ≈ NT$500</td></tr>
+    <tr><td>2.6 ~ 3.0 kg</td><td>¥3,000 ≈ NT$600</td></tr>
+    <tr><td>每增加 0.5 kg</td><td>+¥500　+≈ NT$100</td></tr>
+  </tbody>
+</table>
+<p>NT$ 匯率僅供參考，實際以下單當日匯率為準。運費於商品確認後統一請款。</p>
+
+<h2>集運說明</h2>
+<p>多筆訂單可免費集中存放，合併出貨以節省運費。存放期限最長<strong>一個月</strong>，超過期限未出貨者請主動聯繫客服，以免影響商品保管。</p>
+
+<h2>禁運 / 限運提醒</h2>
+<p>⚠ 鋰電池　⚠ 液體 / 噴霧　⚠ 食品 / 生鮮　⚠ 仿冒品</p>
+<p>以上類別商品涉及航空安全或法規限制，下單前請先私訊確認是否可代購，以免造成損失。</p>
+""".strip()
