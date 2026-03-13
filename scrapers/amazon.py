@@ -232,17 +232,38 @@ class AmazonMixin:
 
             for sel in [
                 "#corePrice_feature_div .a-offscreen",
+                "#corePrice_desktop .a-offscreen",
+                "#buybox .a-price .a-offscreen",
+                "#buyBoxAccordion .a-price .a-offscreen",
+                "#newBuyBoxPrice",
+                "#price",
                 "span.a-price span.a-offscreen",
                 ".a-price .a-offscreen",
+                ".kindle-price",
                 "#priceblock_ourprice",
                 "#priceblock_dealprice",
+                ".a-color-price",
+                "#tmm-grid-swatch-PAPERBACK .a-button-selected .a-button-inner span",
             ]:
                 el = soup.select_one(sel)
                 if el:
-                    pm = re.search(r'[\d,]+', el.get_text(strip=True).replace('￥', '').replace('¥', ''))
+                    raw_price = el.get_text(strip=True).replace('￥', '').replace('¥', '').replace(',', '').strip()
+                    pm = re.search(r'\d+', raw_price)
                     if pm:
-                        product.price_jpy = int(pm.group().replace(',', ''))
-                        break
+                        candidate = int(pm.group())
+                        if candidate > 0:
+                            product.price_jpy = candidate
+                            break
+
+            # 書籍/雜誌 fallback：從 HTML 直接搜價格 JSON
+            if not product.price_jpy:
+                m = re.search(r'"priceAmount"\s*:\s*([\d.]+)', html)
+                if not m:
+                    m = re.search(r'"buyingPrice"\s*:\s*([\d.]+)', html)
+                if not m:
+                    m = re.search(r'"price"\s*:\s*"[¥￥]([\d,]+)"', html)
+                if m:
+                    product.price_jpy = int(float(m.group(1).replace(',', '')))
 
             hi = re.findall(r'"hiRes"\s*:\s*"(https?://[^"]+)"', html)
             if hi:
