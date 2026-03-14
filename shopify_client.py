@@ -493,41 +493,46 @@ class ShopifyClient:
     def _build_description(self, description, source_url, original_price_jpy):
         source_link = ""
         if source_url:
-            source_link = f'<p><a href="{source_url}" target="_blank" rel="nofollow">查看原始商品頁面 →</a></p>'
+            source_link = f'<p style="margin:0 0 16px;"><a href="{source_url}" target="_blank" rel="nofollow" style="color:#1a56db;text-decoration:none;font-size:14px;">🔗 查看原始商品頁面 →</a></p>'
 
-        return f"""
-<h2>服務說明</h2>
-<p>此為代購商品，由本服務代為向日本購入後轉運至台灣，非現貨販售。下單後將依商品頁說明的運費結構另行收取國際運費。</p>
+        return f"""<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#222;max-width:720px;line-height:1.7;">
 
 {source_link}
 
-<h2>購買流程</h2>
-<ol>
-  <li><strong>提供商品連結或下單</strong><br>直接在本站下單，或私訊提供日本商品連結</li>
-  <li><strong>本服務代購並集運至台灣倉</strong><br>商品可免費集運存放最長一個月</li>
-  <li><strong>出貨通知 → 到府配送</strong><br>準備出貨時私訊客服，系統自動合併訂單一併出貨</li>
-  <li><strong>台灣收件</strong><br>預計從日本出貨後 5~7 個工作天內到台灣</li>
+<div style="background:#f8f9fa;border-left:4px solid #1a56db;border-radius:4px;padding:16px 20px;margin-bottom:24px;">
+  <p style="margin:0;font-size:14px;color:#444;">此為代購商品，由本服務代為向日本購入後轉運至台灣，非現貨販售。下單後將依商品頁說明的運費結構另行收取國際運費。</p>
+</div>
+
+<h2 style="font-size:17px;font-weight:700;border-bottom:2px solid #e5e7eb;padding-bottom:8px;margin:0 0 16px;">購買流程</h2>
+<ol style="margin:0 0 24px;padding-left:20px;">
+  <li style="margin-bottom:10px;"><strong>提供商品連結或下單</strong><br><span style="font-size:13px;color:#666;">直接在本站下單，或私訊提供日本商品連結</span></li>
+  <li style="margin-bottom:10px;"><strong>本服務代購並集運至台灣倉</strong><br><span style="font-size:13px;color:#666;">商品可免費集運存放最長一個月</span></li>
+  <li style="margin-bottom:10px;"><strong>出貨通知 → 到府配送</strong><br><span style="font-size:13px;color:#666;">準備出貨時私訊客服，系統自動合併訂單一併出貨</span></li>
+  <li style="margin-bottom:0;"><strong>台灣收件</strong><br><span style="font-size:13px;color:#666;">預計從日本出貨後 5~7 個工作天內到台灣</span></li>
 </ol>
 
-<h2>國際運費（空運・包稅）</h2>
-<p>✓ 含關稅　✓ 含台灣配送費　✓ 只收實重　✓ 無材積費</p>
-<p>起運 1 kg，未滿 1 kg 以 1 kg 計算，每增加 0.5 kg 加收 ¥500。</p>
-<table>
+<h2 style="font-size:17px;font-weight:700;border-bottom:2px solid #e5e7eb;padding-bottom:8px;margin:0 0 16px;">國際運費（空運・包稅）</h2>
+<p style="margin:0 0 8px;font-size:13px;color:#444;">✓ 含關稅　✓ 含台灣配送費　✓ 只收實重　✓ 無材積費</p>
+<p style="margin:0 0 12px;font-size:13px;color:#444;">起運 1 kg，未滿 1 kg 以 1 kg 計算，每增加 0.5 kg 加收 ¥500。</p>
+<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:12px;">
   <tbody>
-    <tr><td>≦ 1.0 kg</td><td>¥1,000 ≈ NT$200</td></tr>
-    <tr><td>1.1 ~ 1.5 kg</td><td>¥1,500 ≈ NT$300</td></tr>
-    <tr><td>1.6 ~ 2.0 kg</td><td>¥2,000 ≈ NT$400</td></tr>
-    <tr><td>2.1 ~ 2.5 kg</td><td>¥2,500 ≈ NT$500</td></tr>
-    <tr><td>2.6 ~ 3.0 kg</td><td>¥3,000 ≈ NT$600</td></tr>
-    <tr><td>每增加 0.5 kg</td><td>+¥500　+≈ NT$100</td></tr>
+    <tr style="background:#f0f4ff;"><td style="padding:8px 12px;border:1px solid #dde3f0;">≦ 1.0 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">¥1,000 ≈ NT$200</td></tr>
+    <tr><td style="padding:8px 12px;border:1px solid #dde3f0;">1.1 ~ 1.5 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">¥1,500 ≈ NT$300</td></tr>
+    <tr style="background:#f0f4ff;"><td style="padding:8px 12px;border:1px solid #dde3f0;">1.6 ~ 2.0 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">¥2,000 ≈ NT$400</td></tr>
+    <tr><td style="padding:8px 12px;border:1px solid #dde3f0;">2.1 ~ 2.5 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">¥2,500 ≈ NT$500</td></tr>
+    <tr style="background:#f0f4ff;"><td style="padding:8px 12px;border:1px solid #dde3f0;">2.6 ~ 3.0 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">¥3,000 ≈ NT$600</td></tr>
+    <tr><td style="padding:8px 12px;border:1px solid #dde3f0;">每增加 0.5 kg</td><td style="padding:8px 12px;border:1px solid #dde3f0;">+¥500　+≈ NT$100</td></tr>
   </tbody>
 </table>
-<p>NT$ 匯率僅供參考，實際以下單當日匯率為準。運費於商品確認後統一請款。</p>
+<p style="margin:0 0 24px;font-size:12px;color:#888;">NT$ 匯率僅供參考，實際以下單當日匯率為準。運費於商品確認後統一請款。</p>
 
-<h2>集運說明</h2>
-<p>多筆訂單可免費集中存放，合併出貨以節省運費。存放期限最長<strong>一個月</strong>，超過期限未出貨者請主動聯繫客服，以免影響商品保管。</p>
+<h2 style="font-size:17px;font-weight:700;border-bottom:2px solid #e5e7eb;padding-bottom:8px;margin:0 0 16px;">集運說明</h2>
+<p style="margin:0 0 24px;font-size:13px;color:#444;">多筆訂單可免費集中存放，合併出貨以節省運費。存放期限最長<strong>一個月</strong>，超過期限未出貨者請主動聯繫客服，以免影響商品保管。</p>
 
-<h2>禁運 / 限運提醒</h2>
-<p>⚠ 鋰電池　⚠ 液體 / 噴霧　⚠ 食品 / 生鮮　⚠ 仿冒品</p>
-<p>以上類別商品涉及航空安全或法規限制，下單前請先私訊確認是否可代購，以免造成損失。</p>
-""".strip()
+<h2 style="font-size:17px;font-weight:700;border-bottom:2px solid #e5e7eb;padding-bottom:8px;margin:0 0 16px;">禁運 / 限運提醒</h2>
+<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:4px;padding:12px 16px;font-size:13px;color:#444;">
+  <p style="margin:0 0 6px;">⚠ 鋰電池　⚠ 液體 / 噴霧　⚠ 食品 / 生鮮　⚠ 仿冒品</p>
+  <p style="margin:0;">以上類別商品涉及航空安全或法規限制，下單前請先私訊確認是否可代購，以免造成損失。</p>
+</div>
+
+</div>""".strip()
