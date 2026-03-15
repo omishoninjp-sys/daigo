@@ -50,17 +50,73 @@ class GenericMixin:
         return product
 
     async def _fetch_playwright(self, url: str) -> str:
-        async with httpx.AsyncClient(
-            timeout=SCRAPE_TIMEOUT,
-            follow_redirects=True,
-            headers={
-                'User-Agent': USER_AGENT,
-                'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            },
-        ) as client:
-            resp = await client.get(url)
-            return resp.text
+        """先用 httpx 快速抓取，若被擋（Access Denied / HTML 太短）自動 fallback 到 Selenium UC"""
+        import time as _time
+        html = ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=SCRAPE_TIMEOUT,
+                follow_redirects=True,
+                headers={
+                    'User-Agent': USER_AGENT,
+                    'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                },
+            ) as client:
+                resp = await client.get(url)
+                html = resp.text
+        except Exception as e:
+            print(f"[Generic] httpx 失敗: {e}")
+
+        # 偵測被擋：Access Denied / 403 / HTML 太短
+        blocked_keywords = ["access denied", "403 forbidden", "robot", "captcha", "bot detected"]
+        is_blocked = (
+            len(html) < 5000 or
+            any(kw in html.lower() for kw in blocked_keywords)
+        )
+
+        if is_blocked:
+            print(f"[Generic] httpx 被擋，改用 Selenium UC: {url}")
+            html = self._fetch_with_selenium(url)
+
+        return html
+
+    def _fetch_with_selenium(self, url: str) -> str:
+        """使用 Selenium UC driver 抓取（與 visvim 相同模式）"""
+        import time as _time
+        with self._driver_lock:
+            for attempt in range(2):
+                try:
+                    driver = self._ensure_driver()
+                    if not driver:
+                        return ""
+                    self._driver_use_count += 1
+                    self._clean_driver_tabs()
+                    try:
+                        driver.uc_open_with_reconnect(url, reconnect_time=6)
+                    except Exception as e:
+                        if "InvalidSession" in type(e).__name__ or "invalid session" in str(e).lower():
+                            self._driver = None
+                            self._create_driver()
+                            continue
+                    html = ""
+                    for i in range(6):
+                        _time.sleep(2)
+                        try:
+                            html = driver.page_source
+                        except Exception:
+                            break
+                        if len(html) > 5000:
+                            return html
+                    return html
+                except Exception as e:
+                    if "InvalidSession" in type(e).__name__ and attempt == 0:
+                        self._driver = None
+                        self._create_driver()
+                        continue
+                    print(f"[Generic] Selenium 失敗: {e}")
+                    return ""
+        return ""
 
     # ============================================================
     # Extractors（通用解析器）

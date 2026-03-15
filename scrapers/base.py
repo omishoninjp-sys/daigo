@@ -98,6 +98,8 @@ def detect_platform(url: str) -> str:
         return "mercari"
     if "ec-store.net" in host:
         return "ecstore"
+    if "bellemaison.jp" in host:
+        return "bellemaison"
     return "generic"
 
 

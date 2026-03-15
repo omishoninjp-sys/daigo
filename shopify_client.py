@@ -58,17 +58,25 @@ class ShopifyClient:
                     r'\d+\s*(?:cm|mm|inch|インチ)',
                     r'[SsMmLlXx]{1,3}サイズ',
                     r'^\s*[SsMmLlXx]{1,3}\s*$',
-                    r'^\s*F\s*$',           # フリーサイズ「F」
-                    r'^\s*FREE\s*$',        # FREE
-                    r'^\s*フリー\s*$',      # フリー
-                    r'^\s*\d{1,3}\s*$',   # 数字サイズ（0, 1, 2, 3, 65, 70, 80...）
-                    r'^[A-Z]{1,2}/\d*[SsMLlXx]{1,3}$',  # J/S, J/M, J/XL, J/2XL（adidas JP）
-                    r'^\d+[SsMLlXx]$',                   # 25S, 32L 等
+                    r'^\s*F\s*$',
+                    r'^\s*FREE\s*$',
+                    r'^\s*フリー\s*$',
+                    r'^\s*\d{1,3}\s*$',
+                    r'^[A-Z]{1,2}/\d*[SsMLlXx]{1,3}$',
+                    r'^\d+[SsMLlXx]$',
+                    r'[\uff10-\uff19]+\s*[\xd7\uff38x]\s*[\uff10-\uff19]+',
+                    r'\d+\s*[\xd7x]\s*\d+',
+                    r'\u7d04[\uff10-\uff190-9]',
+                    r'[\uff10-\uff19]{2,}',
                 ]
                 color_words = [
-                    "シルバー", "ブラック", "ホワイト", "レッド", "ブルー", "ゴールド",
-                    "ピンク", "グレー", "グリーン", "ナチュラル", "ベージュ", "ブラウン",
-                    "オレンジ", "イエロー", "ネイビー", "パープル", "クリア",
+                    "\u30b7\u30eb\u30d0\u30fc", "\u30d6\u30e9\u30c3\u30af", "\u30db\u30ef\u30a4\u30c8",
+                    "\u30ec\u30c3\u30c9", "\u30d6\u30eb\u30fc", "\u30b4\u30fc\u30eb\u30c9",
+                    "\u30d4\u30f3\u30af", "\u30b0\u30ec\u30fc", "\u30b0\u30ea\u30fc\u30f3",
+                    "\u30ca\u30c1\u30e5\u30e9\u30eb", "\u30d9\u30fc\u30b8\u30e5",
+                    "\u30d6\u30e9\u30a6\u30f3", "\u30aa\u30ec\u30f3\u30b8",
+                    "\u30a4\u30a8\u30ed\u30fc", "\u30cd\u30a4\u30d3\u30fc",
+                    "\u30d1\u30fc\u30d7\u30eb", "\u30af\u30ea\u30a2",
                     "silver", "black", "white", "red", "blue", "gold",
                 ]
                 vals = [v.get(field, "") for v in variants if v.get(field)]
@@ -89,6 +97,9 @@ class ShopifyClient:
                 print(f"[Shopify] option1 → {label} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
             if has_size:
                 label = "カラー" if size_is_actually_color else "サイズ"
+                existing_labels = [o["name"] for o in options]
+                if label in existing_labels:
+                    label = "サイズ" if label == "カラー" else "カラー"
                 options.append({"name": label})
                 print(f"[Shopify] option2 → {label} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
 
