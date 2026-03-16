@@ -100,6 +100,8 @@ def detect_platform(url: str) -> str:
         return "ecstore"
     if "bellemaison.jp" in host:
         return "bellemaison"
+    if "biccamera.com" in host:
+        return "biccamera"
     return "generic"
 
 

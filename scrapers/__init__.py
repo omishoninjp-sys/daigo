@@ -41,6 +41,7 @@ from scrapers.ysl import YSLMixin
 from scrapers.rakuten import RakutenMixin
 from scrapers.ecstore import EcStoreMixin
 from scrapers.bellemaison import BelleMaisonMixin
+from scrapers.biccamera import BiccameraMixin
 
 
 class Scraper(
@@ -63,6 +64,7 @@ class Scraper(
     RakutenMixin,
     EcStoreMixin,
     BelleMaisonMixin,
+    BiccameraMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -148,6 +150,8 @@ class Scraper(
             product = await self._scrape_ecstore(url)
         elif platform == "bellemaison":
             product = await self._scrape_bellemaison(url)
+        elif platform == "biccamera":
+            product = await self._scrape_biccamera(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:

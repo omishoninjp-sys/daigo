@@ -206,19 +206,23 @@ class ShopifyClient:
         elif image_url:
             import base64 as _b64
             _img_attachment = None
-            try:
-                _headers = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": image_url,
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                }
-                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
-                    _r = await _c.get(image_url, headers=_headers)
-                    ct = _r.headers.get("content-type", "image/jpeg")
-                    if _r.status_code == 200 and "image" in ct:
-                        _img_attachment = _b64.b64encode(_r.content).decode()
-            except Exception as _e:
-                print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
+            # 如果已是 data URL（爬蟲預先下載），直接取 base64
+            if image_url.startswith("data:image"):
+                _img_attachment = image_url.split(",", 1)[1] if "," in image_url else None
+            else:
+                try:
+                    _headers = {
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": image_url,
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    }
+                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                        _r = await _c.get(image_url, headers=_headers)
+                        ct = _r.headers.get("content-type", "image/jpeg")
+                        if _r.status_code == 200 and "image" in ct:
+                            _img_attachment = _b64.b64encode(_r.content).decode()
+                except Exception as _e:
+                    print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
             if _img_attachment:
                 images.append({"attachment": _img_attachment, "position": 1})
             else:
@@ -226,10 +230,16 @@ class ShopifyClient:
             added_urls.add(image_url)
 
         if extra_images:
+            import base64 as _b64e
             pos = 2
             for img in extra_images[:9]:
                 if img and img not in added_urls and img not in color_img_urls:
-                    images.append({"src": img, "position": pos})
+                    if img.startswith("data:image"):
+                        b64e = img.split(",", 1)[1] if "," in img else None
+                        if b64e:
+                            images.append({"attachment": b64e, "position": pos})
+                    else:
+                        images.append({"src": img, "position": pos})
                     added_urls.add(img)
                     pos += 1
 
@@ -316,14 +326,38 @@ class ShopifyClient:
 
             print(f"[Shopify] 上傳 {len(color_to_variant_ids)} 個顏色圖片...")
 
+            import base64 as _b64c
+
+            async def _dl_b64(url):
+                if url.startswith("data:image"):
+                    return url.split(",", 1)[1] if "," in url else None
+                _h = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": url,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                        _r = await _c.get(url, headers=_h)
+                        if _r.status_code == 200 and "image" in _r.headers.get("content-type", ""):
+                            return _b64c.b64encode(_r.content).decode()
+                except Exception as _e:
+                    print(f"[Shopify] 圖片下載失敗: {_e}")
+                return None
+
             async with httpx.AsyncClient(timeout=30) as client:
                 linked = 0
                 for color, variant_ids in color_to_variant_ids.items():
                     img_url = color_image_map[color]
+                    b64 = await _dl_b64(img_url)
+                    if b64:
+                        img_payload = {"attachment": b64, "variant_ids": variant_ids}
+                    else:
+                        img_payload = {"src": img_url, "variant_ids": variant_ids}
                     resp = await client.post(
                         f"{self.base_url}/products/{product_id}/images.json",
                         headers=self.headers,
-                        json={"image": {"src": img_url, "variant_ids": variant_ids}},
+                        json={"image": img_payload},
                     )
                     if resp.status_code in (200, 201):
                         linked += 1
