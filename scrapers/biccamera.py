@@ -215,15 +215,14 @@ class BiccameraMixin:
                             self._create_driver()
                             continue
                     html = ""
-                    for i in range(8):
-                        _time.sleep(2)
+                    for i in range(12):
+                        _time.sleep(3)
                         try:
                             html = driver.page_source
                         except Exception:
                             break
                         if (i >= 1
-                                and "bcs_variationSliderPc" in html
-                                and len(html) > 10000):
+                                and len(html) > 5000):
                             return html
                     return html
                 except Exception as e:
@@ -253,15 +252,14 @@ class BiccameraMixin:
                             self._create_driver()
                             continue
                     html = ""
-                    for i in range(8):
-                        _time.sleep(2)
+                    for i in range(12):
+                        _time.sleep(3)
                         try:
                             html = driver.page_source
                         except Exception:
                             break
                         if (i >= 1
-                                and "bcs_variationSliderPc" in html
-                                and len(html) > 10000):
+                                and len(html) > 5000):
                             return html, driver
                     return html, driver
                 except Exception as e:
