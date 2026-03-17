@@ -170,6 +170,9 @@ class BeamsMixin:
 
             sizes = list(size_stock_map.keys())
 
+            # 整頁是否明確標示售完（用於沒有 size 的商品判斷）
+            page_explicitly_sold_out = bool(re.search(r'在庫なし|sold\s*out|SOLD\s*OUT', page_text))
+
             if colors or sizes:
                 if not colors:
                     colors = [""]
@@ -191,6 +194,10 @@ class BeamsMixin:
                         )
                         if stock_match:
                             in_stock = stock_match.group(1) not in _OUT_OF_STOCK
+                        elif size == "":
+                            # 無 size（包包等單 option 商品）：頁面沒有明確「在庫なし」就視為有庫存
+                            in_stock = not page_explicitly_sold_out
+                            print(f"[BEAMS] 無 size 商品庫存判斷: {'售完' if not in_stock else '有庫存'}")
                         else:
                             in_stock = size_stock_map.get(size, False)
 
