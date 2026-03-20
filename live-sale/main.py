@@ -83,11 +83,6 @@ def trim_title(title: str) -> str:
 
 
 def mask_name(name: str) -> str:
-    """
-    遮罩顧客姓名，只留第一個字（中文姓氏 or 英文首字）+ XX
-    單康嘉 → 單XX   /   John Chen → JXX
-    空白或無名則回空字串
-    """
     name = (name or "").strip()
     if not name:
         return ""
@@ -107,12 +102,6 @@ def time_ago_zh(s: str) -> str:
 
 
 async def fetch_real_orders() -> list[dict]:
-    """
-    抓真實訂單（20 筆）
-    - 城市：優先 shipping_address，fallback billing_address
-    - 顧客姓名：優先 shipping_address.name，fallback customer.first_name + last_name
-    - 附帶：商品圖（批次補）、訂單金額、件數
-    """
     url = (
         f"https://{SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json"
         "?status=any&limit=20"
@@ -121,7 +110,9 @@ async def fetch_real_orders() -> list[dict]:
     )
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(url, headers=HEADERS)
+    print(f"[Orders] status={r.status_code}")
     if r.status_code != 200:
+        print(f"[Orders] 錯誤: {r.text[:200]}")
         return []
 
     result = []
@@ -132,7 +123,6 @@ async def fetch_real_orders() -> list[dict]:
         city_zh      = REGION_MAP.get(city_raw, city_raw).strip() or "台灣"
         flag         = COUNTRY_FLAG.get(country_code, "🌏")
 
-        # 顧客姓名（遮罩）
         customer  = order.get("customer") or {}
         addr_name = addr.get("name", "")
         full_name = addr_name or (
@@ -147,10 +137,8 @@ async def fetch_real_orders() -> list[dict]:
         if not product_title:
             continue
 
-        # 件數（所有商品加總）
         item_count = sum(i.get("quantity", 1) for i in items)
 
-        # 金額
         try:
             amount = f"¥{int(float(order.get('total_price', 0))):,}"
         except Exception:
@@ -159,20 +147,20 @@ async def fetch_real_orders() -> list[dict]:
         result.append({
             "flag":       flag,
             "region":     city_zh,
-            "customer":   masked,           # e.g. "單XX"
+            "customer":   masked,
             "product":    product_title,
             "product_id": str(items[0].get("product_id", "")),
-            "image":      "",               # 批次補
+            "image":      "",
             "amount":     amount,
             "count":      item_count,
             "time":       time_ago_zh(order.get("created_at", "")),
             "_type":      "order",
         })
+    print(f"[Orders] 取得 {len(result)} 筆訂單")
     return result
 
 
 async def fetch_product_images(product_ids: list[str]) -> dict[str, str]:
-    """批次抓商品縮圖（一次 API call）"""
     ids_param = ",".join(filter(None, product_ids[:20]))
     if not ids_param:
         return {}
@@ -193,7 +181,7 @@ async def fetch_product_images(product_ids: list[str]) -> dict[str, str]:
 
 
 async def fetch_recent_products() -> list[dict]:
-    """抓指定系列最近 24 小時新上架的商品，城市隨機抽台灣 + 香港"""
+    """抓指定系列最近 30 天新上架的商品，城市隨機抽台灣 + 香港"""
     url = (
         f"https://{SHOPIFY_DOMAIN}/admin/api/2024-01/products.json"
         f"?collection_id={COLLECTION_ID}&limit=20"
@@ -201,17 +189,24 @@ async def fetch_recent_products() -> list[dict]:
     )
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(url, headers=HEADERS)
+
+    print(f"[Products] status={r.status_code} collection={COLLECTION_ID}")
     if r.status_code != 200:
+        print(f"[Products] 錯誤: {r.text[:200]}")
         return []
+
+    products = r.json().get("products", [])
+    print(f"[Products] 取得 {len(products)} 個商品（過濾前）")
 
     now    = datetime.now(timezone.utc)
     result = []
-    for p in r.json().get("products", []):
+    for p in products:
         if p.get("status") != "active":
             continue
         try:
             dt = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
-            if (now - dt).total_seconds() > 86400 * 7:
+            age_days = (now - dt).total_seconds() / 86400
+            if age_days > 30:
                 continue
         except Exception:
             continue
@@ -223,7 +218,7 @@ async def fetch_recent_products() -> list[dict]:
         result.append({
             "flag":     flag,
             "region":   city,
-            "customer": "",         # 新品通知不顯示名字
+            "customer": "",
             "product":  trim_title(p.get("title", "")),
             "image":    image,
             "amount":   "",
@@ -231,6 +226,8 @@ async def fetch_recent_products() -> list[dict]:
             "time":     time_ago_zh(p["created_at"]),
             "_type":    "product",
         })
+
+    print(f"[Products] 過濾後剩 {len(result)} 個商品")
     return result
 
 
@@ -246,7 +243,6 @@ async def recent_orders():
     orders   = await fetch_real_orders()
     products = await fetch_recent_products()
 
-    # 批次補訂單商品圖
     product_ids = [o["product_id"] for o in orders if o.get("product_id")]
     if product_ids:
         img_map = await fetch_product_images(product_ids)
@@ -254,7 +250,6 @@ async def recent_orders():
             if not o["image"]:
                 o["image"] = img_map.get(o["product_id"], "")
 
-    # 混合：每 2 筆真實訂單穿插 1 筆新品通知
     combined  = []
     prod_iter = iter(products)
     for i, o in enumerate(orders):
@@ -274,6 +269,7 @@ async def recent_orders():
     _data_cache["data"] = final
     _data_cache["ts"]   = now_ts
 
+    print(f"[API] 最終回傳 {len(final)} 筆資料")
     random.shuffle(final)
     return {"orders": final, "cached": False}
 
