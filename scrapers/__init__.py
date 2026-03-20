@@ -44,6 +44,7 @@ from scrapers.bellemaison import BelleMaisonMixin
 from scrapers.biccamera import BiccameraMixin
 from scrapers.shimamura import ShimamuraMixin
 from scrapers.npb import NpbMixin
+from scrapers.disney import DisneyMixin
 
 
 class Scraper(
@@ -69,6 +70,7 @@ class Scraper(
     BiccameraMixin,
     ShimamuraMixin,
     NpbMixin,
+    DisneyMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -167,6 +169,8 @@ class Scraper(
             product = await self._scrape_shimamura(url)
         elif platform == "npb":
             product = await self._scrape_npb(url)
+        elif platform == "disney":
+            product = await self._scrape_disney(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:

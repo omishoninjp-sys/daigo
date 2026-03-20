@@ -126,7 +126,7 @@ def detect_platform(url: str) -> str:
     if "shop.npb.or.jp" in host:
         return "npb"
     if "store.disney.co.jp" in host:
-        return "shopify_jp"
+        return "disney"
     if "ec-store.net" in host:
         return "ecstore"
     if "bellemaison.jp" in host:
