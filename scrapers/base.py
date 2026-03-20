@@ -125,6 +125,8 @@ def detect_platform(url: str) -> str:
         return "mercari"
     if "shop.npb.or.jp" in host:
         return "npb"
+    if "store.disney.co.jp" in host:
+        return "shopify_jp"
     if "ec-store.net" in host:
         return "ecstore"
     if "bellemaison.jp" in host:
