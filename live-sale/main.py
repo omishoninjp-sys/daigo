@@ -211,7 +211,7 @@ async def fetch_recent_products() -> list[dict]:
             continue
         try:
             dt = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
-            if (now - dt).total_seconds() > 86400:
+            if (now - dt).total_seconds() > 86400 * 7:
                 continue
         except Exception:
             continue
