@@ -136,6 +136,8 @@ async def fetch_real_orders() -> list[dict]:
         product_title = trim_title(items[0].get("title", ""))
         if not product_title:
             continue
+        if "系統費" in product_title:
+            continue
 
         item_count = sum(i.get("quantity", 1) for i in items)
 
