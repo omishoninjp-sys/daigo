@@ -16,10 +16,10 @@ ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # 摰
 PRICING_TIERS = [
-    (0,      5000,    1.35),
-    (5001,   10000,   1.30),
-    (10001,  20000,   1.25),
-    (20001,  30000,   1.20),
+    (0,      5000,    1.25),
+    (5001,   10000,   1.22),
+    (10001,  20000,   1.20),
+    (20001,  30000,   1.18),
     (30001,  999999,  1.15),
 ]
 MIN_SERVICE_FEE_JPY = int(os.getenv("MIN_SERVICE_FEE_JPY", "300"))
