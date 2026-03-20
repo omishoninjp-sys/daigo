@@ -82,14 +82,18 @@ class NpbMixin:
                 cols = [c.get_text(strip=True) for c in rows[0].find_all(["th","td"])] if rows else []
                 print(f"[NPB] 在庫テーブル cols={cols}")
 
+                has_player_col = "選手" in cols
+
                 def _idx(name, default):
                     try: return cols.index(name)
                     except ValueError: return default
 
-                ip  = _idx("選手", 0)
-                iz  = _idx("サイズ", 1)
-                ipr = _idx("価格", 2)
-                ist = _idx("在庫状況", 3)
+                ip  = _idx("選手", -1)
+                iz  = _idx("サイズ", 0 if not has_player_col else 1)
+                ipr = _idx("価格",  1 if not has_player_col else 2)
+                ist = _idx("在庫状況", 2 if not has_player_col else 3)
+
+                print(f"[NPB] has_player={has_player_col} cols={cols}")
 
                 for row in rows[1:]:
                     cells = row.find_all(["td","th"])
@@ -97,9 +101,9 @@ class NpbMixin:
                         continue
 
                     def _cell(i):
-                        return cells[i].get_text(strip=True) if i < len(cells) else ""
+                        return cells[i].get_text(strip=True) if 0 <= i < len(cells) else ""
 
-                    player   = _cell(ip)
+                    player   = _cell(ip) if has_player_col else ""
                     size     = _cell(iz)
                     stock_st = _cell(ist)
                     in_stock = stock_st in ("○", "◯", "△", "残りわずか", "予約")
@@ -116,7 +120,7 @@ class NpbMixin:
                     product.variants.append({
                         "color": player,
                         "size": size,
-                        "sku": f"npb-{player}-{size}".replace(" ", "_"),
+                        "sku": f"npb-{player}-{size}".replace(" ", "_").strip("-"),
                         "price": v_price,
                         "in_stock": in_stock,
                         "image": "",
