@@ -36,6 +36,33 @@ class ProductInfo:
         return bool(self.title and self.price_jpy and self.price_jpy > 0)
 
 
+# ============ 封鎖網站清單 ============
+
+BLOCKED_DOMAINS = {
+    "duty-free-japan.jp": (
+        "此商品來自 Duty Free Japan（日本免稅店），"
+        "商品需於機場現場取貨，無法透過代購服務寄送。"
+        "如需代購其他日本商品，請改用 Amazon JP、ZOZOTOWN 等購物網站。"
+    ),
+    "tw.mercari.com": (
+        "您提供的是 Mercari 台灣版（tw.mercari.com）的連結，"
+        "Mercari 台灣版為本地二手平台，非日本商品，無法提供代購服務。"
+        "若要代購日本 Mercari 商品，請至 jp.mercari.com 取得正確連結後再試一次。"
+    ),
+}
+
+
+def detect_blocked(url: str) -> str | None:
+    """
+    若 URL 屬於封鎖清單，回傳原因說明字串；否則回傳 None。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    for domain, reason in BLOCKED_DOMAINS.items():
+        if domain in host:
+            return reason
+    return None
+
+
 # ============ Platform Detection ============
 
 def detect_platform(url: str) -> str:
@@ -96,6 +123,8 @@ def detect_platform(url: str) -> str:
         return "fanatics"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
+    if "shop.npb.or.jp" in host:
+        return "npb"
     if "ec-store.net" in host:
         return "ecstore"
     if "bellemaison.jp" in host:

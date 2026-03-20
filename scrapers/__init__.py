@@ -8,7 +8,7 @@ GOYOUTATI DAIGO 商品爬取模組 v4.0
 3. 在 scrape() 的 if/elif 鏈裡加入新平台的路由
 """
 
-from scrapers.base import ProductInfo, detect_platform, normalize_url, normalize_price, detect_adult
+from scrapers.base import ProductInfo, detect_platform, normalize_url, normalize_price, detect_adult, detect_blocked
 from scrapers.driver import DriverMixin
 from scrapers.generic import GenericMixin
 from scrapers.amazon import AmazonMixin
@@ -43,6 +43,7 @@ from scrapers.ecstore import EcStoreMixin
 from scrapers.bellemaison import BelleMaisonMixin
 from scrapers.biccamera import BiccameraMixin
 from scrapers.shimamura import ShimamuraMixin
+from scrapers.npb import NpbMixin
 
 
 class Scraper(
@@ -67,6 +68,7 @@ class Scraper(
     BelleMaisonMixin,
     BiccameraMixin,
     ShimamuraMixin,
+    NpbMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -92,6 +94,13 @@ class Scraper(
 
     async def scrape(self, url: str) -> ProductInfo:
         url = normalize_url(url)
+
+        # ── 封鎖網站攔截
+        blocked_reason = detect_blocked(url)
+        if blocked_reason:
+            print(f"[Scraper] 🚫 封鎖網站: {url}")
+            raise ValueError(f"此網站不支援代購服務：{blocked_reason}")
+
         platform = detect_platform(url)
 
         if platform == "zozotown":
@@ -156,6 +165,8 @@ class Scraper(
             product = await self._scrape_biccamera(url)
         elif platform == "shimamura":
             product = await self._scrape_shimamura(url)
+        elif platform == "npb":
+            product = await self._scrape_npb(url)
         elif "oakley.com" in url:
             product = await self._scrape_oakley(url)
         else:
