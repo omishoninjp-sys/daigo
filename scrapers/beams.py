@@ -12,7 +12,7 @@ from config import USER_AGENT
 from scrapers.base import ProductInfo
 from scrapers.driver import VALID_SIZES
 
-# 預約・取り寄せ也算有庫存，只有「在庫なし」才算缺貨
+# 預約・取り寄せも在庫あり扱い、「在庫なし」だけ缺貨
 _OUT_OF_STOCK = {"在庫なし"}
 _STOCK_PAT = r'(在庫あり|在庫なし|残りわずか|残り\d+点|取り寄せ|予約受付中|予約|入荷次第発送)'
 
@@ -22,6 +22,10 @@ class BeamsMixin:
     async def _scrape_beams(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url)
         try:
+            # zh-CHT / zh-CN 版轉成日文版，確保價格格式是「税込」
+            url = re.sub(r'/zh-CHT/', '/', url)
+            url = re.sub(r'/zh-CN/', '/', url, flags=re.IGNORECASE)
+
             headers = {
                 "User-Agent": USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -90,8 +94,9 @@ class BeamsMixin:
                 tag.decompose()
             page_text = soup.get_text(" ", strip=True)
 
-            # 找所有 税込 價格後取最小值（特賣價 ≤ 原價）
-            all_tax_prices = re.findall(r'[￥¥]\s*([\d,]+)\s*[（(]税込', page_text)
+            # 找所有 税込 / 含稅 價格後取最小值（特賣價 ≤ 原價）
+            # 同時支援日文版「税込」和繁中版「含稅」
+            all_tax_prices = re.findall(r'[￥¥]\s*([\d,]+)\s*[（(](?:税込|含稅)', page_text)
             if all_tax_prices:
                 candidates = []
                 for raw in all_tax_prices:
