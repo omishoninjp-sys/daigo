@@ -188,12 +188,17 @@ class GenericMixin:
             product.price_jpy = self._find_price_in_html(soup)
 
     def _find_price_in_html(self, soup) -> int | None:
+        # ── 先移除刪除線元素（原價），避免抓到劃掉的舊價
+        for tag in soup.find_all(['del', 's', 'strike']):
+            tag.decompose()
+
         text = soup.get_text()
         tax_prices = re.findall(r'([0-9,]+)\s*円\s*[（\(]?\s*税込', text)
         if tax_prices:
-            p = normalize_price(tax_prices[0])
-            if p and 100 <= p <= 1000000:
-                return p
+            candidates = [normalize_price(p) for p in tax_prices]
+            candidates = [p for p in candidates if p and 100 <= p <= 1000000]
+            if candidates:
+                return min(candidates)
         for sel in ['[class*="price"]', '[class*="Price"]', '[id*="price"]']:
             for el in soup.select(sel):
                 m = re.search(r'[¥￥]?\s*([\d,]+)', el.get_text(strip=True))
