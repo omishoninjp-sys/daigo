@@ -12,36 +12,10 @@ class ShopifyClient:
             "Content-Type": "application/json",
         }
 
-    async def _find_existing_product(self, source_url: str, title: str) -> dict | None:
-        """
-        查找已存在商品，優先用 source_url metafield，
-        fallback 用 title 搜尋比對。回傳 {"id":..., "handle":...} 或 None。
-        """
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                # ── 方法 1：REST metafields search（依 value 過濾不被支援，改列出同 namespace）
-                # ── 方法 2：用 title 搜尋（最可靠）
-                resp = await client.get(
-                    f"{self.base_url}/products.json",
-                    headers=self.headers,
-                    params={"title": title, "fields": "id,handle,title,metafields", "limit": 5},
-                )
-                if resp.status_code == 200:
-                    products = resp.json().get("products", [])
-                    if products:
-                        p = products[0]
-                        pid = p["id"]
-                        handle = p["handle"]
-                        print(f"[Shopify] 查重命中 (title): product_id={pid} / {handle}")
-                        return {"id": pid, "handle": handle}
-        except Exception as e:
-            print(f"[Shopify] 查重失敗（忽略）: {e}")
-        return None
-
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
-                                    seo_title="", seo_tags=None):
+                                    seo_title="", seo_tags=None, in_stock=True):
         shopify_variants = []
         options = []
         color_image_map = {}
@@ -50,10 +24,60 @@ class ShopifyClient:
             has_color = any(v.get("color") for v in variants)
             has_size = any(v.get("size") for v in variants)
 
+            # ── 動態決定 option 名稱
+            # Amazon 有時把尺寸放在「カラー」維度、顏色放在「サイズ」維度（命名錯誤）
+            # 所以這裡根據值的實際內容判斷，而不是信任欄位名稱
+            import re as _re
+
+            def _vals_look_like_size(field):
+                size_pats = [
+                    r'\d+\s*(?:cm|mm|inch|インチ)',
+                    r'[SsMmLlXx]{1,3}サイズ',
+                    r'^\s*[SsMmLlXx]{1,3}\s*$',
+                    r'^\s*F\s*$',
+                    r'^\s*FREE\s*$',
+                    r'^\s*フリー\s*$',
+                    r'^\s*\d{1,3}\s*$',
+                    r'^[A-Z]{1,2}/\d*[SsMLlXx]{1,3}$',
+                    r'^\d+[SsMLlXx]$',
+                    r'[\uff10-\uff19]+\s*[\xd7\uff38x]\s*[\uff10-\uff19]+',
+                    r'\d+\s*[\xd7x]\s*\d+',
+                    r'\u7d04[\uff10-\uff190-9]',
+                    r'[\uff10-\uff19]{2,}',
+                ]
+                color_words = [
+                    "\u30b7\u30eb\u30d0\u30fc", "\u30d6\u30e9\u30c3\u30af", "\u30db\u30ef\u30a4\u30c8",
+                    "\u30ec\u30c3\u30c9", "\u30d6\u30eb\u30fc", "\u30b4\u30fc\u30eb\u30c9",
+                    "\u30d4\u30f3\u30af", "\u30b0\u30ec\u30fc", "\u30b0\u30ea\u30fc\u30f3",
+                    "\u30ca\u30c1\u30e5\u30e9\u30eb", "\u30d9\u30fc\u30b8\u30e5",
+                    "\u30d6\u30e9\u30a6\u30f3", "\u30aa\u30ec\u30f3\u30b8",
+                    "\u30a4\u30a8\u30ed\u30fc", "\u30cd\u30a4\u30d3\u30fc",
+                    "\u30d1\u30fc\u30d7\u30eb", "\u30af\u30ea\u30a2",
+                    "silver", "black", "white", "red", "blue", "gold",
+                ]
+                vals = [v.get(field, "") for v in variants if v.get(field)]
+                s, c = 0, 0
+                for val in vals:
+                    if any(_re.search(p, val, _re.IGNORECASE) for p in size_pats):
+                        s += 1
+                    if any(cw.lower() in val.lower() for cw in color_words):
+                        c += 1
+                return s > c
+
+            color_is_actually_size = has_color and _vals_look_like_size("color")
+            size_is_actually_color = has_size and not _vals_look_like_size("size")
+
             if has_color:
-                options.append({"name": "カラー"})
+                label = "サイズ" if color_is_actually_size else "カラー"
+                options.append({"name": label})
+                print(f"[Shopify] option1 → {label} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
             if has_size:
-                options.append({"name": "サイズ"})
+                label = "カラー" if size_is_actually_color else "サイズ"
+                existing_labels = [o["name"] for o in options]
+                if label in existing_labels:
+                    label = "サイズ" if label == "カラー" else "カラー"
+                options.append({"name": label})
+                print(f"[Shopify] option2 → {label} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
 
             for v in variants:
                 color = v.get("color", "")
@@ -69,10 +93,12 @@ class ShopifyClient:
                 else:
                     variant_selling_price = price_jpy
 
+                v_in_stock = v.get("in_stock", True)
                 sv = {
                     "price": str(variant_selling_price),
-                    "inventory_management": None,
-                    "inventory_policy": "continue",
+                    "inventory_management": "shopify",
+                    "inventory_policy": "deny",
+                    "inventory_quantity": 1 if v_in_stock else 0,
                     "requires_shipping": True,
                 }
                 if has_color and has_size:
@@ -101,10 +127,12 @@ class ShopifyClient:
         shopify_variants = deduped_variants
 
         if not shopify_variants:
+            # variants 空の単品 → in_stock パラメータで庫存設定
             shopify_variants = [{
                 "price": str(price_jpy),
-                "inventory_management": None,
-                "inventory_policy": "continue",
+                "inventory_management": "shopify",
+                "inventory_policy": "deny",
+                "inventory_quantity": 1 if in_stock else 0,
                 "requires_shipping": True,
             }]
 
@@ -118,16 +146,16 @@ class ShopifyClient:
                 if t not in final_tags:
                     final_tags.append(t)
 
-        # === 判斷庫存狀態 → 缺貨設為 draft ===
-        all_out_of_stock = bool(variants) and all(not v.get("in_stock", True) for v in variants)
-        product_status = "draft" if all_out_of_stock else "active"
+        # === 庫存狀態判斷 → 缺貨仍設為 active，讓客人看到商品並聯繫店家 ===
+        all_out_of_stock = (bool(variants) and all(not v.get("in_stock", True) for v in variants)) or (not variants and not in_stock)
+        product_status = "active"
         if all_out_of_stock:
-            print(f"[Shopify] ⚠️ 所有 variants 缺貨，設為 draft（不公開）")
+            print(f"[Shopify] ⚠️ 所有 variants 缺貨，仍設為 active（庫存為0，讓客人聯繫詢問）")
 
         product_data = {
             "product": {
                 "title": final_title,
-                "body_html": self._build_description(description, source_url, original_price_jpy),
+                "body_html": self._build_description(description, source_url, original_price_jpy, seo_title=final_title, brand=brand, tags=final_tags),
                 "vendor": brand or "代購商品",
                 "product_type": "代購",
                 "tags": final_tags,
@@ -152,22 +180,25 @@ class ShopifyClient:
             images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
             print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
         elif image_url:
-            # 先嘗試下載圖片轉 base64，避免 Cloudflare/Akamai 擋 Shopify 直接抓圖
             import base64 as _b64
             _img_attachment = None
-            try:
-                _headers = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": image_url,
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                }
-                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
-                    _r = await _c.get(image_url, headers=_headers)
-                    ct = _r.headers.get("content-type", "image/jpeg")
-                    if _r.status_code == 200 and "image" in ct:
-                        _img_attachment = _b64.b64encode(_r.content).decode()
-            except Exception as _e:
-                print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
+            # 如果已是 data URL（爬蟲預先下載），直接取 base64
+            if image_url.startswith("data:image"):
+                _img_attachment = image_url.split(",", 1)[1] if "," in image_url else None
+            else:
+                try:
+                    _headers = {
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": image_url,
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    }
+                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                        _r = await _c.get(image_url, headers=_headers)
+                        ct = _r.headers.get("content-type", "image/jpeg")
+                        if _r.status_code == 200 and "image" in ct:
+                            _img_attachment = _b64.b64encode(_r.content).decode()
+                except Exception as _e:
+                    print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
             if _img_attachment:
                 images.append({"attachment": _img_attachment, "position": 1})
             else:
@@ -175,51 +206,25 @@ class ShopifyClient:
             added_urls.add(image_url)
 
         if extra_images:
+            import base64 as _b64e
             pos = 2
             for img in extra_images[:9]:
                 if img and img not in added_urls and img not in color_img_urls:
-                    images.append({"src": img, "position": pos})
+                    if img.startswith("data:image"):
+                        b64e = img.split(",", 1)[1] if "," in img else None
+                        if b64e:
+                            images.append({"attachment": b64e, "position": pos})
+                    else:
+                        images.append({"src": img, "position": pos})
                     added_urls.add(img)
                     pos += 1
 
         if images:
             product_data["product"]["images"] = images
 
-        # ── 查重（建立前）
-        existing = await self._find_existing_product(source_url, final_title)
-        if existing:
-            product_id = existing["id"]
-            handle = existing["handle"]
-            print(f"[Shopify] ⚠️ 商品已存在，跳過建立: {product_id} / {handle}")
-            return {
-                "product_id": product_id,
-                "handle": handle,
-                "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-                "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
-                "already_exists": True,
-            }
-
-        # ── 建立商品
+        # ── 直接建立商品（不查重，每次都建立新商品；Shopify 會自動處理 handle 衝突）
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data)
-
-            # ── 422 variant 重複：代表商品已存在，搜尋後回傳
-            if resp.status_code == 422 and "already exists" in resp.text:
-                print(f"[Shopify] ⚠️ 422 variant 重複，嘗試撈現有商品...")
-                existing2 = await self._find_existing_product(source_url, final_title)
-                if existing2:
-                    product_id = existing2["id"]
-                    handle = existing2["handle"]
-                    print(f"[Shopify] ✅ 找到現有商品: {product_id} / {handle}")
-                    return {
-                        "product_id": product_id,
-                        "handle": handle,
-                        "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-                        "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
-                        "already_exists": True,
-                    }
-                # 找不到就原樣拋出
-                raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
 
             if resp.status_code not in (200, 201):
                 raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
@@ -242,7 +247,7 @@ class ShopifyClient:
         if DAIGO_COLLECTION_ID:
             await self._add_to_collection(product_id)
         else:
-            print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定，跳過 collection")
+            print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定,跳過 collection")
 
         await self._publish_to_all_channels(product_id)
 
@@ -267,14 +272,38 @@ class ShopifyClient:
 
             print(f"[Shopify] 上傳 {len(color_to_variant_ids)} 個顏色圖片...")
 
+            import base64 as _b64c
+
+            async def _dl_b64(url):
+                if url.startswith("data:image"):
+                    return url.split(",", 1)[1] if "," in url else None
+                _h = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": url,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
+                        _r = await _c.get(url, headers=_h)
+                        if _r.status_code == 200 and "image" in _r.headers.get("content-type", ""):
+                            return _b64c.b64encode(_r.content).decode()
+                except Exception as _e:
+                    print(f"[Shopify] 圖片下載失敗: {_e}")
+                return None
+
             async with httpx.AsyncClient(timeout=30) as client:
                 linked = 0
                 for color, variant_ids in color_to_variant_ids.items():
                     img_url = color_image_map[color]
+                    b64 = await _dl_b64(img_url)
+                    if b64:
+                        img_payload = {"attachment": b64, "variant_ids": variant_ids}
+                    else:
+                        img_payload = {"src": img_url, "variant_ids": variant_ids}
                     resp = await client.post(
                         f"{self.base_url}/products/{product_id}/images.json",
                         headers=self.headers,
-                        json={"image": {"src": img_url, "variant_ids": variant_ids}},
+                        json={"image": img_payload},
                     )
                     if resp.status_code in (200, 201):
                         linked += 1
@@ -354,16 +383,174 @@ class ShopifyClient:
         except Exception as e:
             print(f"[Shopify] Collection error: {e}")
 
-    def _build_description(self, description, source_url, original_price_jpy):
-        parts = []
-        if description:
-            parts.append(f"<p>{description}</p>")
-        parts.append('<div class="daigo-info" style="margin-top:16px;padding:12px;background:#f9f9f9;border-radius:8px;font-size:14px;">')
-        parts.append('<p style="margin:0 0 8px 0;"><strong>🛒 代購商品資訊</strong></p>')
-        if original_price_jpy:
-            parts.append(f'<p style="margin:0 0 4px 0;">日本原價：¥{original_price_jpy:,}</p>')
+    async def cleanup_old_daigo_products(self, days: int = 10) -> dict:
+        """
+        刪除指定系列（DAIGO_COLLECTION_ID）中超過 N 天的商品。
+        只動這個系列的商品，不影響其他系列。
+        """
+        from datetime import datetime, timezone, timedelta
+
+        if not DAIGO_COLLECTION_ID:
+            return {
+                "deleted_count": 0, "deleted_ids": [], "skipped_count": 0,
+                "error_count": 1, "errors": ["DAIGO_COLLECTION_ID 未設定，中止清理"],
+                "cutoff_date": "",
+            }
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        deleted = []
+        errors = []
+        skipped = 0
+        page_info = None
+        fetched = 0
+
+        print(f"[Cleanup] 開始清理：Collection {DAIGO_COLLECTION_ID}，刪除 {days} 天前 ({cutoff.strftime('%Y-%m-%d %H:%M UTC')}) 的商品")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                # 只查詢指定 collection 內的商品
+                params = {
+                    "collection_id": DAIGO_COLLECTION_ID,
+                    "fields": "id,title,created_at,status",
+                    "limit": 250,
+                }
+                if page_info:
+                    params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status"}
+
+                resp = await client.get(
+                    f"{self.base_url}/products.json",
+                    headers=self.headers,
+                    params=params,
+                )
+                if resp.status_code != 200:
+                    print(f"[Cleanup] ❌ 無法取得商品列表: {resp.status_code}")
+                    break
+
+                products = resp.json().get("products", [])
+                fetched += len(products)
+
+                for p in products:
+                    pid = p["id"]
+                    created_raw = p.get("created_at", "")
+                    title_short = p.get("title", "")[:40]
+
+                    try:
+                        created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        skipped += 1
+                        continue
+
+                    if created_at >= cutoff:
+                        skipped += 1
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+                    print(f"[Cleanup] 🗑️  刪除商品 {pid}（{age_days} 天前）: {title_short}")
+
+                    del_resp = await client.delete(
+                        f"{self.base_url}/products/{pid}.json",
+                        headers=self.headers,
+                    )
+                    if del_resp.status_code == 200:
+                        deleted.append(pid)
+                        print(f"[Cleanup] ✅ 已刪除: {pid}")
+                    else:
+                        msg = f"product_id={pid}, status={del_resp.status_code}, body={del_resp.text[:100]}"
+                        errors.append(msg)
+                        print(f"[Cleanup] ❌ 刪除失敗: {msg}")
+
+                # 處理分頁 Link header
+                link_header = resp.headers.get("Link", "")
+                if 'rel="next"' in link_header:
+                    import re as _re
+                    m = _re.search(r'page_info=([^&>]+).*?rel="next"', link_header)
+                    page_info = m.group(1) if m else None
+                else:
+                    page_info = None
+
+                if not page_info or not products:
+                    break
+
+        print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，錯誤 {len(errors)} 件")
+        return {
+            "deleted_count": len(deleted),
+            "deleted_ids": deleted,
+            "skipped_count": skipped,
+            "error_count": len(errors),
+            "errors": errors,
+            "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+        }
+
+    def _build_description(self, description, source_url, original_price_jpy,
+                            seo_title="", brand="", tags=None):
+
+        # SEO 段：每件商品獨特內容
+        kw_str = ""
+        if tags:
+            skip = {"日本代購", "代購", "daigo", "Amazon JP", "ZOZOTOWN", "Mercari JP"}
+            kws = [t for t in tags if t not in skip]
+            if kws:
+                kw_str = "　".join(kws[:6])
+
+        brand_str = f"品牌：{brand}　" if brand else ""
+        sep = " | "
+        kw_part = (sep + kw_str) if kw_str else ""
+
+        seo_intro = ""
+        if seo_title:
+            seo_intro = (
+                '<div style="margin-bottom:24px;">'
+                f'<h2 style="font-size:20px;font-weight:800;color:#1a1a2e;margin:0 0 10px;line-height:1.4;">{seo_title}</h2>'
+                f'<p style="margin:0;font-size:13px;color:#666;line-height:1.6;">{brand_str}由 GOYOUTATI 御用達代購自日本，空運含稅直送台灣。{kw_part}</p>'
+                '</div>'
+            )
+
+        source_link = ""
         if source_url:
-            parts.append(f'<p style="margin:0;"><a href="{source_url}" target="_blank" rel="nofollow">查看原始商品頁面 →</a></p>')
-        parts.append("</div>")
-        parts.append('<p style="margin-top:12px;font-size:13px;color:#666;">※ 本商品為日本代購，下單後約 7-14 個工作天到貨。國際運費 ¥1,000/kg（0.5kg 區間），包稅、不收材積，貨到後另行請款。</p>')
-        return "\n".join(parts)
+            source_link = (
+                f'<p style="margin:0 0 20px;">'
+                f'<a href="{source_url}" target="_blank" rel="nofollow" '
+                f'style="display:inline-flex;align-items:center;gap:6px;color:#1a56db;font-size:13px;'
+                f'text-decoration:none;border:1px solid #c3d4f5;border-radius:6px;padding:6px 12px;background:#f0f4ff;">'
+                f'🔗 查看日本原始商品頁面 →</a></p>'
+            )
+
+        return (
+            '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#1a1a2e;max-width:700px;line-height:1.75;">'
+            + seo_intro
+            + source_link
+            + '<div style="background:#f0f4ff;border-left:4px solid #1a56db;border-radius:0 8px 8px 0;padding:14px 18px;margin-bottom:28px;">'
+            + '<p style="margin:0;font-size:14px;color:#333;">此為<strong>日本代購商品</strong>，由本服務代為向日本購入後空運至台灣，非現貨販售。<br>下單後依商品重量另行收取國際運費，商品到倉後統一請款出貨。</p>'
+            + '</div>'
+            + '<h2 style="font-size:16px;font-weight:700;color:#1a1a2e;border-bottom:2px solid #e8eaf0;padding-bottom:8px;margin:0 0 16px;">購買流程</h2>'
+            + '<div style="margin-bottom:28px;">'
+            + '<div style="display:flex;gap:12px;margin-bottom:12px;align-items:flex-start;"><span style="min-width:28px;height:28px;background:#1a56db;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">1</span><div><strong style="font-size:14px;">提供商品連結或下單</strong><br><span style="font-size:13px;color:#666;">直接在本站下單，或使用 <a href="https://goyoutati.com/pages/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC-%E4%B8%80%E6%A2%9D%E9%80%A3%E7%B5%90-%E9%80%81%E5%88%B0%E4%BD%A0%E5%AE%B6" target="_blank" style="color:#1a56db;">貼上連結送到你家</a> 服務代購</span></div></div>'
+            + '<div style="display:flex;gap:12px;margin-bottom:12px;align-items:flex-start;"><span style="min-width:28px;height:28px;background:#1a56db;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">2</span><div><strong style="font-size:14px;">本服務代購並集運至台灣倉</strong><br><span style="font-size:13px;color:#666;">商品可免費在日本倉庫集運存放最長一個月，到倉後 Email 通知</span></div></div>'
+            + '<div style="display:flex;gap:12px;margin-bottom:12px;align-items:flex-start;"><span style="min-width:28px;height:28px;background:#1a56db;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">3</span><div><strong style="font-size:14px;">出貨通知 → 到府配送</strong><br><span style="font-size:13px;color:#666;">私訊客服確認出貨，系統自動合併訂單一併出貨</span></div></div>'
+            + '<div style="display:flex;gap:12px;align-items:flex-start;"><span style="min-width:28px;height:28px;background:#1a56db;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">4</span><div><strong style="font-size:14px;">台灣收件</strong><br><span style="font-size:13px;color:#666;">預計從日本出貨後 5～7 個工作天內到台灣</span></div></div>'
+            + '</div>'
+            + '<h2 style="font-size:16px;font-weight:700;color:#1a1a2e;border-bottom:2px solid #e8eaf0;padding-bottom:8px;margin:0 0 16px;">國際運費（空運・包稅）</h2>'
+            + '<p style="margin:0 0 6px;font-size:13px;color:#444;">✓ 含關稅　✓ 含台灣配送費　✓ 只收實重　✓ 無材積費</p>'
+            + '<p style="margin:0 0 12px;font-size:13px;color:#444;">起運 1 kg，未滿 1 kg 以 1 kg 計算，每增加 0.5 kg 加收 ¥500。</p>'
+            + '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px;">'
+            + '<tbody>'
+            + '<tr style="background:#f0f4ff;"><td style="padding:9px 14px;border:1px solid #dde3f0;">≦ 1.0 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;font-weight:600;">¥1,000 <span style="color:#888;font-weight:400;">≈ NT$200</span></td></tr>'
+            + '<tr style="background:#fff;"><td style="padding:9px 14px;border:1px solid #dde3f0;">1.1 ～ 1.5 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;font-weight:600;">¥1,500 <span style="color:#888;font-weight:400;">≈ NT$300</span></td></tr>'
+            + '<tr style="background:#f0f4ff;"><td style="padding:9px 14px;border:1px solid #dde3f0;">1.6 ～ 2.0 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;font-weight:600;">¥2,000 <span style="color:#888;font-weight:400;">≈ NT$400</span></td></tr>'
+            + '<tr style="background:#fff;"><td style="padding:9px 14px;border:1px solid #dde3f0;">2.1 ～ 2.5 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;font-weight:600;">¥2,500 <span style="color:#888;font-weight:400;">≈ NT$500</span></td></tr>'
+            + '<tr style="background:#f0f4ff;"><td style="padding:9px 14px;border:1px solid #dde3f0;">2.6 ～ 3.0 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;font-weight:600;">¥3,000 <span style="color:#888;font-weight:400;">≈ NT$600</span></td></tr>'
+            + '<tr style="background:#fff;"><td style="padding:9px 14px;border:1px solid #dde3f0;color:#555;">每增加 0.5 kg</td><td style="padding:9px 14px;border:1px solid #dde3f0;color:#555;">+¥500　<span style="color:#888;">+≈ NT$100</span></td></tr>'
+            + '</tbody></table>'
+            + '<p style="margin:0 0 28px;font-size:12px;color:#999;">NT$ 匯率僅供參考，實際以下單當日匯率為準。運費於商品到倉後出貨前確認重量後統一請款。</p>'
+            + '<h2 style="font-size:16px;font-weight:700;color:#1a1a2e;border-bottom:2px solid #e8eaf0;padding-bottom:8px;margin:0 0 16px;">集運說明</h2>'
+            + '<p style="margin:0 0 28px;font-size:13px;color:#444;">多筆訂單可免費集中存放，合併出貨節省運費。存放期限最長 <strong>一個月</strong>，超過期限請主動聯繫客服。</p>'
+            + '<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:14px 18px;margin-bottom:16px;">'
+            + '<p style="margin:0 0 6px;font-size:14px;font-weight:700;color:#7a5000;">⚠ 禁運 / 限運提醒</p>'
+            + '<p style="margin:0 0 6px;font-size:13px;color:#555;">鋰電池・液體 / 噴霧・食品 / 生鮮・仿冒品</p>'
+            + '<p style="margin:0;font-size:13px;color:#555;">以上類別涉及航空安全或法規限制，下單前請先私訊確認是否可代購。</p>'
+            + '</div>'
+            + '<div style="background:#f0fff4;border:1px solid #86efac;border-radius:8px;padding:14px 18px;">'
+            + '<p style="margin:0;font-size:13px;color:#166534;">📬 商品到倉後將以 <strong>Email 通知</strong>，請留意信箱。如需 LINE 通知，請加 <a href="https://lin.ee/JejGv1M" target="_blank" style="color:#166534;font-weight:700;">官方 LINE @544kaytb</a> 並告知訂單號碼。</p>'
+            + '</div>'
+            + '</div>'
+        )
