@@ -12,30 +12,6 @@ class ShopifyClient:
             "Content-Type": "application/json",
         }
 
-    async def _find_existing_product(self, source_url: str, title: str) -> dict | None:
-        """
-        查找已存在商品，優先用 source_url metafield，
-        fallback 用 title 搜尋比對。回傳 {"id":..., "handle":...} 或 None。
-        """
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"{self.base_url}/products.json",
-                    headers=self.headers,
-                    params={"title": title, "fields": "id,handle,title,metafields", "limit": 5},
-                )
-                if resp.status_code == 200:
-                    products = resp.json().get("products", [])
-                    if products:
-                        p = products[0]
-                        pid = p["id"]
-                        handle = p["handle"]
-                        print(f"[Shopify] 查重命中 (title): product_id={pid} / {handle}")
-                        return {"id": pid, "handle": handle}
-        except Exception as e:
-            print(f"[Shopify] 查重失敗（忽略）: {e}")
-        return None
-
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
@@ -246,39 +222,9 @@ class ShopifyClient:
         if images:
             product_data["product"]["images"] = images
 
-        # ── 查重（建立前）
-        existing = await self._find_existing_product(source_url, final_title)
-        if existing:
-            product_id = existing["id"]
-            handle = existing["handle"]
-            print(f"[Shopify] ⚠️ 商品已存在，跳過建立: {product_id} / {handle}")
-            return {
-                "product_id": product_id,
-                "handle": handle,
-                "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-                "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
-                "already_exists": True,
-            }
-
-        # ── 建立商品
+        # ── 直接建立商品（不查重，每次都建立新商品；Shopify 會自動處理 handle 衝突）
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data)
-
-            if resp.status_code == 422 and "already exists" in resp.text:
-                print(f"[Shopify] ⚠️ 422 variant 重複，嘗試撈現有商品...")
-                existing2 = await self._find_existing_product(source_url, final_title)
-                if existing2:
-                    product_id = existing2["id"]
-                    handle = existing2["handle"]
-                    print(f"[Shopify] ✅ 找到現有商品: {product_id} / {handle}")
-                    return {
-                        "product_id": product_id,
-                        "handle": handle,
-                        "admin_url": f"https://{SHOPIFY_STORE}/admin/products/{product_id}",
-                        "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
-                        "already_exists": True,
-                    }
-                raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
 
             if resp.status_code not in (200, 201):
                 raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
@@ -301,7 +247,7 @@ class ShopifyClient:
         if DAIGO_COLLECTION_ID:
             await self._add_to_collection(product_id)
         else:
-            print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定，跳過 collection")
+            print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定,跳過 collection")
 
         await self._publish_to_all_channels(product_id)
 
@@ -608,4 +554,3 @@ class ShopifyClient:
             + '</div>'
             + '</div>'
         )
-
