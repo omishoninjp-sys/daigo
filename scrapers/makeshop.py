@@ -117,10 +117,28 @@ class MakeShopMixin:
                 product.extra_images = sorted_imgs[1:10]
 
             # ── 在庫
-            if re.search(r'SOLD\s*OUT|在庫なし|売り切れ|品切れ|×在庫', page_text):
-                product.in_stock = False
-            elif re.search(r'在庫あり|カートに入れる|〇在庫', page_text):
+            # 先找主商品区域（h1 の近く）で判定。
+            # 関連商品セクションに SOLD OUT が含まれる場合があるため、
+            # 有庫存サインを優先チェックする。
+            main_area = ""
+            main_el = soup.find("h1")
+            if main_el:
+                # h1 の親を最大 5 段階まで遡って商品エリアを特定
+                parent = main_el
+                for _ in range(5):
+                    if parent.parent:
+                        parent = parent.parent
+                    if len(parent.get_text()) > 200:
+                        main_area = parent.get_text(" ", strip=True)
+                        break
+
+            check_text = main_area if main_area else page_text
+
+            if re.search(r'在庫あり|カートに入れる|〇在庫', check_text):
                 product.in_stock = True
+            elif re.search(r'SOLD\s*OUT|在庫なし|売り切れ|品切れ|×在庫', check_text):
+                product.in_stock = False
+            # どちらも見つからなければデフォルト True のまま
 
             # ── Variants
             select = soup.find("select", id=re.compile(r"skuinfo|sku|unit", re.I))
