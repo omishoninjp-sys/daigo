@@ -135,6 +135,8 @@ def detect_platform(url: str) -> str:
         return "biccamera"
     if "shop-shimamura.com" in host:
         return "shimamura"
+    if "/view/item/" in url:
+        return "makeshop"
     return "generic"
 
 
