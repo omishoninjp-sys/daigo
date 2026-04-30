@@ -2,7 +2,7 @@
 共用基礎模組：ProductInfo、detect_platform、工具函數
 """
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from dataclasses import dataclass, asdict, field
 from collections import Counter
 
@@ -135,6 +135,8 @@ def detect_platform(url: str) -> str:
         return "npb"
     if "store.disney.co.jp" in host:
         return "disney"
+    if "yoshidakaban.com" in host:  # ← 新增
+        return "yoshidakaban"
     if "ec-store.net" in host:
         return "ecstore"
     if "bellemaison.jp" in host:
@@ -151,11 +153,32 @@ def detect_platform(url: str) -> str:
 # ============ 工具函數 ============
 
 def normalize_url(url: str) -> str:
+    # ShopServe 手機版 → PC 版
     shopserve_m = re.match(r'(https?://[^/]+)/smp/item/(.+)', url)
     if shopserve_m:
         normalized = f"{shopserve_m.group(1)}/SHOP/{shopserve_m.group(2)}"
         print(f"[Normalize] ShopServe 手機版 → PC 版: {url} → {normalized}")
         return normalized
+
+    # YoshidaKaban: 去掉 /zh-CHT/ /zh-CN/ /en/ /ko/ 等語系前綴，強制走日文版
+    # 否則商品頁顯示外幣價格（TWD/HKD/USD/KRW），會被 scraper 當成 JPY 抓進來
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if "yoshidakaban.com" in host:
+            new_path = re.sub(
+                r"^/(zh-CHT|zh-CN|en|ko)(/|$)",
+                "/",
+                parsed.path,
+                flags=re.IGNORECASE,
+            )
+            if new_path != parsed.path:
+                normalized = urlunparse(parsed._replace(path=new_path))
+                print(f"[Normalize] YoshidaKaban 語系前綴去除: {url} → {normalized}")
+                return normalized
+    except Exception as e:
+        print(f"[Normalize] YoshidaKaban 處理失敗: {e}")
+
     return url
 
 
