@@ -1,42 +1,37 @@
 """
 Human Made (humanmade.jp) 爬蟲 Mixin
 
-平台：Shopify（2026-04 從 SFCC 遷移過來）
-策略：完全從 HTML 解析（.json 端點被擋）
+平台：SFCC (Salesforce Commerce Cloud)
+（之前以為改 Shopify，實際看了 HTML 才確認還是 SFCC）
 
-v3.1 新增：
-- 診斷日誌：印出 HTML 大小、特徵字眼出現次數，協助精準診斷
-- 等待條件加強：等到 ProductJson 或 cart/add 真的出現才回傳 HTML
-- variants 多種 form 結構支援
-- 價格 fallback：抓 Shopify CDN price-money 元素
+實際 HTML 結構（2026-04 確認）：
+- 標題: <h1 class="product-name h4 ls-custom">AIR FORCE 1 '01 / LO2</h1>
+- 價格: JSON-LD offers.price = "22550" 最準
+       fallback: <span class="value" content="22550"></span>
+       fallback: <span class="sales">內的 ¥22,550 文字
+- 顏色: div[data-attr="color"] > button.attribute-item--color
+        > span[data-attr-value="NAVY"] (顏色名稱)
+        > style="background-image: url(...)"  (顏色 swatch 圖片)
+- 尺寸: button.attribute-item--size[data-attr-value="23.5cm"]
+        button.selectable = 有貨；無 .selectable class = 缺貨
+- 圖片: .primary-images .swiper-slide img[data-zoom]
+- gtm-data: <input type="hidden" id="gtm-data" value="{...JSON...}"> 含完整 product JSON
 """
+import html as html_lib
 import json
 import re
 import time as _time
-from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
 from scrapers.base import ProductInfo
 
 
-_HANDLE_FROM_PRODUCTS = re.compile(r'/products/([^/?#]+)', re.IGNORECASE)
-_HANDLE_FROM_LEGACY = re.compile(r'/[a-z]+/([A-Za-z0-9]+)\.html', re.IGNORECASE)
-
 _MIN_VALID_PRICE = 800
 _MAX_VALID_PRICE = 5_000_000
 
-
-def _extract_handle_from_url(url: str) -> str | None:
-    parsed = urlparse(url)
-    path = parsed.path
-    m = _HANDLE_FROM_PRODUCTS.search(path)
-    if m:
-        return m.group(1).lower().replace('.html', '')
-    m = _HANDLE_FROM_LEGACY.search(path)
-    if m:
-        return m.group(1).lower()
-    return None
+# SFCC 圖片 CDN base
+_SFCC_IMAGE_BASE = "https://www.humanmade.jp"
 
 
 class HumanMadeMixin:
@@ -44,6 +39,7 @@ class HumanMadeMixin:
     async def _scrape_humanmade(self, url: str) -> ProductInfo:
         product = ProductInfo(source_url=url, brand="Human Made")
 
+        # 去語系前綴
         url = re.sub(r'humanmade\.jp/(?:en|zh-CHT|zh-CN|ko)/', 'humanmade.jp/', url, flags=re.IGNORECASE)
 
         html = await self._humanmade_fetch_html(url)
@@ -51,52 +47,80 @@ class HumanMadeMixin:
             print(f"[HumanMade] ❌ 無法取得 HTML: {url}")
             return product
 
-        # ── 診斷日誌（關鍵！）──────────────────────────────────
-        self._humanmade_debug_html(html, url)
-
         try:
             soup = BeautifulSoup(html, "html.parser")
 
-            # 1. canonical handle
-            handle = _extract_handle_from_url(url)
-            canonical = soup.find("link", rel="canonical")
-            if canonical and canonical.get("href"):
-                canonical_url = canonical["href"]
-                if "/products/" in canonical_url:
-                    product.source_url = canonical_url
-                    canon_handle = _extract_handle_from_url(canonical_url)
-                    if canon_handle:
-                        handle = canon_handle
-                        print(f"[HumanMade] canonical handle: {handle}")
+            # ── 標題（h1.product-name 最準）──
+            self._humanmade_extract_title(soup, product)
 
-            # 2. ProductJson
-            shopify_data = self._humanmade_find_shopify_product_json(soup, html)
-            if shopify_data:
-                self._humanmade_parse_shopify_product(shopify_data, product, handle)
-                if product.is_valid and product.variants:
-                    print(
-                        f"[HumanMade] ✅ ProductJson: {product.title} / "
-                        f"¥{product.price_jpy} / variants={len(product.variants)}"
-                    )
-                    return product
+            # ── 價格（JSON-LD > span[content] > 文字 ¥）──
+            self._humanmade_extract_price(soup, html, product)
 
-            # 3. window.meta
-            meta_data = self._humanmade_find_window_meta(html)
-            if meta_data and not (product.is_valid and product.variants):
-                self._humanmade_parse_shopify_product(meta_data, product, handle)
-                if product.is_valid and product.variants:
-                    print(
-                        f"[HumanMade] ✅ window.meta: {product.title} / "
-                        f"¥{product.price_jpy} / variants={len(product.variants)}"
-                    )
-                    return product
+            # ── 圖片 ──
+            self._humanmade_extract_images(soup, product)
 
-            # 4. HTML fallback (og + form + JSON-LD)
-            self._humanmade_parse_html_full(soup, html, product, handle)
+            # ── 顏色 ──
+            colors, color_image_map = self._humanmade_extract_colors(soup)
+
+            # ── 尺寸（含庫存）──
+            sizes_with_stock = self._humanmade_extract_sizes(soup)
+
+            # ── 描述（從 JSON-LD 或 .product-description）──
+            self._humanmade_extract_description(soup, html, product)
+
+            # ── 從 gtm-data 補全資料（pid, sku 等）──
+            gtm_data = self._humanmade_parse_gtm_data(soup)
+            pid = ""
+            if gtm_data:
+                p_info = (gtm_data.get("product") or {}) if isinstance(gtm_data.get("product"), dict) else {}
+                pid = p_info.get("id", "") or gtm_data.get("productID", "") or ""
+                if not product.title and p_info.get("name"):
+                    product.title = p_info["name"]
+                # gtm price 是 number，可作為 cross-check
+                if not product.price_jpy and p_info.get("price"):
+                    v = self._humanmade_price_to_int(p_info["price"])
+                    if v:
+                        product.price_jpy = v
+                        print(f"[HumanMade] price from gtm-data: {v}")
+
+            # ── 組 variants（color × size 矩陣）──
+            base_handle = pid or "hm"
+            variants = []
+            if not colors:
+                colors = [""]
+            if not sizes_with_stock:
+                sizes_with_stock = [("", True)]
+
+            for color in colors:
+                color_img = color_image_map.get(color) or product.image_url
+                for size, in_stock in sizes_with_stock:
+                    label_parts = [p for p in [color, size] if p]
+                    sku = f"{base_handle}-{'-'.join(label_parts)}".lower().replace(" ", "-").replace(".", "-") if label_parts else f"{base_handle}".lower()
+                    variants.append({
+                        "color": color,
+                        "size": size,
+                        "sku": sku,
+                        "price": product.price_jpy or 0,
+                        "in_stock": in_stock,
+                        "image": color_img or "",
+                    })
+
+            # 過濾「無 color 無 size」的空 variant（如果同時有 colors 又有 sizes 就不會發生）
+            if len(variants) == 1 and not variants[0]["color"] and not variants[0]["size"]:
+                product.variants = []
+            else:
+                product.variants = variants
+
+            product.in_stock = (
+                any(v["in_stock"] for v in product.variants)
+                if product.variants
+                else True
+            )
 
             print(
-                f"[HumanMade] {'✅' if product.is_valid else '⚠️'} HTML 解析: "
-                f"{product.title} / ¥{product.price_jpy} / variants={len(product.variants)}"
+                f"[HumanMade] {'✅' if product.is_valid else '⚠️'} {product.title} / "
+                f"¥{product.price_jpy} / colors={colors} / "
+                f"sizes={[s for s, _ in sizes_with_stock]} / variants={len(product.variants)}"
             )
 
         except Exception as e:
@@ -107,260 +131,105 @@ class HumanMadeMixin:
         return product
 
     # ─────────────────────────────────────────────────────────────────
-    # ★ 診斷日誌 ★
+    # 標題
     # ─────────────────────────────────────────────────────────────────
     @staticmethod
-    def _humanmade_debug_html(html: str, url: str) -> None:
-        """印出 HTML 特徵，協助診斷哪個資料源缺失"""
-        size_kb = len(html) // 1024
-        features = {
-            'og:title': html.count('og:title'),
-            'og:price': html.count('og:price'),
-            'og:image': html.count('og:image'),
-            'application/json': html.count('application/json'),
-            'application/ld+json': html.count('application/ld+json'),
-            'ProductJson': html.count('ProductJson'),
-            'product-template': html.count('product-template'),
-            'data-product-json': html.count('data-product-json'),
-            'data-product': html.count('data-product'),
-            '"variants"': html.count('"variants"'),
-            '"options"': html.count('"options"'),
-            '"option1"': html.count('"option1"'),
-            'cart/add': html.count('cart/add'),
-            'select name': html.count('select name'),
-            'var meta': html.count('var meta'),
-            'ShopifyAnalytics': html.count('ShopifyAnalytics'),
-            '<form': html.count('<form'),
-            'price-item': html.count('price-item'),
-            'product__price': html.count('product__price'),
-            '￥': html.count('￥'),
-            '¥': html.count('¥'),
-        }
-        non_zero = {k: v for k, v in features.items() if v > 0}
-        print(f"[HumanMade][debug] HTML size={size_kb}KB, url={url}")
-        print(f"[HumanMade][debug] 特徵: {non_zero}")
+    def _humanmade_extract_title(soup: BeautifulSoup, product: ProductInfo) -> None:
+        # 優先 h1.product-name
+        h1 = soup.find("h1", class_=re.compile(r'product-name'))
+        if h1:
+            text = h1.get_text(strip=True)
+            if text:
+                product.title = text
+                return
 
-        # 抽出前 3 個 ¥xxx 的上下文
-        for i, m in enumerate(re.finditer(r'[¥￥]\s*[\d,]+', html)):
-            if i >= 3:
-                break
-            start = max(0, m.start() - 40)
-            end = min(len(html), m.end() + 40)
-            ctx = html[start:end].replace('\n', ' ').replace('\t', ' ')
-            print(f"[HumanMade][debug] ¥ 上下文 #{i}: ...{ctx}...")
+        # 普通 h1
+        h1 = soup.find("h1")
+        if h1:
+            text = h1.get_text(strip=True)
+            if text and "HUMAN MADE Inc" not in text:
+                product.title = text
+                return
+
+        # og:title fallback（會包含 HUMAN MADE Inc. 後綴，要清理）
+        og = soup.find("meta", attrs={"property": "og:title"})
+        if og and og.get("content"):
+            text = og["content"].strip()
+            # 移除「HUMAN MADE AIR FORCE 1 '01 / LO2 – HUMAN MADE Inc.」尾綴
+            text = re.sub(r'\s*[–\-]\s*HUMAN MADE Inc\.?\s*$', '', text, flags=re.I)
+            text = re.sub(r'^HUMAN MADE\s+', '', text, flags=re.I)  # 去掉開頭 brand
+            product.title = text.strip()
 
     # ─────────────────────────────────────────────────────────────────
-    # 找 Shopify ProductJson（強化版）
+    # 價格
     # ─────────────────────────────────────────────────────────────────
-    def _humanmade_find_shopify_product_json(self, soup: BeautifulSoup, html: str) -> dict | None:
-        # Pattern 1+2: 任何 application/json script
-        for script in soup.find_all("script", attrs={"type": "application/json"}):
-            attrs = script.attrs
-            sid = (attrs.get("id") or "").lower()
-
-            # 命名特徵
-            is_product_script = (
-                'productjson' in sid.replace('-', '').replace('_', '')
-                or 'product-json' in sid
-                or 'product-template' in sid
-                or 'data-product-json' in attrs
-                or 'data-product' in attrs
-                or 'product' in (attrs.get('data-section-type', '') or '').lower()
-            )
-
-            text = script.string or ''
-            # 內容特徵
-            has_variants = '"variants"' in text and ('"options"' in text or '"option1"' in text)
-
-            if not (is_product_script or has_variants):
+    def _humanmade_extract_price(self, soup: BeautifulSoup, html: str, product: ProductInfo) -> None:
+        # ① JSON-LD offers.price（最準）
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "{}")
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("@type") not in ("Product", "ProductGroup"):
+                        continue
+                    offers = item.get("offers")
+                    if isinstance(offers, dict):
+                        v = self._humanmade_price_to_int(offers.get("price") or offers.get("lowPrice"))
+                        if v:
+                            product.price_jpy = v
+                            print(f"[HumanMade] price from JSON-LD: {v}")
+                            return
+                    elif isinstance(offers, list):
+                        for off in offers:
+                            if isinstance(off, dict):
+                                v = self._humanmade_price_to_int(off.get("price"))
+                                if v:
+                                    product.price_jpy = v
+                                    print(f"[HumanMade] price from JSON-LD list: {v}")
+                                    return
+            except (json.JSONDecodeError, AttributeError):
                 continue
 
-            try:
-                data = json.loads(text)
-            except (json.JSONDecodeError, TypeError):
-                continue
+        # ② <span class="value" content="22550"> （SFCC 標準）
+        for span in soup.find_all("span", attrs={"content": True}):
+            content = span.get("content", "")
+            v = self._humanmade_price_to_int(content)
+            if v:
+                # 確認在 .sales 或 .price 區塊內，避免抓到別的 content 屬性
+                parent_classes = " ".join(
+                    " ".join(p.get("class", [])) for p in span.parents if p.name
+                )
+                if any(kw in parent_classes for kw in ["sales", "price", "value"]):
+                    product.price_jpy = v
+                    print(f"[HumanMade] price from span[content]: {v}")
+                    return
 
-            # 可能是 {product: {...}} 或直接 {...}
-            candidates = []
-            if isinstance(data, dict):
-                if self._is_valid_product_data(data):
-                    candidates.append(data)
-                if 'product' in data and isinstance(data['product'], dict):
-                    candidates.append(data['product'])
+        # ③ <span class="sales"> 內的文字
+        sales_el = soup.find("span", class_="sales") or soup.find(class_=re.compile(r"price-sales|product-price"))
+        if sales_el:
+            text = sales_el.get_text(" ", strip=True)
+            m = re.search(r'[¥￥]\s*([\d,]+)', text)
+            if m:
+                v = self._humanmade_price_to_int(m.group(1))
+                if v:
+                    product.price_jpy = v
+                    print(f"[HumanMade] price from .sales text: {v}")
+                    return
 
-            for c in candidates:
-                if self._is_valid_product_data(c):
-                    print(f"[HumanMade] 命中 ProductJson: id={sid or '(none)'}, attrs={list(attrs.keys())}")
-                    return c
+        # ④ gtm-data 含 product.price (number)
+        gtm = self._humanmade_parse_gtm_data(soup)
+        if gtm:
+            p_info = gtm.get("product") or {}
+            if isinstance(p_info, dict):
+                v = self._humanmade_price_to_int(p_info.get("price"))
+                if v:
+                    product.price_jpy = v
+                    print(f"[HumanMade] price from gtm-data: {v}")
+                    return
 
-        # Pattern 3: 直接從 raw HTML regex（萬一 script 被切碎）
-        # Shopify 的 product JSON 通常是 {"id":NUMBER,"title":"...","handle":"...","variants":[...]
-        m = re.search(
-            r'\{"id":\d+,"title":"[^"]+","handle":"[^"]+"[^{]*?"variants":\[.*?\}\s*\]',
-            html,
-            re.DOTALL,
-        )
-        if m:
-            try:
-                # 試著找完整的 JSON 物件（從 { 開始平衡 brackets）
-                start = m.start()
-                depth = 0
-                for i in range(start, min(start + 200_000, len(html))):
-                    if html[i] == '{':
-                        depth += 1
-                    elif html[i] == '}':
-                        depth -= 1
-                        if depth == 0:
-                            chunk = html[start:i + 1]
-                            data = json.loads(chunk)
-                            if self._is_valid_product_data(data):
-                                print(f"[HumanMade] 命中 raw HTML regex ProductJson")
-                                return data
-                            break
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        return None
-
-    @staticmethod
-    def _is_valid_product_data(data: dict) -> bool:
-        if not isinstance(data, dict):
-            return False
-        variants = data.get("variants")
-        if not isinstance(variants, list) or len(variants) == 0:
-            return False
-        return bool(data.get("title") or data.get("handle"))
-
-    # ─────────────────────────────────────────────────────────────────
-    # window.meta
-    # ─────────────────────────────────────────────────────────────────
-    def _humanmade_find_window_meta(self, html: str) -> dict | None:
-        patterns = [
-            r'var\s+meta\s*=\s*({[^;]*?});',
-            r'window\.meta\s*=\s*({[^;]*?});',
-            r'window\.ShopifyAnalytics\.meta\s*=\s*({[^;]*?});',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, html, re.DOTALL):
-                try:
-                    data = json.loads(m.group(1))
-                    if isinstance(data, dict) and "product" in data:
-                        prod = data["product"]
-                        if isinstance(prod, dict) and prod.get("variants"):
-                            return prod
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-        return None
-
-    # ─────────────────────────────────────────────────────────────────
-    # 解析 Shopify product 物件
-    # ─────────────────────────────────────────────────────────────────
-    def _humanmade_parse_shopify_product(self, p: dict, product: ProductInfo, handle: str | None) -> None:
-        try:
-            title = p.get("title") or ""
-            if title:
-                product.title = title
-
-            vendor = p.get("vendor") or ""
-            if vendor:
-                product.brand = vendor
-
-            body = p.get("body_html") or p.get("description") or ""
-            if body:
-                product.description = BeautifulSoup(body, "html.parser").get_text("\n", strip=True)[:3000]
-
-            images = []
-            for img in (p.get("images") or []):
-                src = img.get("src") if isinstance(img, dict) else (img if isinstance(img, str) else None)
-                if src:
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    images.append(src)
-            if images:
-                product.image_url = images[0]
-                product.extra_images = images[1:8]
-
-            options = p.get("options") or []
-            color_idx = -1
-            size_idx = -1
-            for i, opt in enumerate(options):
-                if isinstance(opt, dict):
-                    name = (opt.get("name") or "").lower()
-                elif isinstance(opt, str):
-                    name = opt.lower()
-                else:
-                    continue
-                if any(k in name for k in ["color", "colour", "カラー", "色"]):
-                    color_idx = i
-                elif any(k in name for k in ["size", "サイズ", "尺寸"]):
-                    size_idx = i
-
-            variants_raw = p.get("variants") or []
-            color_to_image: dict[str, str] = {}
-
-            for v in variants_raw:
-                if not isinstance(v, dict):
-                    continue
-                color = ""
-                if color_idx >= 0:
-                    color = (v.get(f"option{color_idx + 1}") or "").strip()
-                feat = v.get("featured_image")
-                if color and feat:
-                    img_src = feat.get("src") if isinstance(feat, dict) else feat
-                    if img_src and color not in color_to_image:
-                        if img_src.startswith("//"):
-                            img_src = "https:" + img_src
-                        color_to_image[color] = img_src
-
-            if color_to_image and not product.image_url:
-                product.image_url = next(iter(color_to_image.values()))
-
-            prices = []
-            for v in variants_raw:
-                if isinstance(v, dict):
-                    val = self._humanmade_price_to_int(v.get("price"))
-                    if val:
-                        prices.append(val)
-            if prices:
-                product.price_jpy = min(prices)
-
-            variant_list = []
-            for v in variants_raw:
-                if not isinstance(v, dict):
-                    continue
-                color = ""
-                size = ""
-                if color_idx >= 0:
-                    color = (v.get(f"option{color_idx + 1}") or "").strip()
-                if size_idx >= 0:
-                    size = (v.get(f"option{size_idx + 1}") or "").strip()
-
-                if not color and not size:
-                    o1 = (v.get("option1") or "").strip()
-                    if o1:
-                        size = o1
-
-                v_price = self._humanmade_price_to_int(v.get("price")) or product.price_jpy or 0
-                v_avail = v.get("available", True)
-
-                variant_image = color_to_image.get(color) or product.image_url
-
-                label_parts = [pp for pp in [color, size] if pp]
-                base_handle = handle or "hm"
-                variant_list.append({
-                    "color": color,
-                    "size": size,
-                    "sku": (v.get("sku") or f"{base_handle}-{'-'.join(label_parts)}").lower().replace(" ", "-"),
-                    "price": v_price,
-                    "in_stock": bool(v_avail),
-                    "image": variant_image or "",
-                })
-
-            product.variants = variant_list
-            product.in_stock = any(vv["in_stock"] for vv in variant_list) if variant_list else True
-
-        except Exception as e:
-            print(f"[HumanMade] ❌ Shopify product 解析錯誤: {type(e).__name__}: {e}")
+        print(f"[HumanMade] ⚠️ 無法抓到價格")
 
     @staticmethod
     def _humanmade_price_to_int(value) -> int | None:
@@ -369,7 +238,7 @@ class HumanMadeMixin:
         if isinstance(value, (int, float)):
             v = int(value)
         else:
-            s = str(value).strip()
+            s = str(value).strip().replace(",", "")
             if not s:
                 return None
             try:
@@ -381,188 +250,214 @@ class HumanMadeMixin:
         return None
 
     # ─────────────────────────────────────────────────────────────────
-    # 完全 fallback
+    # 圖片
     # ─────────────────────────────────────────────────────────────────
-    def _humanmade_parse_html_full(self, soup: BeautifulSoup, html: str, product: ProductInfo, handle: str | None) -> None:
-        # 標題
-        if not product.title:
-            og_title = soup.find("meta", attrs={"property": "og:title"})
-            if og_title and og_title.get("content"):
-                product.title = og_title["content"].strip()
-            elif soup.find("h1"):
-                product.title = soup.find("h1").get_text(strip=True)
+    @staticmethod
+    def _humanmade_extract_images(soup: BeautifulSoup, product: ProductInfo) -> None:
+        urls: list[str] = []
+        seen: set[str] = set()
 
-        # 圖片
-        if not product.image_url:
-            og_img = soup.find("meta", attrs={"property": "og:image"})
-            if og_img and og_img.get("content"):
-                product.image_url = og_img["content"]
+        # 主要：.primary-images .swiper-slide img[data-zoom]
+        primary = soup.find(class_="primary-images")
+        if primary:
+            for img in primary.find_all("img"):
+                # data-zoom 是高解析版（2000x2000），優先
+                src = img.get("data-zoom") or img.get("src") or ""
+                if not src:
+                    continue
+                # 過濾本地檔案路徑（HTML 存檔時的 ./xxx_files/）
+                if src.startswith("./") or "_files/" in src:
+                    # 從 alt / data-zoom 找原始 URL
+                    src = img.get("data-zoom", "")
+                if not src or not src.startswith("http"):
+                    continue
+                if src in seen:
+                    continue
+                seen.add(src)
+                urls.append(src)
 
-        # 價格 candidates
-        price_candidates = []
+        # Fallback: og:image
+        if not urls:
+            og = soup.find("meta", attrs={"property": "og:image"})
+            if og and og.get("content"):
+                urls.append(og["content"])
 
-        for sel in [
-            {"property": "og:price:amount"},
-            {"property": "product:price:amount"},
-        ]:
-            el = soup.find("meta", attrs=sel)
-            if el and el.get("content"):
-                v = self._humanmade_price_to_int(el["content"])
-                if v:
-                    price_candidates.append(("og:price", v))
+        # Fallback: JSON-LD image
+        if not urls:
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string or "{}")
+                    items = data if isinstance(data, list) else [data]
+                    for item in items:
+                        if isinstance(item, dict) and item.get("@type") == "Product":
+                            img = item.get("image")
+                            if isinstance(img, list):
+                                urls.extend([u for u in img if isinstance(u, str)])
+                            elif isinstance(img, str):
+                                urls.append(img)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
 
-        # JSON-LD（含 title 比對）
+        if urls:
+            product.image_url = urls[0]
+            product.extra_images = urls[1:8]
+
+    # ─────────────────────────────────────────────────────────────────
+    # 顏色
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _humanmade_extract_colors(soup: BeautifulSoup) -> tuple[list[str], dict[str, str]]:
+        """
+        回傳 (colors, color_image_map)
+        SFCC 結構:
+        <div data-attr="color">
+          <button class="attribute-item--color">
+            <span data-attr-value="NAVY" style="background-image: url(...)"></span>
+            <span id="NAVY">NAVY</span>
+          </button>
+        </div>
+        """
+        colors: list[str] = []
+        color_image_map: dict[str, str] = {}
+        seen: set[str] = set()
+
+        wrappers = soup.find_all(attrs={"data-attr": "color"})
+        if not wrappers:
+            wrappers = soup.find_all(class_=re.compile(r"attribute-values-wrapper--color"))
+
+        for wrapper in wrappers:
+            for btn in wrapper.find_all("button"):
+                # 取顏色名稱
+                swatch_span = btn.find("span", attrs={"data-attr-value": True})
+                color_name = ""
+                if swatch_span:
+                    color_name = (swatch_span.get("data-attr-value") or "").strip()
+
+                if not color_name:
+                    aria = btn.get("aria-label", "")
+                    m = re.search(r'Color\s+(\S+)', aria, re.I)
+                    if m:
+                        color_name = m.group(1).strip()
+
+                if not color_name or color_name in seen:
+                    continue
+                seen.add(color_name)
+                colors.append(color_name)
+
+                # 顏色 swatch 圖
+                if swatch_span:
+                    style = swatch_span.get("style", "")
+                    m_bg = re.search(
+                        r'background-image\s*:\s*url\([\'"]?([^\'")\s]+)[\'"]?\)',
+                        style,
+                    )
+                    if m_bg:
+                        img_path = m_bg.group(1)
+                        if img_path.startswith("/"):
+                            img_path = _SFCC_IMAGE_BASE + img_path
+                        color_image_map[color_name] = img_path
+
+        return colors, color_image_map
+
+    # ─────────────────────────────────────────────────────────────────
+    # 尺寸（含庫存）
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _humanmade_extract_sizes(soup: BeautifulSoup) -> list[tuple[str, bool]]:
+        """
+        回傳 [(size, in_stock), ...]
+        SFCC 結構:
+        <button class="attribute-item--size selectable" data-attr-value="23.5cm">  ← 有貨
+        <button class="attribute-item--size">  (無 selectable) ← 缺貨
+        """
+        sizes: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+
+        # 找所有 size 按鈕
+        buttons = soup.find_all("button", class_=re.compile(r"attribute-item--size"))
+
+        for btn in buttons:
+            size_name = (btn.get("data-attr-value") or "").strip()
+            if not size_name:
+                # fallback: 從 aria-label 抽
+                aria = btn.get("aria-label", "")
+                m = re.search(r'Size\s+(\S+)', aria, re.I)
+                if m:
+                    size_name = m.group(1).strip()
+            if not size_name:
+                # fallback: span.size-value 的文字
+                span = btn.find("span", class_=re.compile(r"size-value"))
+                if span:
+                    size_name = span.get_text(strip=True)
+
+            if not size_name or size_name in seen:
+                continue
+            seen.add(size_name)
+
+            # 庫存判斷：有 selectable class 視為有貨
+            classes = btn.get("class", [])
+            classes_str = " ".join(classes) if isinstance(classes, list) else str(classes)
+            in_stock = "selectable" in classes_str
+
+            sizes.append((size_name, in_stock))
+
+        return sizes
+
+    # ─────────────────────────────────────────────────────────────────
+    # 描述
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _humanmade_extract_description(soup: BeautifulSoup, html: str, product: ProductInfo) -> None:
+        if product.description:
+            return
+
+        # 優先 JSON-LD（已含 HTML 格式）
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "{}")
                 items = data if isinstance(data, list) else [data]
                 for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("@type") not in ("Product", "ProductGroup"):
-                        continue
-                    item_name = (item.get("name") or "").lower()
-                    if product.title and item_name:
-                        # 寬鬆比對：互相包含或共享關鍵字
-                        title_lower = product.title.lower()
-                        if item_name not in title_lower and title_lower not in item_name:
-                            # 至少要共享 3 個字以上的關鍵詞
-                            shared = set(re.findall(r'[a-z0-9]+', item_name)) & set(re.findall(r'[a-z0-9]+', title_lower))
-                            if not any(len(s) >= 3 for s in shared):
-                                continue
-                    offers = item.get("offers")
-                    if isinstance(offers, dict):
-                        v = self._humanmade_price_to_int(offers.get("price") or offers.get("lowPrice"))
-                        if v:
-                            price_candidates.append(("ld+json", v))
-                    elif isinstance(offers, list):
-                        for off in offers:
-                            if isinstance(off, dict):
-                                v = self._humanmade_price_to_int(off.get("price"))
-                                if v:
-                                    price_candidates.append(("ld+json", v))
+                    if isinstance(item, dict) and item.get("@type") == "Product":
+                        desc = item.get("description", "")
+                        if desc and len(desc) > 30:
+                            product.description = BeautifulSoup(desc, "html.parser").get_text("\n", strip=True)[:3000]
+                            return
             except (json.JSONDecodeError, AttributeError):
                 continue
 
-        # Shopify CDN 元素：.product__price, .price-item, [data-price]
-        for sel in ['.product__price', '.price-item', '.price', '[data-price]', '.money']:
-            try:
-                for el in soup.select(sel):
-                    text = el.get_text(strip=True)
-                    data_price = el.get('data-price', '')
-                    for src in [data_price, text]:
-                        if not src:
-                            continue
-                        m = re.search(r'([\d,]{4,})', src)
-                        if m:
-                            v = self._humanmade_price_to_int(m.group(1))
-                            if v:
-                                price_candidates.append((sel, v))
-                                break
-            except Exception:
-                pass
-
-        # 文字 ¥xxxx（嚴格 4-7 位數）
-        page_text = soup.get_text(" ", strip=True)
-        for m in re.finditer(r'[¥￥]\s*([1-9]\d{0,2}(?:,\d{3})+|\d{4,7})', page_text):
-            v = self._humanmade_price_to_int(m.group(1))
-            if v:
-                price_candidates.append(("text", v))
-
-        if price_candidates:
-            from collections import Counter
-            counter = Counter(v for _, v in price_candidates)
-            max_count = max(counter.values())
-            top_prices = [v for v, c in counter.items() if c == max_count]
-            product.price_jpy = max(top_prices)
-            print(f"[HumanMade] price candidates: {price_candidates} → 選 {product.price_jpy}")
-
-        # Variants
-        if not product.variants:
-            self._humanmade_extract_variants_from_form(soup, product, handle)
-
-    def _humanmade_extract_variants_from_form(self, soup: BeautifulSoup, product: ProductInfo, handle: str | None) -> None:
-        forms = soup.find_all("form", action=re.compile(r'/cart/add'))
-        for form in forms:
-            select = (
-                form.find("select", attrs={"name": "id"})
-                or form.find("select", attrs={"name": re.compile(r'^id$|^variants', re.I)})
-            )
-            if not select:
-                continue
-
-            base_handle = handle or "hm"
-            variants = []
-            for opt in select.find_all("option"):
-                value = opt.get("value", "").strip()
-                if not value or not value.isdigit():
-                    continue
-                label = opt.get_text(strip=True)
-                if not label:
-                    continue
-
-                lower = label.lower()
-                available = not any(kw in lower for kw in ["sold out", "売り切れ", "在庫切れ", "soldout", "完売"])
-                clean_label = re.sub(
-                    r'\s*[-–—]?\s*(sold\s*out|売り切れ|在庫切れ|完売)\s*$',
-                    '',
-                    label,
-                    flags=re.I,
-                ).strip()
-
-                parts = [p.strip() for p in re.split(r'\s*/\s*', clean_label) if p.strip()]
-                if len(parts) >= 2:
-                    color, size = parts[0], parts[1]
-                elif len(parts) == 1:
-                    p0 = parts[0]
-                    is_size = bool(re.match(r'^[\d.]+(?:cm|inch)?$|^(XS|S|M|L|XL|XXL|2XL|3XL|FREE|ONE\s*SIZE)$', p0, re.I))
-                    if is_size:
-                        color, size = "", p0
-                    else:
-                        color, size = p0, ""
-                else:
-                    color, size = "", ""
-
-                label_parts = [pp for pp in [color, size] if pp]
-                variants.append({
-                    "color": color,
-                    "size": size,
-                    "sku": f"{base_handle}-{'-'.join(label_parts)}".lower().replace(" ", "-") if label_parts else f"{base_handle}-{value}",
-                    "price": product.price_jpy or 0,
-                    "in_stock": available,
-                    "image": product.image_url,
-                })
-
-            if variants:
-                product.variants = variants
-                product.in_stock = any(v["in_stock"] for v in variants)
-                print(f"[HumanMade] 從 <form> 抽出 {len(variants)} 個 variants")
-                return
-
-        # form 也找不到的話，嘗試 [data-variants] 或 swatch 元素
-        # 從 <option> 直接掃（不限 form 內）
-        select = soup.find("select", attrs={"name": re.compile(r'^id$|variants', re.I)})
-        if select:
-            print(f"[HumanMade] 找到 select 但不在 form 內，嘗試解析")
-            base_handle = handle or "hm"
-            variants = []
-            for opt in select.find_all("option"):
-                value = opt.get("value", "").strip()
-                label = opt.get_text(strip=True)
-                if value and value.isdigit() and label:
-                    variants.append({
-                        "color": "",
-                        "size": label,
-                        "sku": f"{base_handle}-{value}",
-                        "price": product.price_jpy or 0,
-                        "in_stock": True,
-                        "image": product.image_url,
-                    })
-            if variants:
-                product.variants = variants
+        # Fallback: .product-description / .description
+        for sel in [
+            {"class_": re.compile(r"product-description")},
+            {"class_": re.compile(r"description")},
+        ]:
+            el = soup.find(**sel)
+            if el:
+                text = el.get_text("\n", strip=True)
+                if 30 < len(text) < 5000:
+                    product.description = text
+                    return
 
     # ─────────────────────────────────────────────────────────────────
-    # HTML 抓取（強化等待 + 滾動）
+    # gtm-data 解析
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _humanmade_parse_gtm_data(soup: BeautifulSoup) -> dict | None:
+        el = soup.find("input", attrs={"id": "gtm-data"})
+        if not el:
+            return None
+        raw = el.get("value", "")
+        if not raw:
+            return None
+        # value 是 HTML-encoded JSON，BeautifulSoup 已自動 decode
+        # 但可能有 &quot; 等殘留，先 unescape 一次保險
+        raw = html_lib.unescape(raw)
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    # ─────────────────────────────────────────────────────────────────
+    # HTML 抓取
     # ─────────────────────────────────────────────────────────────────
     async def _humanmade_fetch_html(self, url: str) -> str | None:
         with self._driver_lock:
@@ -588,10 +483,10 @@ class HumanMadeMixin:
                     best_html = ""
                     best_score = 0
 
-                    for i in range(10):
+                    for i in range(8):
                         _time.sleep(2)
                         try:
-                            # 關閉彈窗 + 滾動觸發 lazy load
+                            # 關閉 Global-e 彈窗
                             driver.execute_script("""
                                 const ge = document.getElementById('globalePopupWrapper');
                                 if (ge) ge.remove();
@@ -600,8 +495,6 @@ class HumanMadeMixin:
                                         if (getComputedStyle(el).position === 'fixed') el.remove();
                                     } catch(e) {}
                                 });
-                                window.scrollTo(0, document.body.scrollHeight / 2);
-                                window.scrollTo(0, 0);
                             """)
                         except Exception:
                             pass
@@ -614,22 +507,20 @@ class HumanMadeMixin:
                                 break
                             continue
 
-                        # 評分：哪些關鍵特徵已經出現
+                        # SFCC 特徵評分（這次精準！）
                         score = 0
-                        if 'ProductJson' in html: score += 5
-                        if '"variants"' in html: score += 5
-                        if 'cart/add' in html: score += 3
-                        if '<select name="id"' in html: score += 3
-                        if 'og:price' in html: score += 2
-                        if 'product__price' in html: score += 2
-                        if 'application/ld+json' in html: score += 1
+                        if 'product-name' in html: score += 5
+                        if 'attribute-item--size' in html: score += 5
+                        if 'attribute-item--color' in html: score += 3
+                        if 'gtm-data' in html: score += 3
+                        if 'application/ld+json' in html: score += 2
+                        if 'primary-images' in html: score += 2
 
                         if score > best_score:
                             best_score = score
                             best_html = html
 
-                        # 命中關鍵特徵就提早回傳
-                        if i >= 1 and score >= 5 and len(html) > 5000:
+                        if i >= 1 and score >= 8 and len(html) > 5000:
                             print(f"[HumanMade][fetch] iter={i}, score={score}, size={len(html)//1024}KB ✓")
                             return html
 
@@ -638,9 +529,8 @@ class HumanMadeMixin:
                         self._create_driver()
                         continue
 
-                    # 沒命中高分，回傳分數最高的版本
                     if best_html and len(best_html) > 5000:
-                        print(f"[HumanMade][fetch] 用最佳版本: score={best_score}, size={len(best_html)//1024}KB")
+                        print(f"[HumanMade][fetch] 最佳: score={best_score}, size={len(best_html)//1024}KB")
                         return best_html
 
                     return None
