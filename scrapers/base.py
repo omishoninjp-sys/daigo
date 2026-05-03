@@ -57,6 +57,11 @@ BLOCKED_DOMAINS = {
         "dokodemo（どこでも）為日本代購轉送平台，本服務不代購其他代購平台的商品。"
         "如需代購，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。"
 ),
+    "hoka.com": (
+        "HOKA 官網因採用嚴格的反爬蟲系統（DataDome），自動代購系統暫時無法抓取商品資料。"
+        "如需代購 HOKA 商品，請於 LINE @544kaytb 直接傳送商品截圖、款式、尺寸與顏色，"
+        "我們將為您手動報價並建立訂單。造成不便敬請見諒。"
+    ),
 }
 
 
@@ -124,8 +129,6 @@ def detect_platform(url: str) -> str:
     # queue-it 排隊系統的 URL（c=takaratomy 表示是 takaratomy 的 queue）
     if "queue-it.net" in host and "takaratomy" in url.lower():
         return "takaratomy"
-    if "hoka.com" in host:
-        return "hoka"
     if "newbalance.jp" in host:
         return "newbalance"
     if "adidas.jp" in host:

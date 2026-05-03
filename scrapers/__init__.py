@@ -46,7 +46,6 @@ from scrapers.shimamura import ShimamuraMixin
 from scrapers.npb import NpbMixin
 from scrapers.disney import DisneyMixin
 from scrapers.yoshidakaban import YoshidaKabanMixin
-from scrapers.hoka import HokaMixin  # ← 新增
 from scrapers.makeshop import MakeShopMixin
 
 
@@ -75,7 +74,6 @@ class Scraper(
     NpbMixin,
     DisneyMixin,
     YoshidaKabanMixin,
-    HokaMixin,  # ← 新增
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -179,8 +177,6 @@ class Scraper(
             product = await self._scrape_disney(url)
         elif platform == "yoshidakaban":
             product = await self._scrape_yoshidakaban(url)
-        elif platform == "hoka":  # ← 新增
-            product = await self._scrape_hoka(url)
         elif platform == "makeshop":
             product = await self._scrape_makeshop(url)
         elif "oakley.com" in url:
