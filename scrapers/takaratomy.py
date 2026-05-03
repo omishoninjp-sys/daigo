@@ -6,16 +6,19 @@ takaratomy.py – タカラトミー商品ページ爬蟲
    - Shift_JIS 編碼
    - 主資料源：JSON-LD <script type="application/ld+json">
    - 圖片路徑：/img/goods/<dir>/<goods_id>_<hash>.jpg
+   - ⚠️ 圖片有防盜鏈（hotlink protection）→ 必須在 scraper 內下載成 base64
 2. beyblade.takaratomy.co.jp（旧 brand site）→ 舊邏輯保留
 
 httpx がトップページにリダイレクトされるため SeleniumBase UC を使用。
 """
 import asyncio
+import base64
 import json
 import re
 import time
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.base import ProductInfo
@@ -92,6 +95,15 @@ class TakaratomyMixin:
         if images:
             product.image_url = images[0]
             product.extra_images = images[1:10]
+
+        # ── ★ 防盜鏈處理：下載主圖成 base64（給 Shopify 上架用）★ ──
+        if product.image_url:
+            b64 = await self._takaratomymall_download_image_base64(product.image_url, url)
+            if b64:
+                product.image_base64 = b64
+                print(f"[Takaratomy] ✅ 主圖已轉 base64 ({len(b64)} chars)")
+            else:
+                print(f"[Takaratomy] ⚠️ 主圖 base64 下載失敗，Shopify 上架可能會失敗")
 
         # ── 品牌 ──
         product.brand = "タカラトミー"
@@ -315,6 +327,125 @@ class TakaratomyMixin:
                 result.append(url)
 
         return result
+
+    async def _takaratomymall_download_image_base64(self, image_url: str, referer_url: str) -> str:
+        """
+        下載 takaratomymall 圖片成 base64
+
+        策略（依序嘗試）：
+        1. driver fetch（最可靠 - 沿用已建立的 session/cookie）
+        2. httpx with Referer header（fallback）
+
+        失敗時回傳空字串。
+        """
+        # ── 策略 1：用 driver 在頁面內 fetch 圖片 ───────────────────────
+        # 因為 driver 剛剛訪問過商品頁，cookie / Cloudflare clearance 都在
+        try:
+            b64 = await asyncio.to_thread(self._takaratomy_driver_fetch_image, image_url)
+            if b64:
+                return b64
+        except Exception as e:
+            print(f"[Takaratomy] driver fetch image 失敗: {type(e).__name__}: {e}")
+
+        # ── 策略 2：httpx + Referer fallback ───────────────────────────
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+            "Referer": referer_url or "https://takaratomymall.jp/",
+            "Sec-Fetch-Dest": "image",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        try:
+            async with httpx.AsyncClient(
+                headers=headers,
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(image_url)
+                if resp.status_code != 200:
+                    print(
+                        f"[Takaratomy] httpx 圖片下載失敗 status={resp.status_code}: {image_url[:80]}"
+                    )
+                    return ""
+                ctype = resp.headers.get("content-type", "").lower()
+                if not any(t in ctype for t in ["image/", "octet-stream"]):
+                    print(f"[Takaratomy] 非圖片類型: {ctype}")
+                    return ""
+                if len(resp.content) < 1024:
+                    print(f"[Takaratomy] 圖片過小: {len(resp.content)} bytes")
+                    return ""
+                return base64.b64encode(resp.content).decode("ascii")
+        except Exception as e:
+            print(f"[Takaratomy] httpx 例外: {type(e).__name__}: {e}")
+            return ""
+
+    def _takaratomy_driver_fetch_image(self, image_url: str) -> str:
+        """
+        在 driver 內執行 JS 用 fetch() 取得圖片，轉 base64
+        利用 driver 已有的 cookie / Referer 自動繞過防盜鏈
+        """
+        try:
+            driver = self._ensure_driver()
+            if not driver:
+                return ""
+
+            # 用 fetch + FileReader 把 blob 轉成 base64 dataURL
+            # 注意：image_url 帶單引號要 escape
+            safe_url = image_url.replace("'", "\\'").replace("\n", "")
+            script = f"""
+            const url = '{safe_url}';
+            const callback = arguments[arguments.length - 1];
+            (async () => {{
+              try {{
+                const r = await fetch(url, {{credentials: 'include'}});
+                if (!r.ok) {{
+                  callback({{ok: false, status: r.status}});
+                  return;
+                }}
+                const blob = await r.blob();
+                if (blob.size < 1024) {{
+                  callback({{ok: false, status: 'small', size: blob.size}});
+                  return;
+                }}
+                const reader = new FileReader();
+                reader.onloadend = () => {{
+                  const dataUrl = reader.result;
+                  // dataUrl 格式: data:image/jpeg;base64,XXXX
+                  const idx = dataUrl.indexOf(',');
+                  const b64 = idx >= 0 ? dataUrl.substring(idx + 1) : '';
+                  callback({{ok: true, b64: b64, size: blob.size}});
+                }};
+                reader.onerror = () => callback({{ok: false, status: 'reader_error'}});
+                reader.readAsDataURL(blob);
+              }} catch (e) {{
+                callback({{ok: false, status: 'exception', msg: String(e)}});
+              }}
+            }})();
+            """
+            # set timeout
+            driver.set_script_timeout(20)
+            result = driver.execute_async_script(script)
+
+            if not isinstance(result, dict):
+                print(f"[Takaratomy] driver fetch 回傳非 dict: {result}")
+                return ""
+
+            if result.get("ok") and result.get("b64"):
+                size = result.get("size", "?")
+                print(f"[Takaratomy] driver fetch 成功 ({size} bytes)")
+                return result["b64"]
+            else:
+                print(f"[Takaratomy] driver fetch 失敗: {result}")
+                return ""
+        except Exception as e:
+            print(f"[Takaratomy] _takaratomy_driver_fetch_image 例外: {type(e).__name__}: {e}")
+            return ""
 
     # ─────────────────────────────────────────────────────────────────
     # 舊版 takaratomy.co.jp / beyblade.takaratomy.co.jp
