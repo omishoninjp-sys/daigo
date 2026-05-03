@@ -30,7 +30,7 @@ from scrapers.vermicular import VermicularMixin
 from scrapers.visvim import VisvimMixin
 from scrapers.grail import GrailMixin
 from scrapers.pokemoncenter import PokemonCenterMixin
-from scrapers.daytona_park import DaytonaParkMixin  # ← 新增
+from scrapers.daytona_park import DaytonaParkMixin
 from scrapers.runway import RunwayMixin
 from scrapers.takaratomy import TakaratomyMixin
 from scrapers.newbalance import NewBalanceMixin
@@ -45,7 +45,8 @@ from scrapers.biccamera import BiccameraMixin
 from scrapers.shimamura import ShimamuraMixin
 from scrapers.npb import NpbMixin
 from scrapers.disney import DisneyMixin
-from scrapers.yoshidakaban import YoshidaKabanMixin  # ← 新增
+from scrapers.yoshidakaban import YoshidaKabanMixin
+from scrapers.hoka import HokaMixin  # ← 新增
 from scrapers.makeshop import MakeShopMixin
 
 
@@ -58,7 +59,7 @@ class Scraper(
     VisvimMixin,
     GrailMixin,
     PokemonCenterMixin,
-    DaytonaParkMixin,  # ← 新增
+    DaytonaParkMixin,
     RunwayMixin,
     TakaratomyMixin,
     NewBalanceMixin,
@@ -73,7 +74,8 @@ class Scraper(
     ShimamuraMixin,
     NpbMixin,
     DisneyMixin,
-    YoshidaKabanMixin,  # ← 新增
+    YoshidaKabanMixin,
+    HokaMixin,  # ← 新增
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -145,7 +147,7 @@ class Scraper(
             product = await self._scrape_grail(url)
         elif platform == "pokemoncenter":
             product = await self._scrape_pokemoncenter(url)
-        elif platform == "daytona_park":  # ← 新增
+        elif platform == "daytona_park":
             product = await self._scrape_daytona_park(url)
         elif platform == "runway":
             product = await self._scrape_runway(url)
@@ -175,8 +177,10 @@ class Scraper(
             product = await self._scrape_npb(url)
         elif platform == "disney":
             product = await self._scrape_disney(url)
-        elif platform == "yoshidakaban":  # ← 新增
+        elif platform == "yoshidakaban":
             product = await self._scrape_yoshidakaban(url)
+        elif platform == "hoka":  # ← 新增
+            product = await self._scrape_hoka(url)
         elif platform == "makeshop":
             product = await self._scrape_makeshop(url)
         elif "oakley.com" in url:
