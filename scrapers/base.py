@@ -121,6 +121,9 @@ def detect_platform(url: str) -> str:
         return "runway"
     if "takaratomy.co.jp" in host or "takaratomymall.jp" in host:
         return "takaratomy"
+    # queue-it 排隊系統的 URL（c=takaratomy 表示是 takaratomy 的 queue）
+    if "queue-it.net" in host and "takaratomy" in url.lower():
+        return "takaratomy"
     if "newbalance.jp" in host:
         return "newbalance"
     if "adidas.jp" in host:

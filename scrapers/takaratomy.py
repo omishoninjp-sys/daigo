@@ -41,10 +41,27 @@ class TakaratomyMixin:
     # takaratomymall.jp
     # ─────────────────────────────────────────────────────────────────
     async def _scrape_takaratomymall(self, url: str, product: ProductInfo) -> ProductInfo:
-        html = await asyncio.to_thread(self._takaratomy_get_html, url)
+        # ⚠️ queue-it 偵測：如果 URL 已經是 queue-it.net，直接擲錯不快取
+        if "queue-it.net" in url:
+            print(f"[Takaratomy] ⚠️ 偵測到 queue-it 排隊頁面 URL: {url[:120]}")
+            raise ValueError(
+                "此商品目前處於タカラトミーモール線上排隊系統（queue-it），"
+                "暫時無法自動代購。請稍後（通常 30 分鐘 - 數小時後）再試一次，"
+                "或改在非熱門時段下單。"
+            )
+
+        html = await asyncio.to_thread(self._takaratomy_get_html_with_queue_handling, url)
         if not html:
             print(f"[Takaratomy] ❌ HTML 取得失敗: {url}")
             return product
+
+        # ⚠️ 抓到的 HTML 可能還是 queue-it 頁面（driver 等不到）
+        if self._takaratomy_is_queue_page(html):
+            print(f"[Takaratomy] ⚠️ HTML 內容為 queue-it 排隊頁，無法解析商品")
+            raise ValueError(
+                "タカラトミーモール正在排隊系統中，未能在限時內進入商品頁。"
+                "請稍後再試或聯絡客服。"
+            )
 
         soup = BeautifulSoup(html, "html.parser")
 
@@ -511,8 +528,30 @@ class TakaratomyMixin:
     # ─────────────────────────────────────────────────────────────────
     # HTML 抓取
     # ─────────────────────────────────────────────────────────────────
-    def _takaratomy_get_html(self, url: str) -> str:
-        """SeleniumBase UC で HTML 取得（driver 已自動處理編碼）"""
+    @staticmethod
+    def _takaratomy_is_queue_page(html: str) -> bool:
+        """偵測 HTML 是否為 queue-it 排隊頁"""
+        if not html:
+            return False
+        # queue-it 頁面特徵
+        markers = [
+            "queue-it.net",
+            "queueit",
+            "We are protecting your access to",
+            "You are now in line",
+            "Please wait while we connect you",
+            "あなたは現在順番待ちです",
+            "タカラトミーモールに接続中",
+        ]
+        return any(m in html for m in markers)
+
+    def _takaratomy_get_html_with_queue_handling(self, url: str, max_wait: int = 90) -> str:
+        """
+        取得 takaratomymall HTML，自動處理 queue-it 排隊
+        - 進入頁面後若被導去 queue-it.net，最多等 max_wait 秒
+        - 偵測到 URL 回到 takaratomymall.jp 才回傳 HTML
+        - 超時則回傳 queue 頁的 HTML（呼叫端會 raise）
+        """
         try:
             driver = self._ensure_driver()
             if not driver:
@@ -520,7 +559,52 @@ class TakaratomyMixin:
             self._clean_driver_tabs()
             driver.get(url)
             time.sleep(3)
+
+            # 檢查當下 URL 是否在 queue
+            for elapsed in range(0, max_wait, 5):
+                try:
+                    cur_url = driver.current_url
+                except Exception:
+                    cur_url = ""
+
+                if "queue-it.net" in cur_url:
+                    print(
+                        f"[Takaratomy] ⏳ 在 queue-it 排隊中... ({elapsed}s elapsed) "
+                        f"current_url={cur_url[:100]}"
+                    )
+                    time.sleep(5)
+                    continue
+                else:
+                    # 已脫離 queue
+                    if elapsed > 0:
+                        print(f"[Takaratomy] ✓ 通過 queue-it（等待 {elapsed}s）")
+                    break
+
             # 滾動觸發 lazy load
+            try:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+                time.sleep(1)
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(1)
+            except Exception:
+                pass
+
+            html = driver.page_source
+            self._driver_use_count += 1
+            return html
+        except Exception as e:
+            print(f"[Takaratomy] SeleniumBase 失敗: {type(e).__name__}: {e}")
+            return ""
+
+    def _takaratomy_get_html(self, url: str) -> str:
+        """SeleniumBase UC で HTML 取得（driver 已自動處理編碼）- 舊版 takaratomy.co.jp 用"""
+        try:
+            driver = self._ensure_driver()
+            if not driver:
+                return ""
+            self._clean_driver_tabs()
+            driver.get(url)
+            time.sleep(3)
             try:
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
                 time.sleep(1)
