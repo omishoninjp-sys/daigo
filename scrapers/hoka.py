@@ -395,48 +395,112 @@ class HokaMixin:
     # HTML 抓取
     # ─────────────────────────────────────────────────────────────────
     def _hoka_get_html(self, url: str) -> str:
-        """SeleniumBase UC 取得 HTML（hoka.com 用 Cloudflare）"""
+        """SeleniumBase UC 取得 HTML（hoka.com 用 Cloudflare WAF）"""
         try:
             driver = self._ensure_driver()
             if not driver:
+                print(f"[Hoka] driver 不可用")
                 return ""
             self._clean_driver_tabs()
-            try:
-                driver.uc_open_with_reconnect(url, reconnect_time=6)
-            except Exception:
-                driver.get(url)
-            time.sleep(3)
 
-            # 等到頁面有 ld+json 或 og:price 等關鍵特徵
+            # uc_open_with_reconnect 用更長 reconnect time 給 Cloudflare 過 challenge
+            try:
+                driver.uc_open_with_reconnect(url, reconnect_time=10)
+                print(f"[Hoka][fetch] uc_open 成功")
+            except Exception as e:
+                print(f"[Hoka][fetch] uc_open 失敗 → 改用 driver.get: {type(e).__name__}: {e}")
+                try:
+                    driver.get(url)
+                except Exception as e2:
+                    print(f"[Hoka][fetch] driver.get 也失敗: {e2}")
+                    return ""
+
+            time.sleep(4)
+
+            # 等到頁面有 ld+json 或 Cloudflare 過關
             best_html = ""
             best_score = 0
-            for i in range(6):
+            seen_titles: set[str] = set()
+
+            for i in range(10):
                 time.sleep(2)
                 try:
                     html = driver.page_source
-                except Exception:
+                    cur_url = driver.current_url
+                except Exception as e:
+                    print(f"[Hoka][fetch] iter={i} page_source 例外: {type(e).__name__}: {e}")
                     continue
 
+                # 偵測 Cloudflare challenge
+                lower = html.lower() if html else ""
+                is_cf_challenge = (
+                    "challenges.cloudflare.com" in lower
+                    or "checking your browser" in lower
+                    or "cf-browser-verification" in lower
+                    or "just a moment" in lower
+                )
+
+                # 標題（用於診斷）
+                title_m = re.search(r'<title[^>]*>([^<]+)</title>', html or "", re.IGNORECASE)
+                cur_title = title_m.group(1).strip()[:60] if title_m else "(no title)"
+
+                # 評分
                 score = 0
-                if 'application/ld+json' in html: score += 5
-                if '"@type":"Product"' in html or '"@type": "Product"' in html: score += 5
-                if 'data-attr="size"' in html: score += 3
-                if 'data-attr="color"' in html: score += 3
-                if 'options-select' in html: score += 2
+                if html:
+                    if 'application/ld+json' in html: score += 5
+                    if '"@type":"Product"' in html or '"@type": "Product"' in html: score += 5
+                    if 'data-attr="size"' in html: score += 3
+                    if 'data-attr="color"' in html: score += 3
+                    if 'options-select' in html: score += 2
+
+                if is_cf_challenge:
+                    print(f"[Hoka][fetch] iter={i} ⏳ Cloudflare challenge，繼續等...")
+                    continue
+
+                if cur_title not in seen_titles:
+                    seen_titles.add(cur_title)
+                    print(
+                        f"[Hoka][fetch] iter={i} score={score} size={len(html)//1024 if html else 0}KB "
+                        f"url={cur_url[:80]} title={cur_title!r}"
+                    )
 
                 if score > best_score:
                     best_score = score
                     best_html = html
-                if i >= 1 and score >= 8:
-                    print(f"[Hoka][fetch] iter={i}, score={score}, size={len(html)//1024}KB ✓")
+
+                # 命中關鍵特徵就提早回傳
+                if i >= 1 and score >= 8 and len(html) > 5000:
+                    print(f"[Hoka][fetch] ✓ iter={i} score={score} size={len(html)//1024}KB")
+                    self._driver_use_count += 1
                     return html
 
-            if best_html:
-                print(f"[Hoka][fetch] 最佳: score={best_score}, size={len(best_html)//1024}KB")
-                self._driver_use_count += 1
+            self._driver_use_count += 1
+
+            # 沒命中高分但有最佳版本就回傳
+            if best_html and len(best_html) > 5000:
+                print(f"[Hoka][fetch] 用最佳版本 score={best_score} size={len(best_html)//1024}KB")
                 return best_html
+
+            # 全部失敗，印出最後 HTML 的特徵幫助診斷
+            try:
+                final_html = driver.page_source
+                final_url = driver.current_url
+                print(
+                    f"[Hoka][fetch] ❌ 失敗 final_url={final_url[:100]} "
+                    f"size={len(final_html)//1024 if final_html else 0}KB"
+                )
+                # 印出 body 文字前 500 字
+                if final_html:
+                    body_m = re.search(r'<body[^>]*>(.*?)</body>', final_html, re.DOTALL | re.IGNORECASE)
+                    body_text = re.sub(r'<[^>]+>', ' ', body_m.group(1) if body_m else final_html)
+                    body_text = re.sub(r'\s+', ' ', body_text).strip()[:300]
+                    print(f"[Hoka][fetch] body preview: {body_text}")
+            except Exception:
+                pass
 
             return ""
         except Exception as e:
             print(f"[Hoka] driver 失敗: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return ""
