@@ -20,6 +20,18 @@ class ShopifyClient:
         options = []
         color_image_map = {}
 
+        # ★ DEBUG: 印出進來的 variants 原始結構（前 3 個）
+        if variants:
+            print(f"[Shopify][DEBUG] 收到 {len(variants)} 個 variants，前 3 個原始資料:")
+            for i, v in enumerate(variants[:3]):
+                print(f"  [{i}] type={type(v).__name__} content={v!r}")
+            # 統計：有多少 variant 的 price > 0
+            valid_price_count = sum(
+                1 for v in variants
+                if isinstance(v, dict) and v.get("price") and float(v.get("price", 0) or 0) > 0
+            )
+            print(f"[Shopify][DEBUG] 有效價格 variant 數: {valid_price_count}/{len(variants)}, 主價 price_jpy={price_jpy}")
+
         if variants and len(variants) > 0:
             has_color = any(v.get("color") for v in variants)
             has_size = any(v.get("size") for v in variants)
@@ -86,12 +98,23 @@ class ShopifyClient:
                     color_image_map[color] = img
 
             for v in variants:
-                variant_original_price = v.get("price", 0)
-                if variant_original_price and variant_original_price > 0:
+                # ★ 強化 price 解析：支援 int / float / str / None
+                raw_price = v.get("price", 0)
+                try:
+                    variant_original_price = int(float(raw_price)) if raw_price else 0
+                except (ValueError, TypeError):
+                    variant_original_price = 0
+
+                if variant_original_price > 0:
                     variant_pricing = calculate_selling_price(variant_original_price)
                     variant_selling_price = variant_pricing["selling_price_jpy"]
                 else:
                     variant_selling_price = price_jpy
+                    print(
+                        f"[Shopify][DEBUG] ⚠️ variant 無有效 price (raw={raw_price!r}, "
+                        f"size={v.get('size', '')!r}, color={v.get('color', '')!r}) → "
+                        f"fallback to price_jpy={price_jpy}"
+                    )
 
                 v_in_stock = v.get("in_stock", True)
                 sv = {
