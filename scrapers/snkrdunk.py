@@ -44,6 +44,27 @@ class SnkrdunkMixin:
             flags=re.IGNORECASE,
         )
 
+        # ── URL 標準化：所有 snkrdunk URL 都轉成 /products/<sku> 商品入口頁 ──
+        # snkrdunk 有多種 URL 格式：
+        #   /products/IO8765-100         ← 商品入口頁（含完整 JSON-LD，目標）
+        #   /buy/IO8765-100/size/        ← 購買選 size 頁（沒商品資料）
+        #   /buy/IO8765-100/size/26.5/   ← 購買特定 size 頁
+        #   /sell/IO8765-100             ← 出售頁
+        # 一律抽出 SKU 後重組為 /products/<sku>
+        sku_match = re.search(
+            r'snkrdunk\.com/(?:products|buy|sell)/([A-Z0-9_-]+)',
+            clean_url,
+            re.IGNORECASE,
+        )
+        if sku_match:
+            sku = sku_match.group(1)
+            standardized = f"https://snkrdunk.com/products/{sku}"
+            if standardized != clean_url:
+                print(f"[Snkrdunk] URL 標準化: {clean_url} → {standardized}")
+                clean_url = standardized
+                # 同時更新 source_url，讓商品頁顯示正確入口頁
+                product.source_url = clean_url
+
         html = await asyncio.to_thread(self._snkrdunk_get_html, clean_url)
         if not html:
             print(f"[Snkrdunk] ❌ HTML 取得失敗: {clean_url}")
@@ -56,25 +77,33 @@ class SnkrdunkMixin:
             ld = self._snkrdunk_find_product_jsonld(soup)
             if ld:
                 self._snkrdunk_apply_jsonld(ld, product, clean_url)
+            else:
+                print(f"[Snkrdunk] ⚠️ 找不到 JSON-LD Product schema（可能仍在 size picker 頁面）")
 
             # ── 標題 fallback ──
             if not product.title:
                 og = soup.find("meta", attrs={"property": "og:title"})
                 if og and og.get("content"):
                     title = og["content"].strip()
-                    # 去掉「｜スニダン」等尾巴
-                    title = re.split(r'\s*[｜\|]\s*(?:スニダン|SNKRDUNK)', title, flags=re.I)[0].strip()
-                    product.title = title
+                    # 跳過 size picker 頁的無意義標題
+                    if "サイズを選択" in title or "選擇尺寸" in title or "Select Size" in title.lower():
+                        print(f"[Snkrdunk] ⚠️ 仍在 size picker 頁，標題無效: {title}")
+                    else:
+                        # 去掉「｜スニダン」等尾巴
+                        title = re.split(r'\s*[｜\|]\s*(?:スニダン|SNKRDUNK|スニーカーダンク)', title, flags=re.I)[0].strip()
+                        product.title = title
 
-            # ── 圖片 fallback：og:image 主圖（不抓額外圖避免推薦商品干擾）──
+            # ── 圖片 fallback：og:image 主圖 ──
             if not product.image_url:
                 og_img = soup.find("meta", attrs={"property": "og:image"})
                 if og_img and og_img.get("content"):
-                    product.image_url = og_img["content"].strip()
+                    img = og_img["content"].strip()
+                    # 排除 snkrdunk 通用 logo
+                    if "og-image.png" not in img and "favicon" not in img:
+                        product.image_url = img
 
             # 主圖 size 改成 large（snkrdunk CDN 支援 ?size=l）
             if product.image_url and 'cdn.snkrdunk.com' in product.image_url:
-                # 去掉現有 size param，改加 size=l
                 product.image_url = re.sub(r'[?&]size=[a-z]+', '', product.image_url)
                 sep = '&' if '?' in product.image_url else '?'
                 product.image_url = f"{product.image_url}{sep}size=l"
