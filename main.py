@@ -1,6 +1,7 @@
 """
-GOYOUTATI DAIGO 代購系統 API v3.3
+GOYOUTATI DAIGO 代購系統 API v3.4
 - 快取 scrape 結果（30 分鐘）
+- 即時價格平台跳過 cache（snkrdunk、mercari 等）
 - 常駐 Chrome 實例
 - SEO 最佳化標題（ChatGPT 翻譯）
 - 併發限制 + 排隊機制 + 超時保護
@@ -8,6 +9,7 @@ GOYOUTATI DAIGO 代購系統 API v3.3
 import time
 import asyncio
 import traceback
+from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +27,30 @@ from seo_title import generate_seo_title
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
+
+# ──────────────────────────────────────────────────────────────────────
+# 即時價格平台白名單：這些域名不經 cache，每次都重新爬取
+# 因為 snkrdunk、mercari 等平台價格隨時變動，cache 舊價會誤導用戶下單
+# ──────────────────────────────────────────────────────────────────────
+NO_CACHE_DOMAINS = {
+    "snkrdunk.com",       # 球鞋二手交易（價格秒變）
+    "jp.mercari.com",     # Mercari 日本（個人賣家可隨時改價/下架）
+    "mercari.com",        # Mercari 主域名
+    # 未來如有其他即時價格平台可加入這裡
+}
+
+
+def is_no_cache_url(url: str) -> bool:
+    """判斷此 URL 是否屬於不可 cache 的平台"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        return any(d in host for d in NO_CACHE_DOMAINS)
+    except Exception:
+        return False
+
+
+print(f"[Config] NO_CACHE_DOMAINS = {NO_CACHE_DOMAINS}")
+
 
 # === 背景自動清理任務 ===
 
@@ -57,7 +83,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-app = FastAPI(title="GOYOUTATI DAIGO API", version="3.3.1", lifespan=lifespan)
+app = FastAPI(title="GOYOUTATI DAIGO API", version="3.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -117,6 +143,11 @@ _scrape_cache: dict[str, tuple[ProductInfo, float]] = {}
 
 
 def cache_get(url: str) -> ProductInfo | None:
+    # 即時價格平台不走 cache
+    if is_no_cache_url(url):
+        print(f"[Cache] ⏭️  跳過 cache（即時價格平台）: {url[:60]}")
+        return None
+
     if url in _scrape_cache:
         product, ts = _scrape_cache[url]
         if time.time() - ts < CACHE_TTL:
@@ -128,6 +159,10 @@ def cache_get(url: str) -> ProductInfo | None:
 
 
 def cache_set(url: str, product: ProductInfo):
+    # 即時價格平台不寫入 cache
+    if is_no_cache_url(url):
+        return
+
     _scrape_cache[url] = (product, time.time())
     now = time.time()
     expired = [k for k, (_, ts) in _scrape_cache.items() if now - ts > CACHE_TTL]
@@ -149,12 +184,13 @@ _in_flight: dict[str, asyncio.Future] = {}
 async def scrape_with_queue(url: str) -> ProductInfo:
     global _queue_count
 
-    # 1. 快取命中 → 直接回傳
+    # 1. 快取命中 → 直接回傳（即時價格平台會自動跳過）
     cached = cache_get(url)
     if cached:
         return cached
 
     # 2. 同 URL 已在爬取中 → 等它完成，共享結果，不開第二個 Chrome
+    #    注意：即時價格平台也共享 in-flight 結果（因為同一秒內請求合併不會有舊資料問題）
     if url in _in_flight:
         print(f"[Queue] 🔗 同 URL 已在爬取中，等待共享結果: {url[:60]}")
         try:
@@ -191,7 +227,7 @@ async def scrape_with_queue(url: str) -> ProductInfo:
         print(f"[Queue] ▶️ 開始爬取 (active={_active_count}, queue={_queue_count}): {url[:60]}")
 
         try:
-            # 搶到 semaphore 後再確認一次快取
+            # 搶到 semaphore 後再確認一次快取（即時價格平台會自動跳過）
             cached = cache_get(url)
             if cached:
                 print(f"[Queue] ✅ 排隊期間快取命中: {url[:60]}")
@@ -204,7 +240,7 @@ async def scrape_with_queue(url: str) -> ProductInfo:
             )
 
             if product.title:
-                cache_set(url, product)
+                cache_set(url, product)  # 即時價格平台不會寫入
 
             future.set_result(product)
             return product
@@ -281,9 +317,10 @@ async def health():
     return {
         "status": "ok",
         "service": "daigo-api",
-        "version": "3.3.1",
+        "version": "3.4.0",
         "cache_size": len(_scrape_cache),
         "cache_ttl": CACHE_TTL,
+        "no_cache_domains": list(NO_CACHE_DOMAINS),
         "driver": driver_status,
         "queue": {
             "active": _active_count,
@@ -343,10 +380,16 @@ async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
 
-        product = cache_get(url)
-        if not product:
-            print(f"[Cache] ❌ 未命中，重新爬取: {url[:60]}")
+        # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
+        # 一般平台：先試 cache，沒有才爬
+        if is_no_cache_url(url):
+            print(f"[Order] ⚡ 即時價格平台，強制重抓: {url[:60]}")
             product = await scrape_with_queue(url)
+        else:
+            product = cache_get(url)
+            if not product:
+                print(f"[Cache] ❌ 未命中，重新爬取: {url[:60]}")
+                product = await scrape_with_queue(url)
 
         if not product.title:
             return CreateOrderResponse(success=False, error="無法抓取商品資訊")
