@@ -200,10 +200,22 @@ class SnkrdunkMixin:
         if "outofstock" in agg_avail or "soldout" in agg_avail:
             product.in_stock = False
 
-        # 主價格用 lowPrice（最便宜的 size）
+        # ⚠️ snkrdunk 標示的價格是「未稅價」（消費税 10% 未含）
+        # 必須先 ×1.1 變成稅後價，再交給 shopify_client 套你的代購費率
+        # （日本消費税 2026 年仍為 10%）
+        TAX_MULTIPLIER = 1.10
+
+        def _add_tax(raw_price: int | None) -> int | None:
+            """未稅價 → 稅後價（×1.1，向上取整避免少收稅）"""
+            if raw_price is None:
+                return None
+            import math
+            return math.ceil(raw_price * TAX_MULTIPLIER)
+
+        # 主價格用 lowPrice（最便宜的 size）→ 加稅
         v = self._snkrdunk_to_int(offers.get("lowPrice"))
         if v:
-            product.price_jpy = v
+            product.price_jpy = _add_tax(v)
 
         # ── sub-offers 拆 size variants ──
         sub_offers = offers.get("offers") or []
@@ -211,7 +223,8 @@ class SnkrdunkMixin:
             return
 
         # 收集每個 size 的「最低價 + 庫存」(因為 snkrdunk 同 size 可能有多個賣家報價)
-        size_map: dict[str, dict] = {}  # size -> {price, in_stock}
+        # 注意：這裡的 price 還是未稅，比對最低價時用未稅比；產出 variant 時才加稅
+        size_map: dict[str, dict] = {}  # size -> {price_pretax, in_stock}
 
         for o in sub_offers:
             if not isinstance(o, dict):
@@ -226,12 +239,12 @@ class SnkrdunkMixin:
             in_stock = "outofstock" not in avail and "soldout" not in avail
 
             existing = size_map.get(size)
-            if existing is None or price < existing["price"]:
-                # 留每個 size 的最低價
-                size_map[size] = {"price": price, "in_stock": in_stock}
-            elif price == existing["price"] and in_stock and not existing["in_stock"]:
+            if existing is None or price < existing["price_pretax"]:
+                # 留每個 size 的最低價（未稅）
+                size_map[size] = {"price_pretax": price, "in_stock": in_stock}
+            elif price == existing["price_pretax"] and in_stock and not existing["in_stock"]:
                 # 同價但有庫存的優先
-                size_map[size] = {"price": price, "in_stock": in_stock}
+                size_map[size] = {"price_pretax": price, "in_stock": in_stock}
 
         if not size_map:
             return
@@ -246,22 +259,32 @@ class SnkrdunkMixin:
 
         sorted_sizes = sorted(size_map.keys(), key=_size_key)
 
-        # ── 組 variants ──
+        # ── 組 variants（每個 variant.price 都是「稅後價」，給 shopify_client 套費率用）──
         base = sku.lower().replace(" ", "-") or "snkrdunk"
         variants = []
         for size in sorted_sizes:
             info = size_map[size]
             sku_v = f"{base}-{size}".lower().replace(" ", "-").replace(".", "-").replace("/", "-")
+            price_with_tax = _add_tax(info["price_pretax"])
             variants.append({
                 "color": "",
                 "size": size,
                 "sku": sku_v,
-                "price": info["price"],
+                "price": price_with_tax,
                 "in_stock": info["in_stock"],
                 "image": product.image_url,
             })
 
         product.variants = variants
+
+        # 印出稅前→稅後對照表（前 3 個 size）
+        sample = sorted_sizes[:3]
+        log_parts = []
+        for s in sample:
+            pretax = size_map[s]["price_pretax"]
+            posttax = _add_tax(pretax)
+            log_parts.append(f"{s}: ¥{pretax}→¥{posttax}")
+        print(f"[Snkrdunk] 各 size 已加 10% 消費稅: {', '.join(log_parts)}...")
 
         # 整體 in_stock：任一 size 有貨即視為有貨
         any_in_stock = any(v["in_stock"] for v in variants)
