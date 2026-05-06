@@ -288,6 +288,7 @@ class ScrapeResponse(BaseModel):
     product: dict | None = None
     pricing: dict | None = None
     error: str | None = None
+    blocked: bool = False  # ← True 表示此網站被封鎖（前端應顯示錯誤訊息，不要切到「手動填寫」UI）
     queue_info: dict | None = None
 
 class CreateOrderRequest(BaseModel):
@@ -307,6 +308,7 @@ class CreateOrderResponse(BaseModel):
     checkout_url: str | None = None
     admin_url: str | None = None
     error: str | None = None
+    blocked: bool = False  # ← True 表示此網站被封鎖
 
 
 # === Endpoints ===
@@ -353,6 +355,19 @@ async def get_rate():
 async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
+
+        # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
+        from scrapers.base import detect_blocked
+        blocked_reason = detect_blocked(url)
+        if blocked_reason:
+            print(f"[API] 🚫 封鎖網站: {url[:80]}")
+            return ScrapeResponse(
+                success=False,
+                blocked=True,
+                error=blocked_reason,
+                queue_info={"active": _active_count, "waiting": _queue_count},
+            )
+
         product: ProductInfo = await scrape_with_queue(url)
 
         if not product.title:
@@ -370,6 +385,17 @@ async def scrape_product(req: ScrapeRequest):
 
     except HTTPException:
         raise
+    except ValueError as e:
+        # ValueError 通常是 scraper 內部明確擲出的錯誤（如「不支援代購」、「queue-it 中」）
+        msg = str(e)
+        is_blocked = "不支援代購" in msg or "封鎖" in msg
+        print(f"[API] ⚠️ scrape ValueError ({'blocked' if is_blocked else 'normal'}): {msg[:120]}")
+        return ScrapeResponse(
+            success=False,
+            blocked=is_blocked,
+            error=msg,
+            queue_info={"active": _active_count, "waiting": _queue_count},
+        )
     except Exception as e:
         print(f"[API] scrape error: {traceback.format_exc()}")
         return ScrapeResponse(success=False, error=f"爬取失敗：{str(e) or type(e).__name__}")
@@ -379,6 +405,17 @@ async def scrape_product(req: ScrapeRequest):
 async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
+
+        # ★ 先檢查封鎖網站
+        from scrapers.base import detect_blocked
+        blocked_reason = detect_blocked(url)
+        if blocked_reason:
+            print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=blocked_reason,
+            )
 
         # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
         # 一般平台：先試 cache，沒有才爬
@@ -424,6 +461,16 @@ async def create_order(req: CreateOrderRequest):
         )
     except HTTPException:
         raise
+    except ValueError as e:
+        # 同樣處理 scraper 主動擲出的 ValueError
+        msg = str(e)
+        is_blocked = "不支援代購" in msg or "封鎖" in msg
+        print(f"[API] ⚠️ create-order ValueError ({'blocked' if is_blocked else 'normal'}): {msg[:120]}")
+        return CreateOrderResponse(
+            success=False,
+            blocked=is_blocked,
+            error=msg,
+        )
     except Exception as e:
         print(f"[API] create-order error: {traceback.format_exc()}")
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
