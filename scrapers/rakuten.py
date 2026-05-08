@@ -18,30 +18,45 @@ from scrapers.base import ProductInfo
 def _parse_sku_options(soup: BeautifulSoup) -> list:
     """
     解析 Rakuten 商品頁的 SKU 選項（色、サイズ等）。
-    Rakuten 用 button.type-sku-button--* 渲染選項，不是標準 <select>。
+
+    支援兩種主流模板：
+    A. 新版 RMS（2022+）: button.type-sku-button-- 渲染選項，div.display-sku-area 包住
+    B. 傳統 select: <select name="inventory_no/item_color/...">
 
     回傳格式（shopify_client 標準格式 variant list）：
     [
         {"color": "A：白 丸首", "size": "66cm", "sku": "...", "price": 0, "in_stock": True, "image": ""},
         ...
     ]
-    空清單代表此商品無 SKU 選項。
+    空清單代表此商品無 SKU 選項或抓不到 → shopify_client 會降級為單品。
 
     處理邏輯：
-    1. 抽出所有「選項組」（label + 該組所有值）
-    2. 判斷哪一組是 color 維度（含「色分類」「カラー」「色」等關鍵字），其他組視為 size 維度
-    3. 多組 size 維度合併（用「/」連接）做笛卡爾積
-    4. 產出 color × size 笛卡爾積，全部用主商品價格（樂天無 per-SKU 價格 API）
+    1. 先試新版 (display-sku-area button)
+    2. 找不到時 fallback 到傳統 (<select>)
+    3. 抽出所有「選項組」（label + 該組所有值）
+    4. 判斷哪一組是 color 維度，其他組視為 size 維度
+    5. 多組 size 維度合併（用「/」連接）做笛卡爾積
+    6. 產出 color × size 笛卡爾積，全部用主商品價格
     """
-    raw_options: list[tuple[str, list[str]]] = []  # [(label, [values])]
+    raw_options = _parse_sku_new_rms(soup)
+    if not raw_options:
+        raw_options = _parse_sku_legacy_select(soup)
+    if not raw_options:
+        return []
+
+    return _build_variants(raw_options)
+
+
+def _parse_sku_new_rms(soup: BeautifulSoup) -> list:
+    """新版 RMS 模板：button.type-sku-button-- 群組"""
+    raw_options: list[tuple[str, list[str]]] = []
 
     display_area = soup.select_one(".display-sku-area")
     if not display_area:
-        return []
+        return raw_options
 
-    # 每個 [class*="padding-bottom-small"] 是一個獨立選項組
     for grp in display_area.select('[class*="padding-bottom-small"]'):
-        # 取選項組標籤名稱（第一個短文字，排除「未選択」「選択してください」）
+        # 取選項組標籤名稱
         label = ""
         for div in grp.select('[class*="text-display"]'):
             t = div.get_text(strip=True)
@@ -59,14 +74,76 @@ def _parse_sku_options(soup: BeautifulSoup) -> list:
         if btn_texts:
             raw_options.append((label or f"選項{len(raw_options) + 1}", btn_texts))
 
-    if not raw_options:
-        return []
+    return raw_options
 
+
+def _parse_sku_legacy_select(soup: BeautifulSoup) -> list:
+    """傳統 <select> 模板"""
+    raw_options: list[tuple[str, list[str]]] = []
+
+    # 樂天傳統 SKU select 的 name 模式
+    name_patterns = [
+        re.compile(r'inventory_no', re.I),
+        re.compile(r'item[_\-]?color', re.I),
+        re.compile(r'item[_\-]?size', re.I),
+        re.compile(r'sub_pcid', re.I),
+        re.compile(r'orderno', re.I),
+    ]
+
+    for sel in soup.find_all("select"):
+        sel_name = sel.get("name", "")
+        if not any(p.search(sel_name) for p in name_patterns):
+            continue
+
+        # 取 label：先看前面有沒有 <th>/<dt>/<label>，否則用 select name 推斷
+        label = ""
+        # 看 parent table row 內的 <th>
+        parent_tr = sel.find_parent("tr")
+        if parent_tr:
+            th = parent_tr.find("th")
+            if th:
+                label = th.get_text(strip=True).rstrip("::").strip()[:20]
+        # 看附近的 label
+        if not label:
+            for prev in sel.find_all_previous(["label", "dt", "th"], limit=3):
+                t = prev.get_text(strip=True)
+                if t and len(t) <= 20:
+                    label = t.rstrip("::").strip()
+                    break
+        # name 推斷
+        if not label:
+            if "color" in sel_name.lower():
+                label = "カラー"
+            elif "size" in sel_name.lower():
+                label = "サイズ"
+            else:
+                label = "選項"
+
+        # 取所有 <option> 文字（排除「選択してください」之類 placeholder）
+        option_values = []
+        for opt in sel.find_all("option"):
+            v = opt.get("value", "").strip()
+            text = opt.get_text(strip=True)
+            # 排除 placeholder
+            if not v or v == "0" or "選択してください" in text or "選択する" in text or text == "":
+                continue
+            # 用顯示文字（含色名/尺寸）
+            if text:
+                option_values.append(text)
+
+        if option_values:
+            raw_options.append((label, option_values))
+
+    return raw_options
+
+
+def _build_variants(raw_options: list) -> list:
+    """把 raw_options 拆 color/size 維度後做笛卡爾積，回傳 shopify variant 格式"""
     # ── 判斷哪組是 color 維度 ──
     color_keywords = ["色分類", "カラー", "color", "色"]
     color_idx = -1
     for i, (label, _) in enumerate(raw_options):
-        if any(kw in label.lower() for kw in [k.lower() for k in color_keywords]):
+        if any(kw.lower() in label.lower() for kw in color_keywords):
             color_idx = i
             break
 
@@ -96,8 +173,8 @@ def _parse_sku_options(soup: BeautifulSoup) -> list:
                 "color": c,
                 "size": s,
                 "sku": sku or "default",
-                "price": 0,  # 樂天 SKU 各自獨立 item，這裡用 0 → shopify_client 會 fallback 到主價
-                "in_stock": True,  # Rakuten 不開個別 SKU 庫存查詢，預設都有
+                "price": 0,
+                "in_stock": True,
                 "image": "",
             })
 
