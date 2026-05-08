@@ -1,11 +1,14 @@
 """
 楽天市場 (item.rakuten.co.jp) 爬蟲 Mixin
-- httpx 直接抓，手動處理 EUC-JP 編碼
-- 樂天商品通常無結構化 variants（各 SKU 是獨立 item），當單品處理
-v1.2: SKU 選項抓取（色分類、サイズ等）並展開為 variant 格式給 shopify_client 使用
+- httpx 直接抓基本資料（標題、價格、圖、描述），手動處理 EUC-JP 編碼
+- 樂天新版 RMS 模板的 SKU 選項是 JS 渲染，httpx 拿不到
+  → 偵測到「有 SKU 區但抓不到選項」時，自動 fallback 用 driver
+v1.4: SKU 選項抓不到時自動降級用 driver（解決 JS render 問題）
 """
+import asyncio
 import re
 import json
+import time
 from itertools import product as _cartesian
 
 import httpx
@@ -313,6 +316,23 @@ class RakutenMixin:
                 # ── SKU 選項（色分類、サイズ等）展開為 variant 格式 ──
                 soup = BeautifulSoup(html, "html.parser")
                 product.variants = _parse_sku_options(soup)
+
+                # ⚠️ 偵測「有 SKU 區但抓不到選項」→ fallback 用 driver 重抓
+                # 樂天新版 RMS 的 SKU 選項是 JS 渲染，httpx 拿到的是 placeholder
+                if not product.variants and self._rakuten_likely_has_sku(html):
+                    print(f"[Rakuten] ⚠️ 偵測到 SKU 區但 httpx 抓不到選項 → fallback 用 driver")
+                    try:
+                        driver_html = await asyncio.to_thread(self._rakuten_driver_fetch, url)
+                        if driver_html:
+                            driver_soup = BeautifulSoup(driver_html, "html.parser")
+                            product.variants = _parse_sku_options(driver_soup)
+                            if product.variants:
+                                print(f"[Rakuten] ✓ driver fallback 成功，抓到 {len(product.variants)} 個 variants")
+                            else:
+                                print(f"[Rakuten] driver fallback 仍抓不到（可能是純單品商品）")
+                    except Exception as e:
+                        print(f"[Rakuten] driver fallback 失敗: {type(e).__name__}: {e}")
+
                 if product.variants:
                     # 統計
                     colors = set(v["color"] for v in product.variants if v["color"])
@@ -330,3 +350,80 @@ class RakutenMixin:
             print(f"[Rakuten] 例外: {type(e).__name__}: {e}，改用通用 Playwright")
 
         return await self._scrape_with_playwright(url)
+
+    @staticmethod
+    def _rakuten_likely_has_sku(html: str) -> bool:
+        """
+        判斷 HTML 是否「應該有 SKU 選項」但 httpx 沒抓到（被 JS 包起來）
+
+        判斷標準：
+        - 含 'display-sku-area' 字串（即使是空的 div）
+        - 含 'type-sku-button' 字串
+        - 含 'inventory_no' 等傳統 SKU 標識
+        - 商品頁含「カラー」「サイズ」「色分類」等 SKU 關鍵字（但要有上下文）
+        """
+        if not html:
+            return False
+        sku_markers = [
+            'display-sku-area',
+            'type-sku-button',
+            'inventory_no',
+            'sku-area',
+            '"skuList"',
+        ]
+        return any(m in html for m in sku_markers)
+
+    def _rakuten_driver_fetch(self, url: str) -> str:
+        """
+        用 SeleniumBase UC 抓樂天頁面（JS 渲染後）
+        專門給 SKU 選項 fallback 用，最多等 12 秒
+        """
+        try:
+            driver = self._ensure_driver()
+            if not driver:
+                return ""
+            self._clean_driver_tabs()
+            try:
+                driver.uc_open_with_reconnect(url, reconnect_time=4)
+            except Exception:
+                driver.get(url)
+
+            # 評分式等待：等到 SKU 區渲染出來
+            best_html = ""
+            best_score = 0
+
+            for i in range(6):
+                time.sleep(2)
+                try:
+                    html = driver.page_source
+                except Exception:
+                    continue
+
+                # 評分：有 type-sku-button 表示 JS 已渲染好
+                score = 0
+                # 計算實際的 button 數，不只看 class 名
+                btn_count = html.count('type-sku-button--')
+                if btn_count > 0:
+                    score += min(btn_count, 30)  # 最多 30 分（避免被無關內容壓爆）
+                if 'display-sku-area' in html:
+                    score += 3
+                if '色分類' in html or 'カラー' in html:
+                    score += 2
+
+                if score > best_score:
+                    best_score = score
+                    best_html = html
+
+                # 抓到足夠多的 button 就提早返回
+                if i >= 1 and btn_count >= 2:
+                    print(f"[Rakuten][driver] iter={i} btn_count={btn_count} score={score} ✓")
+                    self._driver_use_count += 1
+                    return html
+
+            self._driver_use_count += 1
+            print(f"[Rakuten][driver] 最佳版本 score={best_score}")
+            return best_html
+
+        except Exception as e:
+            print(f"[Rakuten][driver] 失敗: {type(e).__name__}: {e}")
+            return ""
