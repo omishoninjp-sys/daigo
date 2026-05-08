@@ -2,10 +2,11 @@
 楽天市場 (item.rakuten.co.jp) 爬蟲 Mixin
 - httpx 直接抓，手動處理 EUC-JP 編碼
 - 樂天商品通常無結構化 variants（各 SKU 是獨立 item），當單品處理
-v1.1: 新增選項抓取（色分類、サイズ等 SKU button 群）
+v1.2: SKU 選項抓取（色分類、サイズ等）並展開為 variant 格式給 shopify_client 使用
 """
 import re
 import json
+from itertools import product as _cartesian
 
 import httpx
 from bs4 import BeautifulSoup
@@ -19,18 +20,24 @@ def _parse_sku_options(soup: BeautifulSoup) -> list:
     解析 Rakuten 商品頁的 SKU 選項（色、サイズ等）。
     Rakuten 用 button.type-sku-button--* 渲染選項，不是標準 <select>。
 
-    回傳格式：
+    回傳格式（shopify_client 標準格式 variant list）：
     [
-        {"name": "色分類", "values": ["A：白 丸首 無フリース", ...]},
-        {"name": "参考身長", "values": ["66cm", "73cm", ...]},
+        {"color": "A：白 丸首", "size": "66cm", "sku": "...", "price": 0, "in_stock": True, "image": ""},
+        ...
     ]
     空清單代表此商品無 SKU 選項。
+
+    處理邏輯：
+    1. 抽出所有「選項組」（label + 該組所有值）
+    2. 判斷哪一組是 color 維度（含「色分類」「カラー」「色」等關鍵字），其他組視為 size 維度
+    3. 多組 size 維度合併（用「/」連接）做笛卡爾積
+    4. 產出 color × size 笛卡爾積，全部用主商品價格（樂天無 per-SKU 價格 API）
     """
-    options = []
+    raw_options: list[tuple[str, list[str]]] = []  # [(label, [values])]
 
     display_area = soup.select_one(".display-sku-area")
     if not display_area:
-        return options
+        return []
 
     # 每個 [class*="padding-bottom-small"] 是一個獨立選項組
     for grp in display_area.select('[class*="padding-bottom-small"]'):
@@ -39,7 +46,7 @@ def _parse_sku_options(soup: BeautifulSoup) -> list:
         for div in grp.select('[class*="text-display"]'):
             t = div.get_text(strip=True)
             if t and "未選択" not in t and "選択してください" not in t and len(t) <= 20:
-                label = t.rstrip("：").strip()
+                label = t.rstrip("::").strip()
                 break
 
         # 取所有選項按鈕文字
@@ -50,12 +57,51 @@ def _parse_sku_options(soup: BeautifulSoup) -> list:
         ]
 
         if btn_texts:
-            options.append({
-                "name": label or f"選項{len(options) + 1}",
-                "values": btn_texts,
+            raw_options.append((label or f"選項{len(raw_options) + 1}", btn_texts))
+
+    if not raw_options:
+        return []
+
+    # ── 判斷哪組是 color 維度 ──
+    color_keywords = ["色分類", "カラー", "color", "色"]
+    color_idx = -1
+    for i, (label, _) in enumerate(raw_options):
+        if any(kw in label.lower() for kw in [k.lower() for k in color_keywords]):
+            color_idx = i
+            break
+
+    # ── 拆 color / size 維度 ──
+    if color_idx >= 0:
+        color_values = raw_options[color_idx][1]
+        size_groups = [opt for i, opt in enumerate(raw_options) if i != color_idx]
+    else:
+        color_values = [""]
+        size_groups = list(raw_options)
+
+    # ── 多組 size 維度做笛卡爾積 ──
+    if size_groups:
+        size_value_lists = [opt[1] for opt in size_groups]
+        size_combinations = [" / ".join(combo) for combo in _cartesian(*size_value_lists)]
+    else:
+        size_combinations = [""]
+
+    # ── 組成標準 variants ──
+    variants = []
+    for c in color_values:
+        for s in size_combinations:
+            sku_parts = [p for p in [c, s] if p]
+            sku_raw = "-".join(sku_parts).lower()
+            sku = re.sub(r'[^\w\-]+', '-', sku_raw)[:80]
+            variants.append({
+                "color": c,
+                "size": s,
+                "sku": sku or "default",
+                "price": 0,  # 樂天 SKU 各自獨立 item，這裡用 0 → shopify_client 會 fallback 到主價
+                "in_stock": True,  # Rakuten 不開個別 SKU 庫存查詢，預設都有
+                "image": "",
             })
 
-    return options
+    return variants
 
 
 class RakutenMixin:
@@ -90,7 +136,7 @@ class RakutenMixin:
                 if title_m:
                     title = title_m.group(1).strip()
                     # 去掉「| 店名」或「：店名」suffix（全形/半形冒號都處理）
-                    title = re.split(r'[|｜：:]\s*\S+(?:楽天|店|ショップ)', title)[0].strip()
+                    title = re.split(r'[|｜::]\s*\S+(?:楽天|店|ショップ)', title)[0].strip()
                     title = re.sub(r'\s*[-－]\s*楽天市場.*$', '', title).strip()
                     product.title = title
 
@@ -187,14 +233,20 @@ class RakutenMixin:
                     if shop_m:
                         product.brand = shop_m.group(1)
 
-                # ── SKU 選項（色分類、サイズ等）──
+                # ── SKU 選項（色分類、サイズ等）展開為 variant 格式 ──
                 soup = BeautifulSoup(html, "html.parser")
                 product.variants = _parse_sku_options(soup)
                 if product.variants:
-                    total = sum(len(v["values"]) for v in product.variants)
-                    print(f"[Rakuten] 選項 {len(product.variants)} 組 / 共 {total} 個值")
+                    # 統計
+                    colors = set(v["color"] for v in product.variants if v["color"])
+                    sizes = set(v["size"] for v in product.variants if v["size"])
+                    print(
+                        f"[Rakuten] 變體展開: colors={len(colors)} sizes={len(sizes)} "
+                        f"→ 共 {len(product.variants)} 個 variants"
+                    )
 
-                print(f"[Rakuten] ✅ {product.title[:40]} / ¥{product.price_jpy} / in_stock={product.in_stock}")
+                print(f"[Rakuten] ✅ {product.title[:40]} / ¥{product.price_jpy} / "
+                      f"variants={len(product.variants)} / in_stock={product.in_stock}")
                 return product
 
         except Exception as e:
