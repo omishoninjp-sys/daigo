@@ -1,9 +1,12 @@
 """
 楽天市場 (item.rakuten.co.jp) 爬蟲 Mixin
 - httpx 直接抓基本資料（標題、價格、圖、描述），手動處理 EUC-JP 編碼
-- 樂天新版 RMS 模板的 SKU 選項是 JS 渲染，httpx 拿不到
-  → 偵測到「有 SKU 區但抓不到選項」時，自動 fallback 用 driver
+- 樂天新版 RMS 模板的 SKU 選項是 React 動態渲染，httpx 連標識字串都拿不到
+  → variants=0 時無條件用 driver fallback
+v1.5: 移除 _rakuten_likely_has_sku 判斷，無條件 driver fallback（前一版判斷不準）
 v1.4: SKU 選項抓不到時自動降級用 driver（解決 JS render 問題）
+v1.3: 支援新版 RMS 模板與傳統 select 模板
+v1.2: SKU 選項抓取（色分類、サイズ等）並展開為 variant 格式給 shopify_client 使用
 """
 import asyncio
 import re
@@ -317,10 +320,13 @@ class RakutenMixin:
                 soup = BeautifulSoup(html, "html.parser")
                 product.variants = _parse_sku_options(soup)
 
-                # ⚠️ 偵測「有 SKU 區但抓不到選項」→ fallback 用 driver 重抓
-                # 樂天新版 RMS 的 SKU 選項是 JS 渲染，httpx 拿到的是 placeholder
-                if not product.variants and self._rakuten_likely_has_sku(html):
-                    print(f"[Rakuten] ⚠️ 偵測到 SKU 區但 httpx 抓不到選項 → fallback 用 driver")
+                # ⚠️ 無條件 fallback：httpx 抓不到 SKU 就用 driver 重抓
+                # 樂天新版 RMS 的 SKU 選項是 React 動態渲染，httpx 連 placeholder 都看不到
+                # 連標識字串都拿不到，所以無法事先判斷「該不該」用 driver
+                # → 簡單的策略：只要 httpx 抓出 0 個 variants，就無條件試 driver 一次
+                # 副作用：純單品商品也會多花一次 driver 時間（~10s），但保證有 SKU 的能抓到
+                if not product.variants:
+                    print(f"[Rakuten] httpx 抓不到 SKU → 嘗試 driver fallback（驗證 Zeabur IP 是否可拿到 RMS）")
                     try:
                         driver_html = await asyncio.to_thread(self._rakuten_driver_fetch, url)
                         if driver_html:
@@ -329,7 +335,16 @@ class RakutenMixin:
                             if product.variants:
                                 print(f"[Rakuten] ✓ driver fallback 成功，抓到 {len(product.variants)} 個 variants")
                             else:
-                                print(f"[Rakuten] driver fallback 仍抓不到（可能是純單品商品）")
+                                # driver 也拿不到 → 純單品 OR Zeabur IP 被樂天降級（兩者都可能）
+                                # 印出 HTML 標識讓用戶判斷
+                                has_sku_marker = any(
+                                    m in driver_html
+                                    for m in ['display-sku-area', 'type-sku-button', 'inventory_no']
+                                )
+                                if has_sku_marker:
+                                    print(f"[Rakuten] ⚠️ driver 拿到 HTML 含 SKU 標識但仍 parse 不到 → 可能是頁面樣式變了")
+                                else:
+                                    print(f"[Rakuten] driver 也找不到 SKU 標識 → 純單品商品 OR IP 被降級")
                     except Exception as e:
                         print(f"[Rakuten] driver fallback 失敗: {type(e).__name__}: {e}")
 
