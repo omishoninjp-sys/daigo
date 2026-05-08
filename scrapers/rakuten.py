@@ -2,14 +2,60 @@
 楽天市場 (item.rakuten.co.jp) 爬蟲 Mixin
 - httpx 直接抓，手動處理 EUC-JP 編碼
 - 樂天商品通常無結構化 variants（各 SKU 是獨立 item），當單品處理
+v1.1: 新增選項抓取（色分類、サイズ等 SKU button 群）
 """
 import re
 import json
 
 import httpx
+from bs4 import BeautifulSoup
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
+
+
+def _parse_sku_options(soup: BeautifulSoup) -> list:
+    """
+    解析 Rakuten 商品頁的 SKU 選項（色、サイズ等）。
+    Rakuten 用 button.type-sku-button--* 渲染選項，不是標準 <select>。
+
+    回傳格式：
+    [
+        {"name": "色分類", "values": ["A：白 丸首 無フリース", ...]},
+        {"name": "参考身長", "values": ["66cm", "73cm", ...]},
+    ]
+    空清單代表此商品無 SKU 選項。
+    """
+    options = []
+
+    display_area = soup.select_one(".display-sku-area")
+    if not display_area:
+        return options
+
+    # 每個 [class*="padding-bottom-small"] 是一個獨立選項組
+    for grp in display_area.select('[class*="padding-bottom-small"]'):
+        # 取選項組標籤名稱（第一個短文字，排除「未選択」「選択してください」）
+        label = ""
+        for div in grp.select('[class*="text-display"]'):
+            t = div.get_text(strip=True)
+            if t and "未選択" not in t and "選択してください" not in t and len(t) <= 20:
+                label = t.rstrip("：").strip()
+                break
+
+        # 取所有選項按鈕文字
+        btn_texts = [
+            b.get_text(strip=True)
+            for b in grp.select('[class*="type-sku-button"]')
+            if b.get_text(strip=True)
+        ]
+
+        if btn_texts:
+            options.append({
+                "name": label or f"選項{len(options) + 1}",
+                "values": btn_texts,
+            })
+
+    return options
 
 
 class RakutenMixin:
@@ -140,6 +186,13 @@ class RakutenMixin:
                     shop_m = re.search(r'item\.rakuten\.co\.jp/([^/]+)/', url)
                     if shop_m:
                         product.brand = shop_m.group(1)
+
+                # ── SKU 選項（色分類、サイズ等）──
+                soup = BeautifulSoup(html, "html.parser")
+                product.variants = _parse_sku_options(soup)
+                if product.variants:
+                    total = sum(len(v["values"]) for v in product.variants)
+                    print(f"[Rakuten] 選項 {len(product.variants)} 組 / 共 {total} 個值")
 
                 print(f"[Rakuten] ✅ {product.title[:40]} / ¥{product.price_jpy} / in_stock={product.in_stock}")
                 return product
