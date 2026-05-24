@@ -174,6 +174,8 @@ def detect_platform(url: str) -> str:
         return "pbandai"
     if "shop-list.com" in host:
         return "shoplist"
+    if "animate-onlineshop.jp" in host:
+        return "animate"
     if "newbalance.jp" in host:
         return "newbalance"
     if "adidas.jp" in host:
