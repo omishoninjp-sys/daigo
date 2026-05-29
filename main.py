@@ -484,6 +484,18 @@ async def create_manual_order(req: ManualOrderRequest):
         if req.price_jpy <= 0:
             return CreateOrderResponse(success=False, error="價格錯誤")
 
+        # ★ 新增：source_url 也要過黑名單（手動建單一樣要擋，防止繞過前端攔截）
+        if req.source_url:
+            from scrapers.base import detect_blocked
+            blocked_reason = detect_blocked(req.source_url.strip())
+            if blocked_reason:
+                print(f"[API] 🚫 封鎖網站（手動建單嘗試）: {req.source_url[:80]}")
+                return CreateOrderResponse(
+                    success=False,
+                    blocked=True,
+                    error=blocked_reason,
+                )
+
         seo = await generate_seo_title(
             original_title=req.title,
             source_url=req.source_url,
