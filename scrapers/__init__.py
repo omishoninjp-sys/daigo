@@ -53,6 +53,7 @@ from scrapers.animate import AnimateMixin  # ← 新增
 from scrapers.mazdacollection import MazdaCollectionMixin  # ← 新增
 from scrapers.marukyukoyamaen import MarukyuKoyamaenMixin  # ← 新增
 from scrapers.amiami import AmiamiMixin  # ← 新增
+from scrapers.netmall import NetmallMixin  # ← 新增
 from scrapers.makeshop import MakeShopMixin
 
 
@@ -88,6 +89,7 @@ class Scraper(
     MazdaCollectionMixin,  # ← 新增
     MarukyuKoyamaenMixin,  # ← 新增
     AmiamiMixin,  # ← 新增
+    NetmallMixin,  # ← 新增
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -205,6 +207,8 @@ class Scraper(
             product = await self._scrape_marukyukoyamaen(url)
         elif platform == "amiami":  # ← 新增
             product = await self._scrape_amiami(url)
+        elif platform == "netmall":  # ← 新增
+            product = await self._scrape_netmall(url)
         elif platform == "makeshop":
             product = await self._scrape_makeshop(url)
         elif "oakley.com" in url:

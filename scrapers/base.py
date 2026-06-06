@@ -182,6 +182,8 @@ def detect_platform(url: str) -> str:
         return "marukyukoyamaen"
     if "amiami.jp" in host:
         return "amiami"
+    if "netmall.hardoff.co.jp" in host:  # ← 新增（ハードオフ オフモール，中古單品；JS 渲染走 SeleniumBase）
+        return "netmall"
     if "newbalance.jp" in host:
         return "newbalance"
     if "adidas.jp" in host:
