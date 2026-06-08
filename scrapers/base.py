@@ -190,7 +190,7 @@ def detect_platform(url: str) -> str:
         return "adidas"
     if "graniph.com" in host:
         return "graniph"
-    if "fanatics.jp" in host:
+    if "fanatics.jp" in host or "softbankhawksstore.jp" in host:  # ← 軟銀鷹官方店同為 Fanatics 平台
         return "fanatics"
     if "mercari.com" in host or "jp.mercari.com" in host:
         return "mercari"
