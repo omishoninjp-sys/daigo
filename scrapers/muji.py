@@ -64,6 +64,16 @@ class MujiMixin:
             except Exception as e:
                 print(f"[MUJI] httpx 錯誤: {type(e).__name__}: {e}")
 
+            # 主圖下載為 base64：muji CDN 會擋 Shopify 的伺服器端抓圖，
+            # 必須自己帶 UA + Referer 抓回 bytes 再以 base64 交給 Shopify 上傳。
+            if product.price_jpy and product.image_url and not product.image_base64:
+                b64 = await self._muji_download_image_b64(client, product.image_url, headers, url)
+                if b64:
+                    product.image_base64 = b64
+                    print(f"[MUJI] 主圖 base64 OK（{len(b64) // 1024}KB）")
+                else:
+                    print(f"[MUJI] ⚠️ httpx 下載主圖失敗，改以 URL 交給 Shopify（可能仍無圖）")
+
         # ── 退守：httpx 沒拿到價格（被擋 / 非 200）才開瀏覽器 ──
         if not product.price_jpy:
             print(f"[MUJI] httpx 未取得價格，退守 SeleniumBase")
@@ -321,6 +331,27 @@ class MujiMixin:
         return v if _MIN_PRICE <= v <= _MAX_PRICE else None
 
     # ─────────────────────────────────────────────────────────────────
+    # 主圖下載為 base64（繞過 muji CDN 對伺服器端抓圖的封鎖）
+    # ─────────────────────────────────────────────────────────────────
+    async def _muji_download_image_b64(self, client, image_url: str, base_headers: dict, referer: str):
+        import base64
+        try:
+            img_headers = {
+                "User-Agent": base_headers.get("User-Agent", USER_AGENT),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+                "Referer": referer,
+            }
+            r = await client.get(image_url, headers=img_headers)
+            ctype = r.headers.get("content-type", "").lower()
+            if r.status_code == 200 and ctype.startswith("image/") and len(r.content) > 1000:
+                return base64.b64encode(r.content).decode("ascii")
+            print(f"[MUJI] 圖片回應非預期: status={r.status_code}, type={ctype}, len={len(r.content)}")
+        except Exception as e:
+            print(f"[MUJI] 圖片下載例外: {type(e).__name__}: {e}")
+        return None
+
+    # ─────────────────────────────────────────────────────────────────
     # 退守：SeleniumBase UC（rendered DOM 一樣含 RSC payload）
     # ─────────────────────────────────────────────────────────────────
     async def _muji_chrome_fallback(self, url: str, product: ProductInfo, jan_code: str) -> bool:
@@ -367,6 +398,26 @@ class MujiMixin:
                         return False
 
                     self._muji_parse_html(html, product, jan_code)
+
+                    # 瀏覽器端抓主圖 base64（httpx 整個被擋、走到這裡時的補圖路徑）
+                    if product.image_url and not product.image_base64:
+                        try:
+                            b64 = driver.execute_script("""
+                                return await fetch(arguments[0])
+                                    .then(r => r.blob())
+                                    .then(b => new Promise((res, rej) => {
+                                        const fr = new FileReader();
+                                        fr.onload = () => res(fr.result.split(',')[1]);
+                                        fr.onerror = rej;
+                                        fr.readAsDataURL(b);
+                                    }));
+                            """, product.image_url)
+                            if b64 and len(b64) > 100:
+                                product.image_base64 = b64
+                                print(f"[MUJI] 主圖 base64 OK（瀏覽器，{len(b64) // 1024}KB）")
+                        except Exception as e:
+                            print(f"[MUJI] 瀏覽器抓圖失敗: {type(e).__name__}: {e}")
+
                     return bool(product.price_jpy)
 
                 except Exception as e:
