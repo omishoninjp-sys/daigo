@@ -453,6 +453,7 @@ async def create_order(req: CreateOrderRequest):
             extra_tags=["18+", "adult"] if product.is_adult else None,
             seo_title=seo_title, seo_tags=seo_tags,
             in_stock=product.in_stock,
+            platform_id=getattr(product, "platform_id", ""), 
         )
 
         return CreateOrderResponse(
