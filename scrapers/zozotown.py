@@ -1,423 +1,250 @@
 """
-ZOZOTOWN 爬蟲 Mixin
-使用 SeleniumBase UC + Xvfb 繞過 Akamai
+ZOZOTOWN 爬蟲 Mixin（v2 — 2026 改走雅虎店 SSR，繞過 Akamai）
+====================================================================
+背景：
+- zozo.jp 受 Akamai Bot Manager 保護，機房 IP 幾乎必擋，舊版靠 SeleniumBase UC
+  仍時常失敗，且吃 RAM。
+- 突破點：ZOZOTOWN 在 Yahoo!ショッピング 有官方店（seller_id=zozo），而且
+  **zozo.jp 的 goods ID == 雅虎店商品 key**（已實測：106919347 兩邊一致）。
+  雅虎店商品頁是乾淨 SSR、meta 標籤就含價格/標題/圖/品番/カラー/サイズ，
+  且無 Akamai、無需 appid、無需 Selenium。
+
+策略：
+1. 從客人貼的 zozo.jp 網址抽 goods ID
+2. 組 https://store.shopping.yahoo.co.jp/zozo/<goodsID>.html
+3. httpx 抓該頁，解析 OpenGraph / product meta
+4. 雅虎店查無此商品（目錄為 zozo.jp 子集）→ 退回舊版 zozo.jp 爬蟲 _scrape_zozotown_legacy
+
+注意（價格來源切換）：
+- 抓到的價格是「雅虎店價格」（含可能的セール価格），不一定等於 zozo.jp 價格。
+  多數情況相同或更低（雅虎還有 PayPay 點數）。買手若改從雅虎店下單，報價即一致。
+- source_url 預設指向雅虎店連結（與價格一致的下單來源）。
+  若你希望保留客人原本的 zozo.jp 連結，把 USE_YAHOO_AS_SOURCE 設 False。
 """
+import re
 import asyncio
 
 import httpx
+from bs4 import BeautifulSoup
 
-from config import ZOZO_SCRAPER_URL, PROXY_URL
+from config import SCRAPE_TIMEOUT, USER_AGENT, PROXY_URL
 from scrapers.base import ProductInfo
+
+
+_MIN_PRICE = 50
+_MAX_PRICE = 2_000_000
+
+# 報價與下單來源是否切到雅虎店（True=source_url 用雅虎連結，與抓到的價格一致）
+USE_YAHOO_AS_SOURCE = True
+
+_YAHOO_STORE = "https://store.shopping.yahoo.co.jp/zozo/{gid}.html"
 
 
 class ZozotownMixin:
 
     async def _scrape_zozotown(self, url: str) -> ProductInfo:
-        product = ProductInfo(source_url=url)
+        product = ProductInfo(source_url=url, brand="")
 
-        try:
-            data = await asyncio.get_event_loop().run_in_executor(
-                None, self._fetch_zozo_uc, url
-            )
-            if data and data.get("title"):
-                product.title = data.get("title", "")
-                product.price_jpy = int(data.get("price", 0) * 1.1) or None
-                product.brand = data.get("brand", "")
-                product.description = data.get("description", "")[:500]
-                images = data.get("images", [])
-                if images:
-                    product.image_url = images[0]
-                    product.extra_images = images[1:9]
-                variants = data.get("variants", [])
-                if variants:
-                    for v in variants:
-                        if v.get('price'):
-                            v['price'] = int(v['price'] * 1.1)
-                    product.variants = variants
-            else:
-                print("[ZOZO] ⚠️ 未取得資料")
-        except Exception as e:
-            print(f"[ZOZO] ❌ 錯誤: {e}")
+        gid = self._zozo_extract_goods_id(url)
+        if not gid:
+            print(f"[ZOZO] ❌ 無法從 URL 抽 goods ID: {url}")
+            # 仍嘗試舊版（可能是非 goods 頁）
+            return await self._zozo_legacy_or_self(url, product)
 
-        if not product.title and ZOZO_SCRAPER_URL:
-            result = await self._scrape_zozo_via_proxy(url)
-            if result and result.title:
-                return result
+        print(f"[ZOZO] goods ID: {gid} → 改走雅虎店")
+        ok = await self._zozo_via_yahoo(url, gid, product)
+        if ok and product.is_valid:
+            return product
 
+        # 雅虎店查無此商品（zozo.jp 子集）或抓取失敗 → 退回舊版 zozo.jp 爬蟲
+        print(f"[ZOZO] 雅虎店無此商品或抓取失敗，退回舊版 zozo.jp 爬蟲")
+        return await self._zozo_legacy_or_self(url, product)
+
+    async def _zozo_legacy_or_self(self, url: str, product: ProductInfo) -> ProductInfo:
+        """有舊版 _scrape_zozotown_legacy 就用，否則回傳目前 product（可能 invalid）。"""
+        if hasattr(self, "_scrape_zozotown_legacy"):
+            try:
+                return await self._scrape_zozotown_legacy(url)
+            except Exception as e:
+                print(f"[ZOZO] legacy 失敗: {type(e).__name__}: {e}")
         return product
 
-    def _fetch_zozo_uc(self, url: str) -> dict | None:
-        import time as _time
+    # ─────────────────────────────────────────────────────────────────
+    # goods ID 抽取
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _zozo_extract_goods_id(url: str) -> str:
+        # zozo.jp/shop/<brand>/goods/<id>/  或  goods-sale/<id>/
+        m = re.search(r'/goods(?:-sale)?/(\d{4,})', url)
+        if m:
+            return m.group(1)
+        # 已經是雅虎店連結 store.shopping.yahoo.co.jp/zozo/<id>.html
+        m = re.search(r'/zozo/(\d{4,})\.html', url)
+        if m:
+            return m.group(1)
+        return ""
 
-        with self._driver_lock:
-            try:
-                driver = self._ensure_driver()
-                if not driver:
-                    return None
-
-                if not self._proxy_verified and PROXY_URL:
-                    try:
-                        driver.get('http://httpbin.org/ip')
-                        _time.sleep(1)
-                        src = driver.page_source
-                        print(f"[ZOZO] proxy IP: {src[:100]}")
-                        self._proxy_verified = True
-                    except Exception as e:
-                        print(f"[ZOZO] proxy 測試: {type(e).__name__}")
-
-                self._clean_driver_tabs()
-                self._driver_use_count += 1
-
-                print(f"[ZOZO] 載入: {url}")
-                try:
-                    driver.uc_open_with_reconnect(url, reconnect_time=6)
-                except Exception as e:
-                    print(f"[ZOZO] uc_open: {type(e).__name__}: {e}")
-
-                for i in range(12):
-                    _time.sleep(3 if i < 3 else 2)
-                    try:
-                        html = driver.page_source
-                        title = driver.title
-                    except:
-                        continue
-
-                    has_data = ('application/ld+json' in html or
-                               '__NEXT_DATA__' in html or
-                               'og:title' in html)
-
-                    print(f"[ZOZO] 嘗試 {i+1}: {len(html)} bytes | data={has_data}")
-
-                    if has_data:
-                        result = driver.execute_script(r"""
-                            var r = {title:'', brand:'', price:0, price_text:'',
-                                     original_price:0, original_price_text:'', discount:'',
-                                     images:[], description:'', item_id:'', in_stock:true,
-                                     variants:[], variant_debug:''};
-
-                            var m = location.pathname.match(/\/goods(?:-sale)?\/(\d+)/);
-                            if (m) r.item_id = m[1];
-
-                            document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s) {
-                                try {
-                                    var d = JSON.parse(s.textContent);
-                                    if (Array.isArray(d)) d = d.find(function(i){return i['@type']==='Product'}) || d[0];
-                                    if (d && d['@type'] === 'Product') {
-                                        r.title = d.name || '';
-                                        var b = d.brand || '';
-                                        r.brand = (typeof b === 'object') ? (b.name || '') : String(b);
-                                        r.description = d.description || '';
-                                        var img = d.image || [];
-                                        if (typeof img === 'string') img = [img];
-                                        r.images = img.filter(function(i){return typeof i === 'string' && i.indexOf('c.imgz.jp') !== -1}).slice(0,15);
-                                        var offers = d.offers || {};
-                                        if (Array.isArray(offers)) {
-                                            offers.forEach(function(o) {
-                                                if (o.price && !r.price) {
-                                                    r.price = parseInt(o.price);
-                                                    r.price_text = '\u00a5' + r.price.toLocaleString();
-                                                }
-                                            });
-                                            offers = offers[0] || {};
-                                        } else {
-                                            if (offers.price) {
-                                                r.price = parseInt(offers.price);
-                                                r.price_text = '\u00a5' + r.price.toLocaleString();
-                                            }
-                                        }
-                                        if (offers.availability && offers.availability.indexOf('OutOfStock') !== -1) r.in_stock = false;
-                                    }
-                                } catch(e) {}
-                            });
-
-                            var nd = document.getElementById('__NEXT_DATA__');
-                            if (nd) {
-                                try {
-                                    var ndata = JSON.parse(nd.textContent);
-                                    var props = ndata.props && ndata.props.pageProps ? ndata.props.pageProps : {};
-                                    var prod = props.product || props.goods || props.item ||
-                                              (props.initialState && props.initialState.product) || {};
-
-                                    if (!r.title && prod.name) r.title = prod.name;
-                                    if (!r.brand && prod.brandName) r.brand = prod.brandName;
-                                    if (!r.price && prod.price) {
-                                        r.price = parseInt(prod.price);
-                                        r.price_text = '\u00a5' + r.price.toLocaleString();
-                                    }
-                                    if (r.images.length === 0 && prod.images) {
-                                        r.images = prod.images.map(function(i){return i.url || i}).slice(0,15);
-                                    }
-
-                                    var items = prod.items || prod.skus || prod.variants ||
-                                               prod.colorSizes || prod.detail && prod.detail.items || [];
-
-                                    if (items.length > 0) {
-                                        items.forEach(function(item) {
-                                            var v = {
-                                                color: item.colorName || item.color || item.colorLabel || '',
-                                                size: item.sizeName || item.size || item.sizeLabel || '',
-                                                sku: item.skuId || item.id || item.sku || '',
-                                                price: item.price ? parseInt(item.price) : r.price,
-                                                in_stock: item.soldout !== true && item.inStock !== false,
-                                                image: item.imageUrl || item.image || ''
-                                            };
-                                            if (v.color || v.size) r.variants.push(v);
-                                        });
-                                    }
-
-                                    r.variant_debug = 'pageProps keys: ' + Object.keys(props).join(',');
-                                } catch(e) {
-                                    r.variant_debug = 'NEXT_DATA error: ' + e.message;
-                                }
-                            }
-
-                            if (r.variants.length === 0) {
-                                var dts = document.querySelectorAll('dt.p-goods-information-action__term');
-
-                                dts.forEach(function(dt) {
-                                    var colorName = dt.textContent.trim();
-                                    var dd = dt.nextElementSibling;
-                                    if (!dd) return;
-
-                                    var dlParent = dt.parentElement;
-                                    var thumbImg = null;
-                                    if (dlParent) {
-                                        thumbImg = dlParent.querySelector('img[src*="imgz.jp"], img[src*="zozo"]');
-                                    }
-                                    if (!thumbImg && dd) {
-                                        thumbImg = dd.querySelector('img');
-                                    }
-                                    var colorImage = '';
-                                    if (thumbImg) {
-                                        colorImage = thumbImg.src || thumbImg.getAttribute('data-src') || '';
-                                        if (colorImage.indexOf('_35.') !== -1) {
-                                            colorImage = colorImage.replace(/_35\./, '_500.');
-                                        }
-                                    }
-
-                                    var sizeItems = dd.querySelectorAll('li.p-goods-add-cart-list__item');
-                                    sizeItems.forEach(function(li) {
-                                        var fullText = li.textContent.replace(/\s+/g, ' ').trim();
-                                        var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:\.\d+)?(?:cm)?)\s*[\/／]/i);
-                                        var size = sizeMatch ? sizeMatch[1].trim() : '';
-                                        if (!size) return;
-
-                                        var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
-
-                                        var sku = '';
-                                        var form = li.querySelector('form');
-                                        if (form) {
-                                            form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
-                                                var n = (inp.name || '').toLowerCase();
-                                                if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
-                                            });
-                                        }
-
-                                        r.variants.push({
-                                            color: colorName,
-                                            size: size,
-                                            sku: sku,
-                                            price: r.price,
-                                            in_stock: !soldOut,
-                                            image: colorImage
-                                        });
-                                    });
-                                });
-
-                                if (r.variants.length === 0) {
-                                    var items = document.querySelectorAll('li.p-goods-add-cart-list__item');
-                                    items.forEach(function(li) {
-                                        var fullText = li.textContent.replace(/\s+/g, ' ').trim();
-                                        var sizeMatch = fullText.match(/^\s*([A-Z0-9SMLXF]+(?:\s*[\-~]\s*[A-Z0-9SMLXF]+)?)\s*[\/／]/);
-                                        if (!sizeMatch) sizeMatch = fullText.match(/^\s*(フリー|FREE|F|ONE\s*SIZE|ワンサイズ|\d+(?:cm)?)\s*[\/／]/i);
-                                        var size = sizeMatch ? sizeMatch[1].trim() : '';
-                                        if (!size) return;
-
-                                        var soldOut = fullText.indexOf('完売') !== -1 || fullText.indexOf('在庫なし') !== -1 || fullText.indexOf('SOLD') !== -1;
-                                        var sku = '';
-                                        var form = li.querySelector('form');
-                                        if (form) {
-                                            form.querySelectorAll('input[type="hidden"]').forEach(function(inp) {
-                                                var n = (inp.name || '').toLowerCase();
-                                                if (n === 'did' || n === 'sid' || n === 'detail_id' || n === 'gid') sku = inp.value || '';
-                                            });
-                                        }
-
-                                        r.variants.push({
-                                            color: '',
-                                            size: size,
-                                            sku: sku,
-                                            price: r.price,
-                                            in_stock: !soldOut,
-                                            image: ''
-                                        });
-                                    });
-                                }
-
-                                var seen = {};
-                                var unique = [];
-                                r.variants.forEach(function(v) {
-                                    var key = v.color.replace(/s+/g,'') + '|' + v.size.replace(/s+/g,'');
-                                    if (!seen[key]) {
-                                        seen[key] = true;
-                                        unique.push(v);
-                                    }
-                                });
-                                r.variants = unique;
-                            }
-
-                            if (!r.title) {
-                                var og = document.querySelector('meta[property="og:title"]');
-                                if (og) r.title = og.content.replace(/\s*[-|]\s*ZOZOTOWN.*$/, '');
-                            }
-                            if (r.images.length === 0) {
-                                var ogImg = document.querySelector('meta[property="og:image"]');
-                                if (ogImg && ogImg.content) r.images.push(ogImg.content);
-                            }
-
-                            if (!r.price) {
-                                document.querySelectorAll('[class*="price"], [class*="Price"]').forEach(function(el) {
-                                    if (!r.price) {
-                                        var pm = el.textContent.match(/[\u00a5\uffe5]([\d,]+)/);
-                                        if (pm) { r.price = parseInt(pm[1].replace(/,/g,'')); r.price_text = '\u00a5' + r.price.toLocaleString(); }
-                                    }
-                                });
-                            }
-
-                            var seen = {};
-                            r.images.forEach(function(u){ seen[u] = true; });
-                            document.querySelectorAll('img[src*="c.imgz.jp"], img[data-src*="c.imgz.jp"]').forEach(function(img) {
-                                var src = img.src || img.getAttribute('data-src') || '';
-                                if (src && !seen[src] && img.naturalWidth > 50) {
-                                    r.images.push(src);
-                                    seen[src] = true;
-                                }
-                            });
-                            r.images = r.images.slice(0, 20);
-                            var liClasses = new Set();
-                            document.querySelectorAll('li').forEach(function(el) {
-                                if (el.className) liClasses.add(el.className.trim().split(' ')[0]);
-                            });
-                            var dtClasses = new Set();
-                            document.querySelectorAll('dt').forEach(function(el) {
-                                if (el.className) dtClasses.add(el.className.trim().split(' ')[0]);
-                            });
-                            r.variant_debug += ' | li_classes: ' + Array.from(liClasses).slice(0,15).join(',') +
-                                               ' | dt_classes: ' + Array.from(dtClasses).slice(0,10).join(',') +
-                                               ' | NEXT_DATA: ' + (document.getElementById('__NEXT_DATA__') ? 'yes' : 'no');
-                            return r;
-                        """)
-                        if result:
-                            vd = result.get('variant_debug', '')
-                            vs = result.get('variants', [])
-                            print(f"[ZOZO] variant_debug: {vd}")
-                            print(f"[ZOZO] variants: {len(vs)} 個")
-
-                        # === 用 GetSizeMappinngList API 修正庫存 ===
-                        gid = (result or {}).get('item_id', '')
-                        if gid:
-                            try:
-                                stock_data = driver.execute_async_script("""
-                                    var callback = arguments[arguments.length - 1];
-                                    var gid = arguments[0];
-                                    var gtid = '';
-                                    var gtcid = '';
-                                    try { gtid = window.__adsInnerGoodspv.item.category_id || ''; } catch(e) {}
-                                    document.querySelectorAll('script:not([src])').forEach(function(s) {
-                                        var t = s.textContent;
-                                        var m = t.match(/gtcid[\'":\\s]+([0-9]+)/);
-                                        if (m && !gtcid) gtcid = m[1];
-                                    });
-                                    if (!gtid) { callback(null); return; }
-                                    var url = '/sp/?command=GetSizeMappinngList&gid=' + gid
-                                            + '&gtid=' + gtid
-                                            + (gtcid ? '&gtcid=' + gtcid : '');
-                                    fetch(url, {credentials: 'include'})
-                                        .then(function(r){ return r.json(); })
-                                        .then(function(d){ callback(d); })
-                                        .catch(function(e){ callback(null); });
-                                """, gid)
-
-                                if stock_data:
-                                    print(f"[ZOZO] GetSizeMappinngList 取得: {str(stock_data)[:300]}")
-                                    stock_list = (stock_data.get('list') or
-                                                  stock_data.get('sizeList') or
-                                                  stock_data.get('result') or [])
-                                    if isinstance(stock_list, dict):
-                                        stock_list = stock_list.get('list') or stock_list.get('sizeList') or []
-                                    did_stock = {}      # detailId → in_stock
-                                    color_size_stock = {}  # "colorName|sizeName" → in_stock
-                                    for s in (stock_list if isinstance(stock_list, list) else []):
-                                        did = str(s.get('detailId') or s.get('did') or s.get('goodsDetailId') or '')
-                                        color = str(s.get('colorName') or s.get('color') or s.get('colorLabel') or '')
-                                        size = str(s.get('sizeName') or s.get('size') or s.get('sizeLabel') or '')
-                                        sold = s.get('isSoldOut') or s.get('soldOut') or s.get('soldout') or False
-                                        qty = int(s.get('quantity') or s.get('stock') or s.get('stockCount') or (0 if sold else 1))
-                                        in_stk = (not sold) and (qty > 0)
-                                        if did:
-                                            did_stock[did] = in_stk
-                                        if color and size:
-                                            color_size_stock[color + '|' + size] = in_stk
-
-                                    if (did_stock or color_size_stock) and result and result.get('variants'):
-                                        for v in result['variants']:
-                                            sku = str(v.get('sku', ''))
-                                            color = str(v.get('color', ''))
-                                            size = str(v.get('size', ''))
-                                            cs_key = color + '|' + size
-                                            if sku in did_stock:
-                                                # 最精確：detailId 直接匹配
-                                                v['in_stock'] = did_stock[sku]
-                                            elif cs_key in color_size_stock:
-                                                # 次精確：顏色+尺寸匹配
-                                                v['in_stock'] = color_size_stock[cs_key]
-                                            # 不 fallback size-only，避免跨顏色污染
-                                        print(f"[ZOZO] 庫存修正完成 did:{len(did_stock)} cs:{len(color_size_stock)}")
-                            except Exception as e:
-                                print(f"[ZOZO] GetSizeMappinngList 失敗: {e}")
-
-                        return result
-
-                    if 'access denied' in (title or '').lower() and i >= 2:
-                        print("[ZOZO] 被 Akamai 擋住")
-                        break
-
-                print("[ZOZO] ⚠️ 未取得資料")
-
-            except Exception as e:
-                print(f"[ZOZO] SeleniumBase 錯誤: {e}")
-                try:
-                    self._driver.quit()
-                except:
-                    pass
-                self._driver = None
-
-            return None
-
-    async def _scrape_zozo_via_proxy(self, url: str) -> ProductInfo | None:
-        product = ProductInfo(source_url=url)
+    # ─────────────────────────────────────────────────────────────────
+    # 雅虎店抓取（httpx，SSR）
+    # ─────────────────────────────────────────────────────────────────
+    async def _zozo_via_yahoo(self, zozo_url: str, gid: str, product: ProductInfo) -> bool:
+        yahoo_url = _YAHOO_STORE.format(gid=gid)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+        }
+        proxy_arg = PROXY_URL if PROXY_URL else None
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    f"{ZOZO_SCRAPER_URL.rstrip('/')}/api/fetch",
-                    json={"url": url},
-                )
-                data = resp.json()
-
-            if data.get("error"):
-                return None
-
-            product.title = data.get("title", "")
-            product.price_jpy = int(data.get("price", 0) * 1.1) or None
-            product.brand = data.get("brand", "")
-            product.description = data.get("description", "")[:500]
-            images = data.get("images", [])
-            if images:
-                product.image_url = images[0]
-                product.extra_images = images[1:9]
-            return product if product.title else None
-
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
+                resp = await client.get(yahoo_url, headers=headers)
+                print(f"[ZOZO] 雅虎店 {yahoo_url} → {resp.status_code}, {len(resp.text)} bytes")
+                if resp.status_code != 200 or not resp.text:
+                    return False
+                self._zozo_parse_yahoo(resp.text, zozo_url, yahoo_url, gid, product)
         except Exception as e:
-            print(f"[ZOZO] 外部爬蟲連線失敗: {e}")
+            print(f"[ZOZO] httpx 錯誤: {type(e).__name__}: {e}")
+            return False
+
+        return bool(product.price_jpy)
+
+    def _zozo_parse_yahoo(self, html: str, zozo_url: str, yahoo_url: str,
+                          gid: str, product: ProductInfo) -> None:
+        soup = BeautifulSoup(html, "html.parser")
+
+        def meta(prop=None, name=None):
+            if prop:
+                el = soup.find("meta", attrs={"property": prop})
+                if el and el.get("content"):
+                    return el["content"].strip()
+            if name:
+                el = soup.find("meta", attrs={"name": name})
+                if el and el.get("content"):
+                    return el["content"].strip()
+            return ""
+
+        # ── 標題：og:title 去掉「 : ZOZOTOWN Yahoo!店 …」尾巴 ──
+        title = meta(prop="og:title")
+        title = re.split(r'\s*[:：]\s*ZOZOTOWN\s*Yahoo', title)[0].strip()
+        if title:
+            product.title = title
+
+        # ── 價格：product:price:amount（税込；可能是セール価格）──
+        price = meta(prop="product:price:amount") or meta(name="product:price:amount")
+        v = self._zozo_to_int(price)
+        if v:
+            product.price_jpy = v
+
+        # ── 主圖：og:image ──
+        img = meta(prop="og:image")
+        if img:
+            product.image_url = img
+
+        # ── og:description 解析（品番 / カラー / サイズ / 素材 等）──
+        desc = meta(prop="og:description")
+        fields = self._zozo_parse_desc(desc)
+
+        # 品牌
+        brand = fields.get("ブランド", "")
+        if brand:
+            product.brand = brand.split("，")[0].split(",")[0].strip()
+
+        # 描述：商品名 + 素材 + 原産国 + 品番
+        desc_bits = []
+        if fields.get("商品名"):
+            desc_bits.append(fields["商品名"])
+        if fields.get("素材"):
+            desc_bits.append(f"素材：{fields['素材']}")
+        if fields.get("原産国"):
+            desc_bits.append(f"原産国：{fields['原産国']}")
+        if fields.get("ブランド品番"):
+            desc_bits.append(f"品番：{fields['ブランド品番']}")
+        product.description = "｜".join(desc_bits)
+
+        # ── 變體：カラー × サイズ ──
+        colors = self._zozo_split_multi(fields.get("カラー", ""))
+        sizes = self._zozo_split_multi(fields.get("サイズ", ""))
+        product.variants = self._zozo_build_variants(colors, sizes, gid, product.price_jpy)
+
+        # ── 額外圖片：body 內同商品的 _N_d_500.jpg ──
+        product.extra_images = self._zozo_extra_images(soup, product.image_url)
+
+        # ── 下單來源 ──
+        product.source_url = yahoo_url if USE_YAHOO_AS_SOURCE else zozo_url
+
+        if product.is_valid:
+            print(f"[ZOZO] ✅ {product.title[:50]!r} | ¥{product.price_jpy:,} | "
+                  f"brand={product.brand!r} | variants={len(product.variants)} | "
+                  f"images={1 + len(product.extra_images)}")
+
+    # ─────────────────────────────────────────────────────────────────
+    # 解析 helpers
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _zozo_parse_desc(desc: str) -> dict:
+        """og:description 以 <br> 分段，每段「key:value」拆成 dict。"""
+        out = {}
+        if not desc:
+            return out
+        for seg in re.split(r'<br\s*/?>', desc):
+            seg = seg.strip()
+            if not seg:
+                continue
+            m = re.match(r'([^:：]+)[:：](.*)', seg)
+            if m:
+                out[m.group(1).strip()] = m.group(2).strip()
+        return out
+
+    @staticmethod
+    def _zozo_split_multi(s: str) -> list:
+        """カラー/サイズ 以全角／半角逗號分隔。"""
+        if not s:
+            return []
+        parts = re.split(r'[，,]', s)
+        return [p.strip() for p in parts if p.strip()]
+
+    @staticmethod
+    def _zozo_build_variants(colors: list, sizes: list, gid: str, price) -> list:
+        # 單色單尺寸（或皆無）→ 視為單品，不建變體
+        eff_colors = colors or [""]
+        eff_sizes = sizes or [""]
+        if len(eff_colors) <= 1 and len(eff_sizes) <= 1:
+            return []
+        variants = []
+        for c in eff_colors:
+            for s in eff_sizes:
+                label = "-".join([p for p in (c, s) if p])
+                variants.append({
+                    "color": c,
+                    "size": s,
+                    "sku": f"{gid}-{label}" if label else gid,
+                    "price": price or 0,
+                    "in_stock": True,   # 雅虎 meta 無逐變體庫存，預設 True
+                    "image": "",
+                })
+        return variants
+
+    @staticmethod
+    def _zozo_extra_images(soup: BeautifulSoup, main: str) -> list:
+        urls = []
+        for tag in soup.find_all("img"):
+            src = tag.get("src") or ""
+            if "z-shopping.c.yimg.jp" in src and src != main and src not in urls:
+                urls.append(src)
+            if len(urls) >= 8:
+                break
+        return urls
+
+    @staticmethod
+    def _zozo_to_int(value) -> int | None:
+        if value is None:
             return None
+        s = re.sub(r'[^0-9]', '', str(value))
+        if not s:
+            return None
+        try:
+            v = int(s)
+        except ValueError:
+            return None
+        return v if _MIN_PRICE <= v <= _MAX_PRICE else None
