@@ -168,6 +168,11 @@ class AmiamiMixin:
                 await asyncio.sleep(wait)
                 continue
 
+            # itemCode 無效（多半是該商品未上架樂天 amiami 店）→ 當作查無
+            if resp.status_code == 400 and "itemCode" in resp.text:
+                print(f"[Amiami] ⚠️ itemCode 無效，此商品可能未上架樂天 amiami 店：{resp.text[:150]}")
+                return {"Items": []}
+
             print(f"[Amiami] ❌ 樂天 API HTTP {resp.status_code}: {resp.text[:200]}")
             return None
 
