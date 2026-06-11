@@ -56,8 +56,27 @@ class ShopifyClient:
         color_image_map = {}
 
         if variants and len(variants) > 0:
-            has_color = any(v.get("color") for v in variants)
-            has_size = any(v.get("size") for v in variants)
+            # 診斷：印出進來的變體（前 3 個），萬一再出問題可比對真實資料
+            try:
+                print(f"[Shopify] 收到 {len(variants)} 個變體，前3: {variants[:3]}")
+            except Exception:
+                pass
+
+            # 正規化：None / 缺鍵 → ''，並去空白
+            #   （防止 optionValues 出現 null/空字串 → productSet 報錯）
+            vn = []
+            for v in variants:
+                vn.append({
+                    "color": (v.get("color") or "").strip(),
+                    "size": (v.get("size") or "").strip(),
+                    "price": v.get("price", 0),
+                    "sku": str(v["sku"]) if v.get("sku") else "",
+                    "in_stock": v.get("in_stock", True),
+                    "image": v.get("image", "") or "",
+                })
+
+            has_color = any(v["color"] for v in vn)
+            has_size = any(v["size"] for v in vn)
 
             import re as _re
 
@@ -87,7 +106,7 @@ class ShopifyClient:
                     "\u30d1\u30fc\u30d7\u30eb", "\u30af\u30ea\u30a2",
                     "silver", "black", "white", "red", "blue", "gold",
                 ]
-                vals = [v.get(field, "") for v in variants if v.get(field)]
+                vals = [v[field] for v in vn if v[field]]
                 s, c = 0, 0
                 for val in vals:
                     if any(_re.search(p, val, _re.IGNORECASE) for p in size_pats):
@@ -99,42 +118,45 @@ class ShopifyClient:
             color_is_actually_size = has_color and _vals_look_like_size("color")
             size_is_actually_color = has_size and not _vals_look_like_size("size")
 
+            # active = 真正的選項清單 [(欄位, 選項名)]（沿用相容命名/避免撞名）
+            active = []
             if has_color:
                 opt1_name = "サイズ" if color_is_actually_size else "カラー"
-                option_names.append(opt1_name)
-                print(f"[Shopify] option1 → {opt1_name} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
+                active.append(("color", opt1_name))
             if has_size:
                 lbl = "カラー" if size_is_actually_color else "サイズ"
-                if lbl in option_names:
+                if any(name == lbl for _, name in active):
                     lbl = "サイズ" if lbl == "カラー" else "カラー"
                 opt2_name = lbl
-                option_names.append(opt2_name)
-                print(f"[Shopify] option2 → {opt2_name} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
+                active.append(("size", opt2_name))
+            if active:
+                print(f"[Shopify] options → {[name for _, name in active]}")
 
-            for v in variants:
-                color = v.get("color", "")
-                img = v.get("image", "")
-                if color and img and color not in color_image_map:
-                    color_image_map[color] = img
+            # 顏色圖
+            for v in vn:
+                if v["color"] and v["image"] and v["color"] not in color_image_map:
+                    color_image_map[v["color"]] = v["image"]
 
-            for v in variants:
-                vop = v.get("price", 0)
-                if vop and vop > 0:
-                    sp = calculate_selling_price(vop)["selling_price_jpy"]
-                else:
-                    sp = price_jpy
+            # 建變體：缺任一 active 選項值的變體直接略過
+            #   → 保證每個送出的變體都有完整 optionValues（無 null/空），滿足 codependency
+            dropped = 0
+            for v in vn:
                 ov = []
-                if has_color and has_size:
-                    ov = [(opt1_name, v.get("color", "")), (opt2_name, v.get("size", ""))]
-                elif has_color:
-                    ov = [(opt1_name, v.get("color", ""))]
-                elif has_size:
-                    ov = [(opt1_name, v.get("size", ""))]
-                variant_specs.append({
-                    "ov": ov, "price": sp,
-                    "sku": str(v["sku"]) if v.get("sku") else "",
-                    "color": v.get("color", ""),
-                })
+                complete = True
+                for field, oname in active:
+                    val = v[field]
+                    if not val:
+                        complete = False
+                        break
+                    ov.append((oname, val))
+                if active and not complete:
+                    dropped += 1
+                    continue
+                vop = v["price"]
+                sp = calculate_selling_price(vop)["selling_price_jpy"] if vop and vop > 0 else price_jpy
+                variant_specs.append({"ov": ov, "price": sp, "sku": v["sku"], "color": v["color"]})
+            if dropped:
+                print(f"[Shopify] ⚠️ 略過 {dropped} 個選項值不完整的變體（避免 optionValues null）")
 
             # 去重（option 值組合相同保留第一個）
             seen = set()
@@ -147,6 +169,9 @@ class ShopifyClient:
                 else:
                     print(f"[Shopify] ⚠️ 重複 variant 已移除: {key}")
             variant_specs = dd
+
+            # 有完整變體才把 active 當真選項；全被略過則退回單品
+            option_names = [name for _, name in active] if variant_specs else []
 
         # 單品 fallback（無 options、無 optionValues）
         if not variant_specs:
