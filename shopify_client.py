@@ -1,4 +1,18 @@
-"""Shopify Admin API 整合"""
+"""Shopify Admin API 整合（v2 — 建商品改用 GraphQL productSet）
+
+背景：Shopify REST `POST /products.json` 自 2024-04 起棄用、2024-10 版已不再從
+payload materialize variants/options（實測 variants:1），導致代購商品上架後沒有
+顏色/尺寸子類。本版把「建立商品 + options + variants」改用 GraphQL productSet。
+
+保留 REST 的部分（這些端點未受影響）：商品圖片上傳、顏色圖連動、collection 加入。
+發佈銷售管道本來就是 GraphQL，維持不變。
+
+庫存策略：productSet 在「建立」階段會忽略 inventoryQuantities（Shopify 已知行為），
+因此改用 inventoryItem.tracked=false（不追蹤庫存＝永遠可下單），符合代購非現貨本質，
+並避開該 bug。若日後要逐變體擋缺貨，再加 tracked=true + inventorySetQuantities。
+"""
+import json
+import base64 as _b64
 import httpx
 from config import SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, SHOPIFY_API_VERSION, DAIGO_COLLECTION_ID, STORE_DOMAIN
 from pricing import calculate_selling_price
@@ -7,38 +21,44 @@ from pricing import calculate_selling_price
 class ShopifyClient:
     def __init__(self):
         self.base_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}"
+        self.graphql_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
         self.headers = {
             "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
             "Content-Type": "application/json",
         }
 
+    # ──────────────────────────────────────────────────────────────────
+    # GraphQL helper
+    # ──────────────────────────────────────────────────────────────────
+    async def _graphql(self, query: str, variables: dict = None) -> dict:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                self.graphql_url, headers=self.headers,
+                json={"query": query, "variables": variables or {}},
+            )
+            if resp.status_code != 200:
+                raise Exception(f"Shopify GraphQL HTTP {resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+            if data.get("errors"):
+                raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)[:400]}")
+            return data
+
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
                                     seo_title="", seo_tags=None, in_stock=True):
-        shopify_variants = []
-        options = []
+        # ══════════════════════════════════════════════════════════════
+        # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
+        # ══════════════════════════════════════════════════════════════
+        option_names = []          # 有序，如 ["カラー","サイズ"]
+        opt1_name = opt2_name = None
+        variant_specs = []         # {ov:[(optName,val)...], price, sku, color}
         color_image_map = {}
-
-        # ★ DEBUG: 印出進來的 variants 原始結構（前 3 個）
-        if variants:
-            print(f"[Shopify][DEBUG] 收到 {len(variants)} 個 variants，前 3 個原始資料:")
-            for i, v in enumerate(variants[:3]):
-                print(f"  [{i}] type={type(v).__name__} content={v!r}")
-            # 統計：有多少 variant 的 price > 0
-            valid_price_count = sum(
-                1 for v in variants
-                if isinstance(v, dict) and v.get("price") and float(v.get("price", 0) or 0) > 0
-            )
-            print(f"[Shopify][DEBUG] 有效價格 variant 數: {valid_price_count}/{len(variants)}, 主價 price_jpy={price_jpy}")
 
         if variants and len(variants) > 0:
             has_color = any(v.get("color") for v in variants)
             has_size = any(v.get("size") for v in variants)
 
-            # ── 動態決定 option 名稱
-            # Amazon 有時把尺寸放在「カラー」維度、顏色放在「サイズ」維度（命名錯誤）
-            # 所以這裡根據值的實際內容判斷，而不是信任欄位名稱
             import re as _re
 
             def _vals_look_like_size(field):
@@ -80,16 +100,16 @@ class ShopifyClient:
             size_is_actually_color = has_size and not _vals_look_like_size("size")
 
             if has_color:
-                label = "サイズ" if color_is_actually_size else "カラー"
-                options.append({"name": label})
-                print(f"[Shopify] option1 → {label} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
+                opt1_name = "サイズ" if color_is_actually_size else "カラー"
+                option_names.append(opt1_name)
+                print(f"[Shopify] option1 → {opt1_name} (color欄位值像{'尺寸' if color_is_actually_size else '顏色'})")
             if has_size:
-                label = "カラー" if size_is_actually_color else "サイズ"
-                existing_labels = [o["name"] for o in options]
-                if label in existing_labels:
-                    label = "サイズ" if label == "カラー" else "カラー"
-                options.append({"name": label})
-                print(f"[Shopify] option2 → {label} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
+                lbl = "カラー" if size_is_actually_color else "サイズ"
+                if lbl in option_names:
+                    lbl = "サイズ" if lbl == "カラー" else "カラー"
+                opt2_name = lbl
+                option_names.append(opt2_name)
+                print(f"[Shopify] option2 → {opt2_name} (size欄位值像{'顏色' if size_is_actually_color else '尺寸'})")
 
             for v in variants:
                 color = v.get("color", "")
@@ -98,67 +118,71 @@ class ShopifyClient:
                     color_image_map[color] = img
 
             for v in variants:
-                # ★ 強化 price 解析：支援 int / float / str / None
-                raw_price = v.get("price", 0)
-                try:
-                    variant_original_price = int(float(raw_price)) if raw_price else 0
-                except (ValueError, TypeError):
-                    variant_original_price = 0
-
-                if variant_original_price > 0:
-                    variant_pricing = calculate_selling_price(variant_original_price)
-                    variant_selling_price = variant_pricing["selling_price_jpy"]
+                vop = v.get("price", 0)
+                if vop and vop > 0:
+                    sp = calculate_selling_price(vop)["selling_price_jpy"]
                 else:
-                    variant_selling_price = price_jpy
-                    print(
-                        f"[Shopify][DEBUG] ⚠️ variant 無有效 price (raw={raw_price!r}, "
-                        f"size={v.get('size', '')!r}, color={v.get('color', '')!r}) → "
-                        f"fallback to price_jpy={price_jpy}"
-                    )
-
-                v_in_stock = v.get("in_stock", True)
-                sv = {
-                    "price": str(variant_selling_price),
-                    "inventory_management": "shopify",
-                    "inventory_policy": "deny",
-                    "inventory_quantity": 1 if v_in_stock else 0,
-                    "requires_shipping": True,
-                }
+                    sp = price_jpy
+                ov = []
                 if has_color and has_size:
-                    sv["option1"] = v.get("color", "")
-                    sv["option2"] = v.get("size", "")
+                    ov = [(opt1_name, v.get("color", "")), (opt2_name, v.get("size", ""))]
                 elif has_color:
-                    sv["option1"] = v.get("color", "")
+                    ov = [(opt1_name, v.get("color", ""))]
                 elif has_size:
-                    sv["option1"] = v.get("size", "")
+                    ov = [(opt1_name, v.get("size", ""))]
+                variant_specs.append({
+                    "ov": ov, "price": sp,
+                    "sku": str(v["sku"]) if v.get("sku") else "",
+                    "color": v.get("color", ""),
+                })
 
-                if v.get("sku"):
-                    sv["sku"] = str(v["sku"])
+            # 去重（option 值組合相同保留第一個）
+            seen = set()
+            dd = []
+            for s in variant_specs:
+                key = tuple(val for _, val in s["ov"])
+                if key not in seen:
+                    seen.add(key)
+                    dd.append(s)
+                else:
+                    print(f"[Shopify] ⚠️ 重複 variant 已移除: {key}")
+            variant_specs = dd
 
-                shopify_variants.append(sv)
+        # 單品 fallback（無 options、無 optionValues）
+        if not variant_specs:
+            variant_specs = [{"ov": [], "price": price_jpy, "sku": "", "color": ""}]
+            option_names = []
 
-        # ── 去除重複 variant（option1+option2 組合相同就保留第一個）
-        seen_opts = set()
-        deduped_variants = []
-        for sv in shopify_variants:
-            key = (sv.get("option1", ""), sv.get("option2", ""))
-            if key not in seen_opts:
-                seen_opts.add(key)
-                deduped_variants.append(sv)
-            else:
-                print(f"[Shopify] ⚠️ 重複 variant 已移除: {key}")
-        shopify_variants = deduped_variants
+        # ══════════════════════════════════════════════════════════════
+        # 2. 組 productSet 的 productOptions + variants
+        # ══════════════════════════════════════════════════════════════
+        product_options = []
+        for i, oname in enumerate(option_names):
+            vals = []
+            for s in variant_specs:
+                for n, val in s["ov"]:
+                    if n == oname and val and val not in vals:
+                        vals.append(val)
+            product_options.append({"name": oname, "position": i + 1,
+                                     "values": [{"name": x} for x in vals]})
 
-        if not shopify_variants:
-            # variants 空の単品 → in_stock パラメータで庫存設定
-            shopify_variants = [{
-                "price": str(price_jpy),
-                "inventory_management": "shopify",
-                "inventory_policy": "deny",
-                "inventory_quantity": 1 if in_stock else 0,
-                "requires_shipping": True,
-            }]
+        gql_variants = []
+        for s in variant_specs:
+            inv_item = {"tracked": False}
+            if s["sku"]:
+                inv_item["sku"] = s["sku"]
+            gv = {
+                "price": str(s["price"]),
+                "inventoryItem": inv_item,
+                "inventoryPolicy": "CONTINUE",
+            }
+            if s["ov"]:
+                gv["optionValues"] = [{"optionName": n, "name": val} for n, val in s["ov"]]
+            gql_variants.append(gv)
 
+        # ══════════════════════════════════════════════════════════════
+        # 3. 標題 / tags / metafields
+        # ══════════════════════════════════════════════════════════════
         final_title = seo_title if seo_title else f"日本代購｜{title}"
 
         final_tags = list(seo_tags) if seo_tags else ["日本代購", "代購", "daigo"]
@@ -169,104 +193,83 @@ class ShopifyClient:
                 if t not in final_tags:
                     final_tags.append(t)
 
-        # === 庫存狀態判斷 → 缺貨仍設為 active，讓客人看到商品並聯繫店家 ===
-        all_out_of_stock = (bool(variants) and all(not v.get("in_stock", True) for v in variants)) or (not variants and not in_stock)
-        product_status = "active"
-        if all_out_of_stock:
-            print(f"[Shopify] ⚠️ 所有 variants 缺貨，仍設為 active（庫存為0，讓客人聯繫詢問）")
+        metafields = [mf for mf in [
+            {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
+            {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
+            {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
+        ] if mf is not None]
 
-        product_data = {
-            "product": {
-                "title": final_title,
-                "body_html": self._build_description(description, source_url, original_price_jpy, seo_title=final_title, brand=brand, tags=final_tags),
-                "vendor": brand or "代購商品",
-                "product_type": "代購",
-                "tags": final_tags,
-                "status": product_status,
-                "variants": shopify_variants,
-                "metafields": [mf for mf in [
-                    {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
-                    {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
-                    {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
-                ] if mf is not None],
-            }
+        body_html = self._build_description(description, source_url, original_price_jpy,
+                                            seo_title=final_title, brand=brand, tags=final_tags)
+
+        ps_input = {
+            "title": final_title,
+            "descriptionHtml": body_html,
+            "vendor": brand or "代購商品",
+            "productType": "代購",
+            "status": "ACTIVE",
+            "tags": final_tags,
+            "variants": gql_variants,
+            "metafields": metafields,
         }
+        if product_options:
+            ps_input["productOptions"] = product_options
 
-        if options:
-            product_data["product"]["options"] = options
+        # ══════════════════════════════════════════════════════════════
+        # 4. productSet mutation（建立商品 + options + variants）
+        # ══════════════════════════════════════════════════════════════
+        mutation = """mutation CreateDaigo($input: ProductSetInput!) {
+          productSet(synchronous: true, input: $input) {
+            product {
+              id
+              handle
+              variants(first: 100) { nodes { id selectedOptions { name value } } }
+            }
+            userErrors { field message }
+          }
+        }"""
 
-        images = []
-        added_urls = set()
+        data = await self._graphql(mutation, {"input": ps_input})
+        ps = data.get("data", {}).get("productSet", {})
+        errs = ps.get("userErrors", [])
+        if errs:
+            raise Exception(f"productSet userErrors: {json.dumps(errs, ensure_ascii=False)[:400]}")
+        product = ps.get("product")
+        if not product:
+            raise Exception(f"productSet 無回傳 product: {json.dumps(data, ensure_ascii=False)[:300]}")
+
+        product_id = int(product["id"].split("/")[-1])
+        handle = product["handle"]
+        gql_nodes = product.get("variants", {}).get("nodes", [])
+        print(f"[Shopify] 商品已建立(GraphQL): {product_id} / {handle} / variants: {len(gql_nodes)}")
+        print(f"[Shopify] 標題: {final_title}")
+        print(f"[Shopify] Tags: {final_tags}")
+
+        # ══════════════════════════════════════════════════════════════
+        # 5. 圖片上傳（REST，未受 products 棄用影響）
+        # ══════════════════════════════════════════════════════════════
         color_img_urls = set(color_image_map.values())
+        await self._upload_images(product_id, image_url, image_base64, extra_images, color_img_urls, title)
 
-        if image_base64:
-            images.append({"attachment": image_base64, "position": 1, "filename": f"{title[:30]}.jpg"})
-            print(f"[Shopify] 使用 base64 圖片上傳 ({len(image_base64)} chars)")
-        elif image_url:
-            import base64 as _b64
-            _img_attachment = None
-            # 如果已是 data URL（爬蟲預先下載），直接取 base64
-            if image_url.startswith("data:image"):
-                _img_attachment = image_url.split(",", 1)[1] if "," in image_url else None
-            else:
+        # ══════════════════════════════════════════════════════════════
+        # 6. 顏色圖連動（用 GraphQL 回傳的變體做 color → variant_ids 對映）
+        # ══════════════════════════════════════════════════════════════
+        if color_image_map and gql_nodes:
+            color_to_variant_ids = {}
+            for node in gql_nodes:
                 try:
-                    _headers = {
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Referer": image_url,
-                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                    }
-                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
-                        _r = await _c.get(image_url, headers=_headers)
-                        ct = _r.headers.get("content-type", "image/jpeg")
-                        if _r.status_code == 200 and "image" in ct:
-                            _img_attachment = _b64.b64encode(_r.content).decode()
-                except Exception as _e:
-                    print(f"[Shopify] 圖片下載失敗，改用 src: {_e}")
-            if _img_attachment:
-                images.append({"attachment": _img_attachment, "position": 1})
-            else:
-                images.append({"src": image_url, "position": 1})
-            added_urls.add(image_url)
+                    vid = int(node["id"].split("/")[-1])
+                except Exception:
+                    continue
+                for so in node.get("selectedOptions", []):
+                    if so.get("value") in color_image_map:
+                        color_to_variant_ids.setdefault(so["value"], []).append(vid)
+            if color_to_variant_ids:
+                await self._upload_color_images(product_id, color_to_variant_ids, color_image_map)
 
-        if extra_images:
-            import base64 as _b64e
-            pos = 2
-            for img in extra_images[:9]:
-                if img and img not in added_urls and img not in color_img_urls:
-                    if img.startswith("data:image"):
-                        b64e = img.split(",", 1)[1] if "," in img else None
-                        if b64e:
-                            images.append({"attachment": b64e, "position": pos})
-                    else:
-                        images.append({"src": img, "position": pos})
-                    added_urls.add(img)
-                    pos += 1
-
-        if images:
-            product_data["product"]["images"] = images
-
-        # ── 直接建立商品（不查重，每次都建立新商品；Shopify 會自動處理 handle 衝突）
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data)
-
-            if resp.status_code not in (200, 201):
-                raise Exception(f"Shopify API error ({resp.status_code}): {resp.text}")
-
-            result = resp.json()
-            product = result["product"]
-            product_id = product["id"]
-            handle = product["handle"]
-            created_variants = product.get("variants", [])
-            print(f"[Shopify] 商品已建立: {product_id} / {handle} / variants: {len(created_variants)}")
-            print(f"[Shopify] 標題: {final_title}")
-            print(f"[Shopify] Tags: {final_tags}")
-            for i, sv in enumerate(shopify_variants):
-                label = sv.get("option1", "") or sv.get("option2", "") or f"variant {i+1}"
-                print(f"[Shopify]   variant [{label}]: ¥{sv['price']}")
-
-        if color_image_map and created_variants:
-            await self._upload_color_images(product_id, created_variants, color_image_map)
-
+        # ══════════════════════════════════════════════════════════════
+        # 7. collection + 發佈
+        # ══════════════════════════════════════════════════════════════
         if DAIGO_COLLECTION_ID:
             await self._add_to_collection(product_id)
         else:
@@ -281,44 +284,91 @@ class ShopifyClient:
             "storefront_url": f"https://{STORE_DOMAIN}/products/{handle}",
         }
 
-    async def _upload_color_images(self, product_id, created_variants, color_image_map):
-        try:
-            color_to_variant_ids = {}
-            for var in created_variants:
-                color = var.get("option1", "")
-                if color and color in color_image_map:
-                    color_to_variant_ids.setdefault(color, []).append(var["id"])
+    # ──────────────────────────────────────────────────────────────────
+    # 圖片上傳（主圖 + 額外圖）→ REST /products/{id}/images.json
+    # ──────────────────────────────────────────────────────────────────
+    async def _upload_images(self, product_id, image_url, image_base64, extra_images, color_img_urls, title=""):
+        async def _post_image(payload):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.post(
+                        f"{self.base_url}/products/{product_id}/images.json",
+                        headers=self.headers, json={"image": payload},
+                    )
+                    if r.status_code not in (200, 201):
+                        print(f"[Shopify] ⚠️ 圖片上傳失敗 ({r.status_code}): {r.text[:120]}")
+                        return False
+                    return True
+            except Exception as e:
+                print(f"[Shopify] 圖片上傳錯誤: {e}")
+                return False
 
+        added_urls = set()
+        pos = 1
+
+        # 主圖
+        if image_base64:
+            await _post_image({"attachment": image_base64, "position": pos, "filename": f"{title[:30]}.jpg"})
+            print(f"[Shopify] 主圖 base64 上傳 ({len(image_base64)} chars)")
+            pos += 1
+        elif image_url:
+            attach = await self._download_b64(image_url)
+            if attach:
+                await _post_image({"attachment": attach, "position": pos})
+            else:
+                await _post_image({"src": image_url, "position": pos})
+            added_urls.add(image_url)
+            pos += 1
+
+        # 額外圖
+        if extra_images:
+            for img in extra_images[:9]:
+                if img and img not in added_urls and img not in color_img_urls:
+                    if img.startswith("data:image"):
+                        b64e = img.split(",", 1)[1] if "," in img else None
+                        if b64e:
+                            await _post_image({"attachment": b64e, "position": pos})
+                    else:
+                        attach = await self._download_b64(img)
+                        if attach:
+                            await _post_image({"attachment": attach, "position": pos})
+                        else:
+                            await _post_image({"src": img, "position": pos})
+                    added_urls.add(img)
+                    pos += 1
+
+    @staticmethod
+    async def _download_b64(url):
+        """下載圖片轉 base64（帶 Referer，繞過部分 CDN hotlink 阻擋）；失敗回 None。"""
+        if not url or url.startswith("data:image"):
+            return url.split(",", 1)[1] if url and "," in url else None
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": url,
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                r = await c.get(url, headers=headers)
+                if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+                    return _b64.b64encode(r.content).decode()
+        except Exception as e:
+            print(f"[Shopify] 圖片下載失敗，改用 src: {e}")
+        return None
+
+    async def _upload_color_images(self, product_id, color_to_variant_ids, color_image_map):
+        try:
             if not color_to_variant_ids:
                 print(f"[Shopify] ⚠️ 無顏色需要綁定圖片")
                 return
 
             print(f"[Shopify] 上傳 {len(color_to_variant_ids)} 個顏色圖片...")
 
-            import base64 as _b64c
-
-            async def _dl_b64(url):
-                if url.startswith("data:image"):
-                    return url.split(",", 1)[1] if "," in url else None
-                _h = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": url,
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                }
-                try:
-                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as _c:
-                        _r = await _c.get(url, headers=_h)
-                        if _r.status_code == 200 and "image" in _r.headers.get("content-type", ""):
-                            return _b64c.b64encode(_r.content).decode()
-                except Exception as _e:
-                    print(f"[Shopify] 圖片下載失敗: {_e}")
-                return None
-
             async with httpx.AsyncClient(timeout=30) as client:
                 linked = 0
                 for color, variant_ids in color_to_variant_ids.items():
                     img_url = color_image_map[color]
-                    b64 = await _dl_b64(img_url)
+                    b64 = await self._download_b64(img_url)
                     if b64:
                         img_payload = {"attachment": b64, "variant_ids": variant_ids}
                     else:
@@ -342,11 +392,8 @@ class ShopifyClient:
 
     async def _publish_to_all_channels(self, product_id):
         try:
-            graphql_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-            gql_headers = {
-                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-                "Content-Type": "application/json",
-            }
+            graphql_url = self.graphql_url
+            gql_headers = self.headers
 
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(graphql_url, headers=gql_headers, json={
@@ -431,7 +478,6 @@ class ShopifyClient:
 
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
-                # 只查詢指定 collection 內的商品
                 params = {
                     "collection_id": DAIGO_COLLECTION_ID,
                     "fields": "id,title,created_at,status",
@@ -482,7 +528,6 @@ class ShopifyClient:
                         errors.append(msg)
                         print(f"[Cleanup] ❌ 刪除失敗: {msg}")
 
-                # 處理分頁 Link header
                 link_header = resp.headers.get("Link", "")
                 if 'rel="next"' in link_header:
                     import re as _re
