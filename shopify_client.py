@@ -49,7 +49,7 @@ class ShopifyClient:
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
-                                    seo_title="", seo_tags=None, in_stock=True):
+                                    seo_title="", seo_tags=None, in_stock=True, platform_id=""):
         print(f"[Shopify] ▶ create_daigo_product build=GRAPHQL-PRODUCTSET-v2 | variants_in={len(variants) if variants else 0}")
         # ══════════════════════════════════════════════════════════════
         # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
@@ -223,11 +223,25 @@ class ShopifyClient:
             for t in extra_tags:
                 if t not in final_tags:
                     final_tags.append(t)
+        # ── 來源標記（轉型藍圖 #2：按來源算營收）──
+        # platform_id 由 Platform 層在 scrape 時設定；未帶時從 source_url 反推。
+        src_id = (platform_id or "").strip()
+        if not src_id and source_url:
+            try:
+                from scrapers.base import detect_platform
+                src_id = detect_platform(source_url)
+            except Exception:
+                src_id = ""
+        if src_id:
+            src_tag = f"source:{src_id}"
+            if src_tag not in final_tags:
+                final_tags.append(src_tag)
 
         metafields = [mf for mf in [
             {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
             {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
             {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
+            {"namespace": "daigo", "key": "platform", "value": src_id, "type": "single_line_text_field"} if src_id else None,
         ] if mf is not None]
 
         body_html = self._build_description(description, source_url, original_price_jpy,
