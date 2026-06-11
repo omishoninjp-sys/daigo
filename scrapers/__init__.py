@@ -1,22 +1,23 @@
 """
-GOYOUTATI DAIGO 商品爬取模組 v5.0 —— Platform 介面化
+GOYOUTATI DAIGO 商品爬取模組 v5.1 —— Platform 介面化（ZOZO 已脫離 Mixin）
 
-路由不再用 scrape() 裡的巨大 if/elif，改走 Platform registry（scrapers/platform.py）。
+路由走 Platform registry（scrapers/platform.py），不再用 scrape() 的巨大 if/elif。
   - 已抽成真 Platform 的來源：寫一支 platform_xxx.py，在下方 register()。
-  - 尚未抽的 45 支 Mixin：由 LegacyPlatform 原樣導向 _scrape_xxx，零行為變更。
-Scraper class 仍是「引擎」（持有 driver + 所有 Mixin 方法），供 Platform/Source 委派。
+  - 尚未抽的 Mixin：由 LegacyPlatform 原樣導向 _scrape_xxx，零行為變更。
+Scraper class 仍是「引擎」（持有 driver + 各 Mixin 方法），供 Platform/Source 委派。
+
+v5.1 變更：ZOZOTOWN 邏輯已整支搬進 scrapers/platform_zozotown.py（ZozoYahooSource 自含），
+  ZozotownMixin 不再被使用，已自繼承清單與 import 移除；scrapers/zozotown.py 可刪除。
 
 新增一支真 Platform：
   1. 寫 scrapers/platform_xxx.py（繼承 Platform，定義 sources）
   2. 在下方 import 並 register(XxxPlatform()) —— 註冊在 LegacyPlatform 之前
-  （不必再動 scrape()、不必動繼承清單）
 """
 
 from scrapers.base import ProductInfo, detect_platform, normalize_url, normalize_price, detect_adult, detect_blocked
 from scrapers.driver import DriverMixin
 from scrapers.generic import GenericMixin
 from scrapers.amazon import AmazonMixin
-from scrapers.zozotown import ZozotownMixin
 from scrapers.uniqlo import UniqloMixin
 from scrapers.muji import MujiMixin
 from scrapers.beams import BeamsMixin
@@ -104,7 +105,6 @@ class Scraper(
     NetmallMixin,
     GenericMixin,
     AmazonMixin,
-    ZozotownMixin,
     UniqloMixin,
     MujiMixin,
     BeamsMixin,
