@@ -6,13 +6,14 @@
   好處：純 JSON API、免 Chrome、無 Akamai 封鎖、獨立帳號（與 Yahoo 停權無關）。
 
 對應關係（已實測確認）：
-  amiami.jp 的 scode（GOODS-xxxx / FIGURE-xxxx）
-    == 樂天 amiami 店的「商品管理番号」（小寫）
-    →  樂天 itemCode = "amiami:" + scode.lower()
-  例：
-    amiami.jp  scode=GOODS-04818580
-    樂天 URL   item.rakuten.co.jp/amiami/goods-04818580/
-    itemCode   amiami:goods-04818580
+  amiami.jp 的 scode（GOODS-xxxx / FIGURE-xxxx / RAIL-xxxx …）
+    == 樂天 amiami 店的 URL slug（小寫）
+  例：amiami.jp GOODS-04818580 ↔ item.rakuten.co.jp/amiami/goods-04818580/
+
+  ※ 樂天 API 的 itemCode 是另一組內部流水號（如 amiami:13050893），
+    無法由 scode 推算，所以不能用 itemCode 直查。
+    改用「店內關鍵字搜尋 scode」：shopCode=amiami & keyword={scode}
+    scode 對 amiami 店是唯一的，實測回 count=1，再以 itemUrl slug 比對確認。
 
 需要的環境變數（Zeabur）：
     RAKUTEN_APP_ID       樂天 Application ID（UUID 格式）          ← 必填
@@ -62,8 +63,7 @@ class AmiamiMixin:
             print(f"[Amiami] ❌ 無法從 URL 取得商品代碼: {url}")
             return product
 
-        item_code = f"{_RAKUTEN_SHOPCODE}:{code.lower()}"
-        print(f"[Amiami] 商品代碼 {code} → itemCode={item_code}")
+        print(f"[Amiami] 商品代碼: {code}（將以店內關鍵字搜尋）")
 
         # ── 2. 讀取憑證（環境變數）──
         app_id = os.environ.get("RAKUTEN_APP_ID", "").strip()
@@ -73,17 +73,25 @@ class AmiamiMixin:
             print("[Amiami] ❌ 缺少 RAKUTEN_APP_ID / RAKUTEN_ACCESS_KEY 環境變數，無法呼叫樂天 API")
             return product
 
-        # ── 3. 呼叫樂天 API（availability=0：連缺貨品也要回，才能正確判斷庫存）──
+        # ── 3. 呼叫樂天 API ──
+        # itemCode 是樂天內部流水號、無法由 scode 推算；改用「店內關鍵字搜 scode」。
+        # scode（GOODS-xxxx）對 amiami 店是唯一的，實測回傳 count=1。
+        # availability=0：連缺貨品也要回，才能正確判斷庫存。
         data = await self._amiami_rakuten_call(
             app_id, access_key, referer,
-            extra_params={"itemCode": item_code, "availability": 0, "hits": 1},
+            extra_params={
+                "shopCode": _RAKUTEN_SHOPCODE,
+                "keyword": code,
+                "availability": 0,
+                "hits": 10,
+            },
         )
         if data is None:
             return product
 
-        item = self._amiami_first_item(data)
+        item = self._amiami_match_item(data, code)
         if not item:
-            print(f"[Amiami] ⚠️ 樂天 amiami 店查無此商品（itemCode={item_code}），可能未上架樂天")
+            print(f"[Amiami] ⚠️ 樂天 amiami 店查無此商品（scode={code}），可能未上架樂天")
             return product
 
         # ── 4. 欄位映射到 ProductInfo ──
@@ -191,13 +199,14 @@ class AmiamiMixin:
     # 回應解析：相容 formatVersion 1/2 與大小寫
     # ─────────────────────────────────────────────────────────────────
     @staticmethod
-    def _amiami_first_item(data: dict) -> dict | None:
+    def _amiami_match_item(data: dict, code: str) -> dict | None:
         """
-        從樂天回應取出第一筆商品 dict。
-        相容：
-          formatVersion=2 → {"items": [ {itemName...} ]}
-          formatVersion=1 → {"Items": [ {"Item": {itemName...}} ]}
-          （並相容大小寫 Items/items、Item/item）
+        從關鍵字搜尋結果中，挑出 itemUrl slug 對得上 scode 的那筆。
+        相容 formatVersion 1/2 與 Items/items、Item/item 大小寫。
+        比對策略（由嚴到鬆）：
+          1. slug 完全等於 scode（小寫）
+          2. slug 以 scode 開頭（處理 goods-xxxx-s001 之類變體後綴）
+          3. 都對不上 → 回 None（寧可回報查無，也不亂配錯商品）
         """
         items = data.get("Items")
         if items is None:
@@ -205,12 +214,29 @@ class AmiamiMixin:
         if not items:
             return None
 
-        entry = items[0]
-        if isinstance(entry, dict):
-            inner = entry.get("Item") or entry.get("item")
-            if isinstance(inner, dict):
-                return inner
-            return entry
+        def unwrap(entry):
+            if isinstance(entry, dict):
+                inner = entry.get("Item") or entry.get("item")
+                return inner if isinstance(inner, dict) else entry
+            return None
+
+        def slug_of(it):
+            m = re.search(r'/amiami/([\w\-]+)', str(it.get("itemUrl") or ""))
+            return m.group(1).lower() if m else ""
+
+        target = code.lower()
+
+        # 1. slug 完全相等
+        for entry in items:
+            it = unwrap(entry)
+            if it and slug_of(it) == target:
+                return it
+        # 2. slug 以 scode 開頭（變體後綴）
+        for entry in items:
+            it = unwrap(entry)
+            if it and slug_of(it).startswith(target):
+                return it
+        # 3. 對不上 → 視為查無
         return None
 
     # ─────────────────────────────────────────────────────────────────
