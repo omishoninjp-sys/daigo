@@ -133,13 +133,18 @@ class AmiamiMixin:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) goyoutati-daigo/1.0",
         }
 
-        for attempt in range(2):
+        max_attempts = 3
+        last_status = None
+        last_text = ""
+        for attempt in range(max_attempts):
             try:
                 async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                     resp = await client.get(_RAKUTEN_ENDPOINT, params=params, headers=headers)
             except Exception as e:
                 print(f"[Amiami] ❌ 樂天 API 連線失敗: {type(e).__name__}: {e}")
                 return None
+
+            last_status, last_text = resp.status_code, resp.text[:200]
 
             if resp.status_code == 200:
                 try:
@@ -153,23 +158,28 @@ class AmiamiMixin:
                 print("[Amiami] ⚠️ 樂天回 404 not_found（itemCode 不存在）")
                 return {"Items": []}
 
-            if resp.status_code == 429:
-                print(f"[Amiami] ⏳ 樂天 429 流量過高，等 1.5 秒重試（attempt={attempt}）")
-                await asyncio.sleep(1.5)
-                continue
-
-            if resp.status_code == 403:
+            # 403（Referer 閘道跨節點生效不一致，會間歇性失敗）與 429（流量）都重試
+            if resp.status_code in (403, 429):
+                wait = 1.5
                 print(
-                    "[Amiami] ❌ 樂天 403 Referer 未通過。檢查：(1) App 後台 Allowed websites "
-                    f"是否真的有填 'goyoutati.com'（非灰色提示字）；(2) 改完是否等 5–10 分鐘生效。"
-                    f" 目前送出 Referer={referer!r}。回應：{resp.text[:200]}"
+                    f"[Amiami] ⏳ 樂天 {resp.status_code}（attempt {attempt + 1}/{max_attempts}），"
+                    f"等 {wait}s 重試… {resp.text[:120]}"
                 )
-                return None
+                await asyncio.sleep(wait)
+                continue
 
             print(f"[Amiami] ❌ 樂天 API HTTP {resp.status_code}: {resp.text[:200]}")
             return None
 
-        print("[Amiami] ❌ 樂天 API 重試後仍失敗（429）")
+        # 重試用盡
+        if last_status == 403:
+            print(
+                "[Amiami] ❌ 樂天 403 Referer 重試後仍失敗。檢查：(1) App 後台 Allowed websites "
+                f"確實有 'goyoutati.com'；(2) 設定改完需數分鐘~數十分鐘跨節點生效；"
+                f"(3) RAKUTEN_REFERER 是否正確。目前送出 Referer={referer!r}。回應：{last_text}"
+            )
+        else:
+            print(f"[Amiami] ❌ 樂天 API 重試後仍失敗（HTTP {last_status}）：{last_text}")
         return None
 
     # ─────────────────────────────────────────────────────────────────
