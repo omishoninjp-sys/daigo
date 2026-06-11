@@ -17,6 +17,9 @@ import httpx
 from config import SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, SHOPIFY_API_VERSION, DAIGO_COLLECTION_ID, STORE_DOMAIN
 from pricing import calculate_selling_price
 
+# ★ 版本標記：啟動時會印一次。若 log 看不到這行，代表跑的不是這支檔案。
+print("[shopify_client] LOADED build=GRAPHQL-PRODUCTSET-v2 (2026-06-11)")
+
 
 class ShopifyClient:
     def __init__(self):
@@ -47,6 +50,7 @@ class ShopifyClient:
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
                                     seo_title="", seo_tags=None, in_stock=True):
+        print(f"[Shopify] ▶ create_daigo_product build=GRAPHQL-PRODUCTSET-v2 | variants_in={len(variants) if variants else 0}")
         # ══════════════════════════════════════════════════════════════
         # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
         # ══════════════════════════════════════════════════════════════
