@@ -1,11 +1,15 @@
 """
-GOYOUTATI DAIGO 商品爬取模組 v4.0
-已拆分為獨立平台模組，透過 Mixin 組合。
+GOYOUTATI DAIGO 商品爬取模組 v5.0 —— Platform 介面化
 
-新增平台方法：
-1. 在 scrapers/ 下建立新的 xxx.py（繼承對應 Mixin 命名）
-2. 在此檔案 import 並加入 Scraper 繼承清單
-3. 在 scrape() 的 if/elif 鏈裡加入新平台的路由
+路由不再用 scrape() 裡的巨大 if/elif，改走 Platform registry（scrapers/platform.py）。
+  - 已抽成真 Platform 的來源：寫一支 platform_xxx.py，在下方 register()。
+  - 尚未抽的 45 支 Mixin：由 LegacyPlatform 原樣導向 _scrape_xxx，零行為變更。
+Scraper class 仍是「引擎」（持有 driver + 所有 Mixin 方法），供 Platform/Source 委派。
+
+新增一支真 Platform：
+  1. 寫 scrapers/platform_xxx.py（繼承 Platform，定義 sources）
+  2. 在下方 import 並 register(XxxPlatform()) —— 註冊在 LegacyPlatform 之前
+  （不必再動 scrape()、不必動繼承清單）
 """
 
 from scrapers.base import ProductInfo, detect_platform, normalize_url, normalize_price, detect_adult, detect_blocked
@@ -46,15 +50,23 @@ from scrapers.shimamura import ShimamuraMixin
 from scrapers.npb import NpbMixin
 from scrapers.disney import DisneyMixin
 from scrapers.yoshidakaban import YoshidaKabanMixin
-from scrapers.snkrdunk import SnkrdunkMixin  # ← 新增
-from scrapers.pbandai import PBandaiMixin  # ← 新增
-from scrapers.shoplist import ShoplistMixin  # ← 新增
-from scrapers.animate import AnimateMixin  # ← 新增
-from scrapers.mazdacollection import MazdaCollectionMixin  # ← 新增
-from scrapers.marukyukoyamaen import MarukyuKoyamaenMixin  # ← 新增
-from scrapers.amiami import AmiamiMixin  # ← 新增
-from scrapers.netmall import NetmallMixin  # ← 新增
+from scrapers.snkrdunk import SnkrdunkMixin
+from scrapers.pbandai import PBandaiMixin
+from scrapers.shoplist import ShoplistMixin
+from scrapers.animate import AnimateMixin
+from scrapers.mazdacollection import MazdaCollectionMixin
+from scrapers.marukyukoyamaen import MarukyuKoyamaenMixin
+from scrapers.amiami import AmiamiMixin
+from scrapers.netmall import NetmallMixin
 from scrapers.makeshop import MakeShopMixin
+
+# ── Platform 介面層 ──
+from scrapers.platform import register, get_platform, LegacyPlatform
+from scrapers.platform_zozotown import ZozotownPlatform
+
+# 真 Platform 先註冊；LegacyPlatform 最後（catch-all）
+register(ZozotownPlatform())
+register(LegacyPlatform())
 
 
 class Scraper(
@@ -82,14 +94,14 @@ class Scraper(
     NpbMixin,
     DisneyMixin,
     YoshidaKabanMixin,
-    SnkrdunkMixin,  # ← 新增
-    PBandaiMixin,  # ← 新增
-    ShoplistMixin,  # ← 新增
-    AnimateMixin,  # ← 新增
-    MazdaCollectionMixin,  # ← 新增
-    MarukyuKoyamaenMixin,  # ← 新增
-    AmiamiMixin,  # ← 新增
-    NetmallMixin,  # ← 新增
+    SnkrdunkMixin,
+    PBandaiMixin,
+    ShoplistMixin,
+    AnimateMixin,
+    MazdaCollectionMixin,
+    MarukyuKoyamaenMixin,
+    AmiamiMixin,
+    NetmallMixin,
     GenericMixin,
     AmazonMixin,
     ZozotownMixin,
@@ -106,9 +118,8 @@ class Scraper(
     MakeShopMixin,
 ):
     """
-    商品爬取主 class
-    透過 Mixin 繼承各平台爬蟲邏輯。
-    新增平台只需建立對應 Mixin 並加入繼承清單。
+    商品爬取引擎：持有 driver 與各平台 Mixin 方法。
+    路由交給 Platform registry；Platform/Source 透過傳入的 engine（= 本實例）委派 Mixin 方法。
     """
 
     def __init__(self):
@@ -117,106 +128,19 @@ class Scraper(
     async def scrape(self, url: str) -> ProductInfo:
         url = normalize_url(url)
 
-        # ── 封鎖網站攔截
+        # ── 封鎖網站攔截 ──
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[Scraper] 🚫 封鎖網站: {url}")
             raise ValueError(f"此網站不支援代購服務：{blocked_reason}")
 
-        platform = detect_platform(url)
+        # ── Platform dispatch（取代巨大 if/elif）──
+        platform = get_platform(url)
+        if platform is None:
+            raise RuntimeError("無可用 Platform（registry 為空）")
+        product = await platform.fetch(url, self)
 
-        if platform == "zozotown":
-            product = await self._scrape_zozotown(url)
-        elif platform == "amazon":
-            product = await self._scrape_amazon(url)
-        elif platform == "uniqlo":
-            product = await self._scrape_uniqlo(url)
-        elif platform == "muji":
-            product = await self._scrape_muji(url)
-        elif platform == "beams":
-            product = await self._scrape_beams(url)
-        elif platform == "nijisanji":
-            product = await self._scrape_nijisanji(url)
-        elif platform == "palcloset":
-            product = await self._scrape_palcloset(url)
-        elif platform == "shopify_jp":
-            product = await self._scrape_shopify_jp(url)
-        elif platform == "mercari":
-            product = await self._scrape_mercari(url)
-        elif platform == "neighborhood":
-            product = await self._scrape_neighborhood(url)
-        elif platform == "wtaps":
-            product = await self._scrape_wtaps(url)
-        elif platform == "humanmade":
-            product = await self._scrape_humanmade(url)
-        elif platform == "supreme":
-            product = await self._scrape_supreme(url)
-        elif platform == "gu":
-            product = await self._scrape_gu(url)
-        elif platform == "vermicular":
-            product = await self._scrape_vermicular(url)
-        elif platform == "visvim":
-            product = await self._scrape_visvim(url)
-        elif platform == "grail":
-            product = await self._scrape_grail(url)
-        elif platform == "pokemoncenter":
-            product = await self._scrape_pokemoncenter(url)
-        elif platform == "daytona_park":
-            product = await self._scrape_daytona_park(url)
-        elif platform == "runway":
-            product = await self._scrape_runway(url)
-        elif platform == "takaratomy":
-            product = await self._scrape_takaratomy(url)
-        elif platform == "newbalance":
-            product = await self._scrape_newbalance(url)
-        elif platform == "adidas":
-            product = await self._scrape_adidas(url)
-        elif platform == "graniph":
-            product = await self._scrape_graniph(url)
-        elif platform == "fanatics":
-            product = await self._scrape_fanatics(url)
-        elif platform == "ysl":
-            product = await self._scrape_ysl(url)
-        elif platform == "rakuten":
-            product = await self._scrape_rakuten(url)
-        elif platform == "ecstore":
-            product = await self._scrape_ecstore(url)
-        elif platform == "bellemaison":
-            product = await self._scrape_bellemaison(url)
-        elif platform == "biccamera":
-            product = await self._scrape_biccamera(url)
-        elif platform == "shimamura":
-            product = await self._scrape_shimamura(url)
-        elif platform == "npb":
-            product = await self._scrape_npb(url)
-        elif platform == "disney":
-            product = await self._scrape_disney(url)
-        elif platform == "yoshidakaban":
-            product = await self._scrape_yoshidakaban(url)
-        elif platform == "snkrdunk":  # ← 新增
-            product = await self._scrape_snkrdunk(url)
-        elif platform == "pbandai":  # ← 新增
-            product = await self._scrape_pbandai(url)
-        elif platform == "shoplist":  # ← 新增
-            product = await self._scrape_shoplist(url)
-        elif platform == "animate":  # ← 新增
-            product = await self._scrape_animate(url)
-        elif platform == "mazdacollection":  # ← 新增
-            product = await self._scrape_mazdacollection(url)
-        elif platform == "marukyukoyamaen":  # ← 新增
-            product = await self._scrape_marukyukoyamaen(url)
-        elif platform == "amiami":  # ← 新增
-            product = await self._scrape_amiami(url)
-        elif platform == "netmall":  # ← 新增
-            product = await self._scrape_netmall(url)
-        elif platform == "makeshop":
-            product = await self._scrape_makeshop(url)
-        elif "oakley.com" in url:
-            product = await self._scrape_oakley(url)
-        else:
-            product = await self._scrape_with_playwright(url)
-
-        # 成人商品偵測
+        # ── 成人商品偵測 ──
         if product.title and detect_adult(product):
             product.is_adult = True
 
