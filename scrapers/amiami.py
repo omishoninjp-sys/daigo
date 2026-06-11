@@ -403,44 +403,94 @@ class AmiamiMixin:
         print("[Amiami] 庫存: 未知，預設可下單")
         return True
 
+    # Cloudflare 攔截/挑戰頁特徵
+    _CF_MARKERS = (
+        "Just a moment", "Attention Required", "challenge-platform",
+        "cf-error-details", "cf_chl", "Sorry, you have been blocked",
+        "_cf_chl_opt", "Checking your browser",
+    )
+
     def _amiami_get_html(self, url: str) -> str:
-        """SeleniumBase UC 抓 amiami.jp 頁面（fallback 用）。"""
+        """
+        SeleniumBase UC 抓 amiami.jp 頁面（fallback）。
+        amiami 掛 Cloudflare：機房 IP 容易被挑戰，故多次重開 + 嘗試點 Turnstile。
+        """
+        def is_cf(html: str) -> bool:
+            return any(m in html for m in self._CF_MARKERS)
+
         try:
             driver = self._ensure_driver()
             if not driver:
                 return ""
             self._clean_driver_tabs()
-            try:
-                driver.uc_open_with_reconnect(url, reconnect_time=5)
-            except Exception:
-                driver.get(url)
-            time.sleep(2)
 
             best_html, best_score = "", 0
-            for i in range(5):
-                time.sleep(1.5)
+            cf_seen = False
+
+            for attempt in range(3):  # 最多重開 3 次以通過 Cloudflare
                 try:
-                    html = driver.page_source
+                    driver.uc_open_with_reconnect(url, reconnect_time=6)
                 except Exception:
-                    continue
-                score = 0
-                if 'application/ld+json' in html: score += 3
-                if 'data-item-price' in html: score += 5
-                if 'detail_detail__item_price' in html: score += 3
-                if 'og:title' in html: score += 2
-                if '販売価格' in html: score += 2
-                if score > best_score:
-                    best_score, best_html = score, html
-                if i >= 1 and score >= 13 and len(html) > 30000:
-                    print(f"[Amiami][fetch] iter={i}, score={score}, size={len(html)//1024}KB ✓")
-                    self._driver_use_count += 1
-                    return html
+                    try:
+                        driver.get(url)
+                    except Exception:
+                        pass
+                time.sleep(2)
+
+                # 嘗試點掉 Cloudflare Turnstile（需 Xvfb；沒有就略過，不報錯）
+                try:
+                    driver.uc_gui_click_captcha()
+                    time.sleep(2)
+                except Exception:
+                    pass
+
+                hit_cf_this_round = False
+                for i in range(4):
+                    time.sleep(1.5)
+                    try:
+                        html = driver.page_source
+                    except Exception:
+                        continue
+
+                    if is_cf(html):
+                        hit_cf_this_round = True
+                        cf_seen = True
+                        continue  # 還在挑戰頁，再等
+
+                    score = 0
+                    if 'application/ld+json' in html: score += 3
+                    if 'data-item-price' in html: score += 5
+                    if 'detail_detail__item_price' in html: score += 3
+                    if 'og:title' in html: score += 2
+                    if '販売価格' in html: score += 2
+                    if score > best_score:
+                        best_score, best_html = score, html
+                    if score >= 13 and len(html) > 30000:
+                        print(f"[Amiami][fetch] attempt={attempt} score={score} size={len(html)//1024}KB ✓")
+                        self._driver_use_count += 1
+                        return html
+
+                if not hit_cf_this_round and best_score >= 8:
+                    break  # 已離開挑戰頁且抓到不少內容，不必再重開
 
             self._driver_use_count += 1
-            if best_html and len(best_html) > 10000:
+            if best_html and best_score > 0 and len(best_html) > 10000 and not is_cf(best_html):
                 print(f"[Amiami][fetch] 用最佳版本 score={best_score} size={len(best_html)//1024}KB")
                 return best_html
-            print("[Amiami][fetch] ❌ 取得失敗")
+
+            # 診斷
+            bh = best_html or ""
+            if cf_seen or is_cf(bh):
+                diag = "Cloudflare 擋下（建議改掛住宅 proxy）"
+            elif ("年齢確認" in bh) or ("アダルト" in bh) or ("成人向" in bh):
+                diag = "疑似年齡確認/成人限制頁"
+            elif ("見つかり" in bh) or ("ページが存在" in bh) or ("お探しの" in bh):
+                diag = "疑似商品不存在/已下架"
+            elif len(bh) < 2000:
+                diag = "頁面幾乎空白，疑似被擋或逾時"
+            else:
+                diag = "頁面有載入但抓不到商品標記"
+            print(f"[Amiami][fetch] ❌ 取得失敗 size={len(bh)//1024}KB score={best_score} → {diag}")
             return ""
         except Exception as e:
             print(f"[Amiami] driver 失敗: {type(e).__name__}: {e}")
