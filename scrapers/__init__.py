@@ -1,13 +1,17 @@
 """
-GOYOUTATI DAIGO 商品爬取模組 v5.1 —— Platform 介面化（ZOZO 已脫離 Mixin）
+GOYOUTATI DAIGO 商品爬取模組 v5.2 —— Platform 介面化（ZOZO 脫 Mixin；amiami 接官方 API）
 
 路由走 Platform registry（scrapers/platform.py），不再用 scrape() 的巨大 if/elif。
   - 已抽成真 Platform 的來源：寫一支 platform_xxx.py，在下方 register()。
   - 尚未抽的 Mixin：由 LegacyPlatform 原樣導向 _scrape_xxx，零行為變更。
 Scraper class 仍是「引擎」（持有 driver + 各 Mixin 方法），供 Platform/Source 委派。
 
-v5.1 變更：ZOZOTOWN 邏輯已整支搬進 scrapers/platform_zozotown.py（ZozoYahooSource 自含），
-  ZozotownMixin 不再被使用，已自繼承清單與 import 移除；scrapers/zozotown.py 可刪除。
+真 Platform：
+  - ZozotownPlatform（platform_zozotown.py）：雅虎店 SSR，自含，已脫離 Mixin。
+  - AmiamiPlatform（platform_amiami.py）：樂天 Ichiba 官方 API + amiami.jp UC fallback。
+        · 官方 API 走共用 scrapers/rakuten_api.py
+        · UC fallback 委派 AmiamiMixin._amiami_scrape_jp（故 AmiamiMixin 保留在引擎）
+        · rakuten.co.jp 一般站維持原 RakutenMixin（樂天 API 無變體），不動。
 
 新增一支真 Platform：
   1. 寫 scrapers/platform_xxx.py（繼承 Platform，定義 sources）
@@ -57,16 +61,18 @@ from scrapers.shoplist import ShoplistMixin
 from scrapers.animate import AnimateMixin
 from scrapers.mazdacollection import MazdaCollectionMixin
 from scrapers.marukyukoyamaen import MarukyuKoyamaenMixin
-from scrapers.amiami import AmiamiMixin
+from scrapers.amiami import AmiamiMixin  # 保留：amiami UC fallback 委派用
 from scrapers.netmall import NetmallMixin
 from scrapers.makeshop import MakeShopMixin
 
 # ── Platform 介面層 ──
 from scrapers.platform import register, get_platform, LegacyPlatform
 from scrapers.platform_zozotown import ZozotownPlatform
+from scrapers.platform_amiami import AmiamiPlatform
 
 # 真 Platform 先註冊；LegacyPlatform 最後（catch-all）
 register(ZozotownPlatform())
+register(AmiamiPlatform())
 register(LegacyPlatform())
 
 
