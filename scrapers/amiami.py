@@ -124,10 +124,13 @@ class AmiamiMixin:
             "formatVersion": 2,
             **extra_params,
         }
+        # Origin = referer 的 scheme://host（樂天閘道有時同時檢查 Referer + Origin）
+        origin = re.sub(r'(https?://[^/]+).*', r'\1', referer)
         headers = {
             "Referer": referer,
+            "Origin": origin,
             "Accept": "application/json",
-            "User-Agent": "goyoutati-daigo/1.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) goyoutati-daigo/1.0",
         }
 
         for attempt in range(2):
@@ -157,9 +160,9 @@ class AmiamiMixin:
 
             if resp.status_code == 403:
                 print(
-                    "[Amiami] ❌ 樂天 403：Referer 未通過。"
-                    f" 目前 Referer={referer!r}，請確認 App 後台 Allowed websites 有此網域。"
-                    f" 回應：{resp.text[:200]}"
+                    "[Amiami] ❌ 樂天 403 Referer 未通過。檢查：(1) App 後台 Allowed websites "
+                    f"是否真的有填 'goyoutati.com'（非灰色提示字）；(2) 改完是否等 5–10 分鐘生效。"
+                    f" 目前送出 Referer={referer!r}。回應：{resp.text[:200]}"
                 )
                 return None
 
