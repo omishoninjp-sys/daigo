@@ -177,10 +177,12 @@ class ShopifyClient:
             # 有完整變體才把 active 當真選項；全被略過則退回單品
             option_names = [name for _, name in active] if variant_specs else []
 
-        # 單品 fallback（無 options、無 optionValues）
+        # 單品 fallback：productSet 規則「有 variants 就必須有 productOptions」(codependent)，
+        #   且每個 variant 都要有 optionValues。用 Shopify 預設的隱藏選項 Title / Default Title
+        #   （大小寫必須剛好是 "Default Title"），主題會自動隱藏 → 商品頁呈現為無變體單品。
         if not variant_specs:
-            variant_specs = [{"ov": [], "price": price_jpy, "sku": "", "color": ""}]
-            option_names = []
+            variant_specs = [{"ov": [("Title", "Default Title")], "price": price_jpy, "sku": "", "color": ""}]
+            option_names = ["Title"]
 
         # ══════════════════════════════════════════════════════════════
         # 2. 組 productSet 的 productOptions + variants

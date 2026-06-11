@@ -35,7 +35,10 @@ _MIN_PRICE = 50
 _MAX_PRICE = 2_000_000
 
 # 報價與下單來源是否切到雅虎店（True=source_url 用雅虎連結，與抓到的價格一致）
-USE_YAHOO_AS_SOURCE = True
+# 報價/資料一律取自雅虎店頁面（繞過 Akamai）；source_url 則用客人原本的 zozo.jp 連結
+#   False = source_url 用 zozo.jp（顯示在 Shopify、前端也送 zozo.jp → 與 scrape 快取同 key，
+#           變體不會因重爬而遺失）。價格仍是雅虎店價（有價差由人工自行去雅虎店下單）。
+USE_YAHOO_AS_SOURCE = False
 
 _YAHOO_STORE = "https://store.shopping.yahoo.co.jp/zozo/{gid}.html"
 
