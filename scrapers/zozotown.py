@@ -12,7 +12,10 @@ ZOZOTOWN 爬蟲 Mixin（v2 — 2026 改走雅虎店 SSR，繞過 Akamai）
 策略：
 1. 從客人貼的 zozo.jp 網址抽 goods ID
 2. 組 https://store.shopping.yahoo.co.jp/zozo/<goodsID>.html
-3. httpx 抓該頁，解析 OpenGraph / product meta
+3. httpx 抓該頁，解析 OpenGraph / product meta（標題/價格/圖/品番）
+   ＋ 解析頁面 __NEXT_DATA__ 的 individualItemList 取「逐變體庫存」(stock.isAvailable)，
+     只上架有庫存的變體，缺貨變體不放入（避免客人下到沒貨的款）。
+     JSON 不存在時退回 og:description 的 カラー×サイズ 矩陣（無逐變體庫存，預設都有貨）。
 4. 雅虎店查無此商品（目錄為 zozo.jp 子集）→ 退回舊版 zozo.jp 爬蟲 _scrape_zozotown_legacy
 
 注意（價格來源切換）：
@@ -22,6 +25,7 @@ ZOZOTOWN 爬蟲 Mixin（v2 — 2026 改走雅虎店 SSR，繞過 Akamai）
   若你希望保留客人原本的 zozo.jp 連結，把 USE_YAHOO_AS_SOURCE 設 False。
 """
 import re
+import json
 import asyncio
 
 import httpx
@@ -165,10 +169,18 @@ class ZozotownMixin:
             desc_bits.append(f"品番：{fields['ブランド品番']}")
         product.description = "｜".join(desc_bits)
 
-        # ── 變體：カラー × サイズ ──
-        colors = self._zozo_split_multi(fields.get("カラー", ""))
-        sizes = self._zozo_split_multi(fields.get("サイズ", ""))
-        product.variants = self._zozo_build_variants(colors, sizes, gid, product.price_jpy)
+        # ── 變體 + 逐變體庫存 ──
+        # 優先：__NEXT_DATA__ 的 individualItemList（含 stock.isAvailable）→ 只收有庫存的
+        # 退回：og:description 的 カラー×サイズ 矩陣（無逐變體庫存，預設都有貨）
+        nd_variants, nd_found, nd_any = self._zozo_variants_from_nextdata(html, gid)
+        if nd_found:
+            product.variants = nd_variants
+            if not nd_any:
+                product.in_stock = False  # 整件全部缺貨
+        else:
+            colors = self._zozo_split_multi(fields.get("カラー", ""))
+            sizes = self._zozo_split_multi(fields.get("サイズ", ""))
+            product.variants = self._zozo_build_variants(colors, sizes, gid, product.price_jpy)
 
         # ── 額外圖片：body 內同商品的 _N_d_500.jpg ──
         product.extra_images = self._zozo_extra_images(soup, product.image_url)
@@ -227,6 +239,96 @@ class ZozotownMixin:
                     "image": "",
                 })
         return variants
+
+    @staticmethod
+    def _zozo_variants_from_nextdata(html: str, gid: str):
+        """從雅虎店頁面的 __NEXT_DATA__ 取 individualItemList（含逐變體庫存）。
+        只回傳 stock.isAvailable=True 的變體 → 缺貨變體不上架。
+        回傳 (variants, found, any_available)：
+          found=False → 頁面沒有可用 JSON，呼叫端應退回 og:description。
+          any_available=False → 找到了但全部缺貨。
+        """
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+        if not m:
+            return [], False, False
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            return [], False, False
+
+        # item 可能在 props.pageProps.item，或 dehydratedState 裡
+        item = None
+        try:
+            item = data["props"]["pageProps"]["item"]
+        except Exception:
+            item = None
+        if not item:
+            try:
+                for q in data["props"]["pageProps"]["dehydratedState"]["queries"]:
+                    it = (((q or {}).get("state") or {}).get("data") or {}).get("itemData", {}).get("item")
+                    if it:
+                        item = it
+                        break
+            except Exception:
+                item = None
+        if not item:
+            return [], False, False
+
+        ilist = item.get("individualItemList") or []
+        if not ilist:
+            return [], False, False
+
+        def _clean_size(s):
+            s = re.split(r'[（(]', s or "")[0].strip()   # 去掉「（メンズ：…）」說明
+            return re.sub(r'^\[|\]$', '', s).strip()       # 去掉外層中括號 [XS]→XS
+
+        variants = []
+        any_available = False
+        skipped = 0
+        for it in ilist:
+            stock = it.get("stock") or {}
+            if not stock.get("isAvailable"):
+                skipped += 1
+                continue   # ← 缺貨變體：直接不放進去
+            any_available = True
+
+            color = size = ""
+            for o in (it.get("optionList") or []):
+                nm = (o.get("name") or "").strip()
+                cv = (o.get("choiceName") or "").strip()
+                if nm == "カラー":
+                    color = cv
+                elif nm == "サイズ":
+                    size = _clean_size(cv)
+                elif not color:          # 非標準軸名 → 第一軸當顏色槽
+                    color = cv
+                elif not size:           # 第二軸當尺寸槽
+                    size = _clean_size(cv)
+
+            img = ""
+            im = it.get("image") or {}
+            if im.get("id"):
+                img = f"https://z-shopping.c.yimg.jp/{im['id']}_500.jpg"
+
+            variants.append({
+                "color": color,
+                "size": size,
+                "sku": it.get("skuId") or ("-".join(p for p in (gid, color, size) if p)),
+                "price": it.get("price") or 0,   # null → 0 → shopify 用主價
+                "in_stock": True,
+                "image": img,
+            })
+
+        if skipped:
+            print(f"[ZOZO] 缺貨變體已排除 {skipped} 個（只保留有庫存）")
+
+        # 有庫存的變體若只剩單一顏色且單一尺寸 → 視為單品（不建變體選單）
+        distinct_colors = {v["color"] for v in variants if v["color"]}
+        distinct_sizes = {v["size"] for v in variants if v["size"]}
+        if len(distinct_colors) <= 1 and len(distinct_sizes) <= 1:
+            return [], True, any_available
+
+        return variants, True, any_available
 
     @staticmethod
     def _zozo_extra_images(soup: BeautifulSoup, main: str) -> list:
