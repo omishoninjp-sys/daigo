@@ -13,7 +13,6 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 from config import (
     API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID,
     CACHE_TTL, MAX_CONCURRENT_SCRAPES, SCRAPE_QUEUE_TIMEOUT,
@@ -23,11 +22,9 @@ from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
 from seo_title import generate_seo_title
-
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
-
 # ──────────────────────────────────────────────────────────────────────
 # 即時價格平台白名單：這些域名不經 cache，每次都重新爬取
 # 因為 snkrdunk、mercari 等平台價格隨時變動，cache 舊價會誤導用戶下單
@@ -38,8 +35,6 @@ NO_CACHE_DOMAINS = {
     "mercari.com",        # Mercari 主域名
     # 未來如有其他即時價格平台可加入這裡
 }
-
-
 def is_no_cache_url(url: str) -> bool:
     """判斷此 URL 是否屬於不可 cache 的平台"""
     try:
@@ -47,13 +42,8 @@ def is_no_cache_url(url: str) -> bool:
         return any(d in host for d in NO_CACHE_DOMAINS)
     except Exception:
         return False
-
-
 print(f"[Config] NO_CACHE_DOMAINS = {NO_CACHE_DOMAINS}")
-
-
 # === 背景自動清理任務 ===
-
 async def _auto_cleanup_loop():
     """每 24 小時執行一次自動清理。啟動後先等 60 秒再執行第一次，避免干擾冷啟動。"""
     await asyncio.sleep(60)
@@ -66,10 +56,7 @@ async def _auto_cleanup_loop():
             print(f"[AutoCleanup] ❌ 發生錯誤: {type(e).__name__}: {e}")
         # 等 24 小時再執行下一次
         await asyncio.sleep(24 * 60 * 60)
-
-
 from contextlib import asynccontextmanager
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 啟動時建立背景清理任務
@@ -82,9 +69,7 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
-
 app = FastAPI(title="GOYOUTATI DAIGO API", version="3.4.0", lifespan=lifespan)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -92,62 +77,45 @@ app.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
-
 scraper = Scraper()
 shopify = ShopifyClient()
-
 # === 併發控制（lazy init，避免 Python 3.10+ 無 event loop 的問題）===
 _scrape_semaphore: asyncio.Semaphore | None = None
 _queue_lock: asyncio.Lock | None = None
 _queue_count = 0
 _active_count = 0
-
-
 def _get_semaphore() -> asyncio.Semaphore:
     global _scrape_semaphore
     if _scrape_semaphore is None:
         _scrape_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCRAPES)
     return _scrape_semaphore
-
-
 def _get_queue_lock() -> asyncio.Lock:
     global _queue_lock
     if _queue_lock is None:
         _queue_lock = asyncio.Lock()
     return _queue_lock
-
-
 async def _increment_queue():
     global _queue_count
     async with _get_queue_lock():
         _queue_count += 1
         pos = _queue_count + _active_count
     return pos
-
-
 async def _queue_to_active():
     global _queue_count, _active_count
     async with _get_queue_lock():
         _queue_count -= 1
         _active_count += 1
-
-
 async def _decrement_active():
     global _active_count
     async with _get_queue_lock():
         _active_count -= 1
-
-
 # === 快取 ===
 _scrape_cache: dict[str, tuple[ProductInfo, float]] = {}
-
-
 def cache_get(url: str) -> ProductInfo | None:
     # 即時價格平台不走 cache
     if is_no_cache_url(url):
         print(f"[Cache] ⏭️  跳過 cache（即時價格平台）: {url[:60]}")
         return None
-
     if url in _scrape_cache:
         product, ts = _scrape_cache[url]
         if time.time() - ts < CACHE_TTL:
@@ -156,39 +124,27 @@ def cache_get(url: str) -> ProductInfo | None:
         else:
             del _scrape_cache[url]
     return None
-
-
 def cache_set(url: str, product: ProductInfo):
     # 即時價格平台不寫入 cache
     if is_no_cache_url(url):
         return
-
     _scrape_cache[url] = (product, time.time())
     now = time.time()
     expired = [k for k, (_, ts) in _scrape_cache.items() if now - ts > CACHE_TTL]
     for k in expired:
         del _scrape_cache[k]
-
-
 async def verify_api_key(x_api_key: str = Header(default="")):
     if x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
-
-
 # === 帶併發控制的爬取 ===
-
 # 同 URL 進行中的 Future（防止重複爬取同一頁面開多個 Chrome）
 _in_flight: dict[str, asyncio.Future] = {}
-
-
 async def scrape_with_queue(url: str) -> ProductInfo:
     global _queue_count
-
     # 1. 快取命中 → 直接回傳（即時價格平台會自動跳過）
     cached = cache_get(url)
     if cached:
         return cached
-
     # 2. 同 URL 已在爬取中 → 等它完成，共享結果，不開第二個 Chrome
     #    注意：即時價格平台也共享 in-flight 結果（因為同一秒內請求合併不會有舊資料問題）
     if url in _in_flight:
@@ -200,15 +156,12 @@ async def scrape_with_queue(url: str) -> ProductInfo:
             )
         except asyncio.TimeoutError:
             raise HTTPException(status_code=503, detail=f"等候逾時（{SCRAPE_QUEUE_TIMEOUT}s），請稍後再試")
-
     # 3. 建立 Future，讓後續相同 URL 的請求共享
     loop = asyncio.get_event_loop()
     future: asyncio.Future = loop.create_future()
     _in_flight[url] = future
-
     position = await _increment_queue()
     print(f"[Queue] 📋 新請求加入排隊 (位置 #{position}): {url[:60]}")
-
     try:
         # 等 semaphore（限制同時爬取數）
         try:
@@ -222,10 +175,8 @@ async def scrape_with_queue(url: str) -> ProductInfo:
                 status_code=503,
                 detail=f"目前查詢人數較多，請稍後再試（等候超過 {SCRAPE_QUEUE_TIMEOUT} 秒）"
             )
-
         await _queue_to_active()
         print(f"[Queue] ▶️ 開始爬取 (active={_active_count}, queue={_queue_count}): {url[:60]}")
-
         try:
             # 搶到 semaphore 後再確認一次快取（即時價格平台會自動跳過）
             cached = cache_get(url)
@@ -233,35 +184,28 @@ async def scrape_with_queue(url: str) -> ProductInfo:
                 print(f"[Queue] ✅ 排隊期間快取命中: {url[:60]}")
                 future.set_result(cached)
                 return cached
-
             product = await asyncio.wait_for(
                 scraper.scrape(url),
                 timeout=60,
             )
-
             if product.title:
                 cache_set(url, product)  # 即時價格平台不會寫入
-
             future.set_result(product)
             return product
-
         except asyncio.TimeoutError:
             print(f"[Queue] ⏰ 爬取超時 (60s): {url[:60]}")
             result = ProductInfo(source_url=url)
             future.set_result(result)
             return result
-
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
             raise
-
         finally:
             _get_semaphore().release()
             await _decrement_active()
             _in_flight.pop(url, None)
             print(f"[Queue] ✅ 爬取完成 (active={_active_count}, queue={_queue_count})")
-
     except HTTPException:
         async with _get_queue_lock():
             _queue_count -= 1
@@ -276,8 +220,6 @@ async def scrape_with_queue(url: str) -> ProductInfo:
             future.cancel()
         _in_flight.pop(url, None)
         raise
-
-
 # === Models ===
 class ScrapeRequest(BaseModel):
     url: str
@@ -304,14 +246,12 @@ class CreateOrderResponse(BaseModel):
     admin_url: str | None = None
     error: str | None = None
     blocked: bool = False  # ← True 表示此網站被封鎖
-
 class SearchRequest(BaseModel):
     query: str
     source: str = "rakuten"
     hits: int = 30
     page: int = 1
     translate: bool = True      # True=中文自動翻日文；前端選了候補(已是日文)時送 False
-
 class SearchResultItem(BaseModel):
     title: str
     brand: str = ""
@@ -321,7 +261,6 @@ class SearchResultItem(BaseModel):
     image_url: str = ""
     source_url: str = ""
     in_stock: bool = True
-
 class SearchResponse(BaseModel):
     success: bool
     source: str = ""
@@ -330,21 +269,16 @@ class SearchResponse(BaseModel):
     count: int = 0
     results: list[SearchResultItem] = []
     error: str | None = None
-
 class SuggestRequest(BaseModel):
     query: str
-
 class SuggestItem(BaseModel):
     label_zh: str
     keyword_jp: str
-
 class SuggestResponse(BaseModel):
     success: bool
     query: str = ""
     suggestions: list[SuggestItem] = []
     error: str | None = None
-
-
 # === Endpoints ===
 @app.get("/api/health")
 async def health():
@@ -531,17 +465,13 @@ async def search_products(req: SearchRequest):
         q = (req.query or "").strip()
         if not q:
             return SearchResponse(success=False, error="請輸入搜尋關鍵字")
-
         from scrapers import rakuten_api
         from jp_query import translate_to_jp, needs_translation
-
         searched = q
         if req.translate and needs_translation(q):
             searched = await translate_to_jp(q) or q
-
         hits = max(1, min(req.hits, 30))
         page = max(1, req.page)
-
         if req.source == "zozo":
             from scrapers import yahoo_api
             start = (page - 1) * hits + 1          # Yahoo 用 start 位移翻頁
@@ -549,7 +479,6 @@ async def search_products(req: SearchRequest):
         else:
             shop_code = "amiami" if req.source == "amiami" else None
             products = await rakuten_api.search_items(searched, shop_code=shop_code, hits=hits, page=page)
-
         results = []
         for p in products:
             sell = ref_twd = None
@@ -562,13 +491,24 @@ async def search_products(req: SearchRequest):
                 selling_price_jpy=sell, reference_price_twd=ref_twd,
                 image_url=p.image_url, source_url=p.source_url, in_stock=p.in_stock,
             ))
-
+        # 記錄搜尋詞（需求情報；fire-and-forget）
+        if page == 1:
+            try:
+                from search_log import log_search
+                await log_search(raw=q, translated=searched, source=req.source, result_count=len(results))
+            except Exception:
+                pass
         return SearchResponse(success=True, source=req.source, query=q,
                               searched_query=searched, count=len(results), results=results)
     except Exception:
         print(f"[API] search error: {traceback.format_exc()}")
         return SearchResponse(success=False, error="搜尋失敗，請稍後再試")
-
+@app.get("/api/search-stats", dependencies=[Depends(verify_api_key)])
+async def search_stats(days: int = 30):
+    """搜尋詞需求情報：熱門詞、零結果詞、每日量。給 search-insights.html 用。"""
+    from search_log import stats
+    data = await stats(days=max(1, min(days, 365)))
+    return {"success": True, **data}
 @app.post("/api/suggest", response_model=SuggestResponse, dependencies=[Depends(verify_api_key)])
 async def suggest_products(req: SuggestRequest):
     try:
@@ -582,14 +522,9 @@ async def suggest_products(req: SuggestRequest):
     except Exception:
         print(f"[API] suggest error: {traceback.format_exc()}")
         return SuggestResponse(success=False, error="建議失敗，請稍後再試")
-
-
 # === 清理端點（管理員用）===
-
 class CleanupRequest(BaseModel):
     days: int = DAIGO_AUTO_DELETE_DAYS  # 預設值從 config 取
-
-
 class CleanupResponse(BaseModel):
     success: bool
     deleted_count: int = 0
@@ -599,8 +534,6 @@ class CleanupResponse(BaseModel):
     errors: list[str] = []
     cutoff_date: str = ""
     message: str = ""
-
-
 @app.post("/api/admin/cleanup", response_model=CleanupResponse, dependencies=[Depends(verify_api_key)])
 async def manual_cleanup(req: CleanupRequest):
     """
@@ -619,31 +552,25 @@ async def manual_cleanup(req: CleanupRequest):
     except Exception as e:
         print(f"[API] cleanup error: {traceback.format_exc()}")
         return CleanupResponse(success=False, message=f"清理失敗：{str(e)}")
-
-
 @app.get("/api/admin/cleanup/preview", dependencies=[Depends(verify_api_key)])
 async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
     """
     預覽哪些商品會被清理（不實際刪除）。只看 DAIGO_COLLECTION_ID 內的商品。
     """
     from datetime import datetime, timezone, timedelta
-
     if days < 1:
         raise HTTPException(status_code=400, detail="days 至少為 1")
     if not DAIGO_COLLECTION_ID:
         raise HTTPException(status_code=400, detail="DAIGO_COLLECTION_ID 未設定")
-
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     to_delete = []
     page_info = None
-
     try:
         async with __import__("httpx").AsyncClient(timeout=30) as client:
             while True:
                 params = {"collection_id": DAIGO_COLLECTION_ID, "fields": "id,title,created_at,status", "limit": 250}
                 if page_info:
                     params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status"}
-
                 resp = await client.get(
                     f"{shopify.base_url}/products.json",
                     headers=shopify.headers,
@@ -651,7 +578,6 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
                 )
                 if resp.status_code != 200:
                     break
-
                 for p in resp.json().get("products", []):
                     try:
                         created_at = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
@@ -666,7 +592,6 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
                             })
                     except Exception:
                         continue
-
                 import re as _re
                 link_header = resp.headers.get("Link", "")
                 if 'rel="next"' in link_header:
@@ -674,10 +599,8 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
                     page_info = m.group(1) if m else None
                 else:
                     page_info = None
-
                 if not page_info or not resp.json().get("products"):
                     break
-
         return {
             "collection_id": DAIGO_COLLECTION_ID,
             "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
@@ -687,8 +610,6 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"預覽失敗：{str(e)}")
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
