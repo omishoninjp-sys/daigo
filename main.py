@@ -279,10 +279,8 @@ async def scrape_with_queue(url: str) -> ProductInfo:
 
 
 # === Models ===
-
 class ScrapeRequest(BaseModel):
     url: str
-
 class ScrapeResponse(BaseModel):
     success: bool
     product: dict | None = None
@@ -290,18 +288,15 @@ class ScrapeResponse(BaseModel):
     error: str | None = None
     blocked: bool = False  # ← True 表示此網站被封鎖（前端應顯示錯誤訊息，不要切到「手動填寫」UI）
     queue_info: dict | None = None
-
 class CreateOrderRequest(BaseModel):
     url: str
     title_override: str | None = None
-
 class ManualOrderRequest(BaseModel):
     title: str
     price_jpy: int
     original_price_jpy: int = 0
     image_url: str = ""
     source_url: str = ""
-
 class CreateOrderResponse(BaseModel):
     success: bool
     product_id: int | None = None
@@ -310,9 +305,31 @@ class CreateOrderResponse(BaseModel):
     error: str | None = None
     blocked: bool = False  # ← True 表示此網站被封鎖
 
+class SearchRequest(BaseModel):
+    query: str
+    source: str = "rakuten"      # "rakuten"=樂天全站 | "amiami"=只搜 amiami 店
+    hits: int = 30
+    page: int = 1
+
+class SearchResultItem(BaseModel):
+    title: str
+    brand: str = ""
+    price_jpy: int | None = None
+    selling_price_jpy: int | None = None
+    reference_price_twd: int | None = None
+    image_url: str = ""
+    source_url: str = ""
+    in_stock: bool = True
+
+class SearchResponse(BaseModel):
+    success: bool
+    source: str = ""
+    count: int = 0
+    results: list[SearchResultItem] = []
+    error: str | None = None
+
 
 # === Endpoints ===
-
 @app.get("/api/health")
 async def health():
     driver_status = scraper.get_driver_status()
@@ -330,8 +347,6 @@ async def health():
             "max_concurrent": MAX_CONCURRENT_SCRAPES,
         },
     }
-
-
 @app.get("/api/status")
 async def queue_status():
     return {
@@ -340,8 +355,6 @@ async def queue_status():
         "max_concurrent": MAX_CONCURRENT_SCRAPES,
         "estimated_wait_seconds": _queue_count * 15,
     }
-
-
 @app.get("/api/rate")
 async def get_rate():
     from config import PRICING_TIERS
@@ -349,13 +362,10 @@ async def get_rate():
         "jpy_to_twd": get_jpy_to_twd_rate(),
         "pricing_tiers": [{"min_jpy": t[0], "max_jpy": t[1], "markup": t[2]} for t in PRICING_TIERS],
     }
-
-
 @app.post("/api/scrape", response_model=ScrapeResponse, dependencies=[Depends(verify_api_key)])
 async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
-
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
         from scrapers.base import detect_blocked
         blocked_reason = detect_blocked(url)
@@ -367,22 +377,18 @@ async def scrape_product(req: ScrapeRequest):
                 error=blocked_reason,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
-
         product: ProductInfo = await scrape_with_queue(url)
-
         if not product.title:
             return ScrapeResponse(
                 success=False,
                 error="無法從此連結抓取商品資訊",
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
-
         pricing = calculate_selling_price(product.price_jpy) if product.price_jpy else None
         return ScrapeResponse(
             success=True, product=product.to_dict(), pricing=pricing,
             queue_info={"active": _active_count, "waiting": _queue_count},
         )
-
     except HTTPException:
         raise
     except ValueError as e:
@@ -399,13 +405,10 @@ async def scrape_product(req: ScrapeRequest):
     except Exception as e:
         print(f"[API] scrape error: {traceback.format_exc()}")
         return ScrapeResponse(success=False, error=f"爬取失敗：{str(e) or type(e).__name__}")
-
-
 @app.post("/api/create-order", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
 async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
-
         # ★ 先檢查封鎖網站
         from scrapers.base import detect_blocked
         blocked_reason = detect_blocked(url)
@@ -416,7 +419,6 @@ async def create_order(req: CreateOrderRequest):
                 blocked=True,
                 error=blocked_reason,
             )
-
         # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
         # 一般平台：先試 cache，沒有才爬
         if is_no_cache_url(url):
@@ -427,15 +429,12 @@ async def create_order(req: CreateOrderRequest):
             if not product:
                 print(f"[Cache] ❌ 未命中，重新爬取: {url[:60]}")
                 product = await scrape_with_queue(url)
-
         if not product.title:
             return CreateOrderResponse(success=False, error="無法抓取商品資訊")
         if not product.price_jpy:
             return CreateOrderResponse(success=False, error="無法偵測到商品價格")
-
         pricing = calculate_selling_price(product.price_jpy)
         title = req.title_override or product.title
-
         seo = await generate_seo_title(
             original_title=title,
             brand=product.brand,
@@ -443,7 +442,6 @@ async def create_order(req: CreateOrderRequest):
         )
         seo_title = seo.get("title", "")
         seo_tags = seo.get("tags", [])
-
         result = await shopify.create_daigo_product(
             title=title, price_jpy=pricing["selling_price_jpy"],
             image_url=product.image_url, description=product.description,
@@ -455,7 +453,6 @@ async def create_order(req: CreateOrderRequest):
             in_stock=product.in_stock,
             platform_id=getattr(product, "platform_id", ""), 
         )
-
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],
@@ -475,8 +472,6 @@ async def create_order(req: CreateOrderRequest):
     except Exception as e:
         print(f"[API] create-order error: {traceback.format_exc()}")
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
-
-
 @app.post("/api/create-manual", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
 async def create_manual_order(req: ManualOrderRequest):
     try:
@@ -484,7 +479,6 @@ async def create_manual_order(req: ManualOrderRequest):
             return CreateOrderResponse(success=False, error="請填寫商品名稱")
         if req.price_jpy <= 0:
             return CreateOrderResponse(success=False, error="價格錯誤")
-
         # ★ 新增：source_url 也要過黑名單（手動建單一樣要擋，防止繞過前端攔截）
         if req.source_url:
             from scrapers.base import detect_blocked
@@ -496,21 +490,18 @@ async def create_manual_order(req: ManualOrderRequest):
                     blocked=True,
                     error=blocked_reason,
                 )
-
         seo = await generate_seo_title(
             original_title=req.title,
             source_url=req.source_url,
         )
         seo_title = seo.get("title", "")
         seo_tags = seo.get("tags", [])
-
         result = await shopify.create_daigo_product(
             title=req.title, price_jpy=req.price_jpy,
             image_url=req.image_url, source_url=req.source_url,
             original_price_jpy=req.original_price_jpy,
             seo_title=seo_title, seo_tags=seo_tags,
         )
-
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],
@@ -518,6 +509,39 @@ async def create_manual_order(req: ManualOrderRequest):
     except Exception as e:
         print(f"[API] create-manual error: {traceback.format_exc()}")
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
+@app.post("/api/search", response_model=SearchResponse, dependencies=[Depends(verify_api_key)])
+async def search_products(req: SearchRequest):
+    """站內搜尋（樂天 Ichiba API）：快、不開 Chrome。source=rakuten 全站 / amiami 只搜 amiami 店。
+    回傳已套代購售價 + 台幣參考價的商品卡；source_url 可直接餵 /api/create-order。"""
+    try:
+        q = (req.query or "").strip()
+        if not q:
+            return SearchResponse(success=False, error="請輸入搜尋關鍵字")
+
+        from scrapers import rakuten_api
+
+        shop_code = "amiami" if req.source == "amiami" else None
+        hits = max(1, min(req.hits, 30))
+        page = max(1, req.page)
+
+        products = await rakuten_api.search_items(q, shop_code=shop_code, hits=hits, page=page)
+
+        results = []
+        for p in products:
+            sell = twd = None
+            if p.price_jpy:
+                pr = calculate_selling_price(p.price_jpy)
+                sell = pr["selling_price_jpy"]
+                twd = pr["reference_price_twd"]
+            results.append(SearchResultItem(
+                title=p.title, brand=p.brand, price_jpy=p.price_jpy,
+                selling_price_jpy=sell, reference_price_twd=twd,
+                image_url=p.image_url, source_url=p.source_url, in_stock=p.in_stock,
+            ))
+        return SearchResponse(success=True, source=req.source, count=len(results), results=results)
+    except Exception as e:
+        print(f"[API] search error: {traceback.format_exc()}")
+        return SearchResponse(success=False, error=f"搜尋失敗：{str(e) or type(e).__name__}")
 
 
 
