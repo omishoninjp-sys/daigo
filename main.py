@@ -509,6 +509,13 @@ async def search_stats(days: int = 30):
     from search_log import stats
     data = await stats(days=max(1, min(days, 365)))
     return {"success": True, **data}
+    
+@app.get("/admin/insights")
+async def insights_page():
+    from fastapi.responses import HTMLResponse
+    from insights_page import INSIGHTS_HTML
+    return HTMLResponse(content=INSIGHTS_HTML)
+    
 @app.post("/api/suggest", response_model=SuggestResponse, dependencies=[Depends(verify_api_key)])
 async def suggest_products(req: SuggestRequest):
     try:
