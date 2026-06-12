@@ -307,9 +307,10 @@ class CreateOrderResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    source: str = "rakuten"      # "rakuten"=樂天全站 | "amiami"=只搜 amiami 店
+    source: str = "rakuten"
     hits: int = 30
     page: int = 1
+    translate: bool = True      # True=中文自動翻日文；前端選了候補(已是日文)時送 False
 
 class SearchResultItem(BaseModel):
     title: str
@@ -324,8 +325,23 @@ class SearchResultItem(BaseModel):
 class SearchResponse(BaseModel):
     success: bool
     source: str = ""
+    query: str = ""             # 使用者原始輸入
+    searched_query: str = ""    # 實際拿去樂天搜的關鍵字(可能是翻譯後)
     count: int = 0
     results: list[SearchResultItem] = []
+    error: str | None = None
+
+class SuggestRequest(BaseModel):
+    query: str
+
+class SuggestItem(BaseModel):
+    label_zh: str
+    keyword_jp: str
+
+class SuggestResponse(BaseModel):
+    success: bool
+    query: str = ""
+    suggestions: list[SuggestItem] = []
     error: str | None = None
 
 
@@ -511,39 +527,55 @@ async def create_manual_order(req: ManualOrderRequest):
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
 @app.post("/api/search", response_model=SearchResponse, dependencies=[Depends(verify_api_key)])
 async def search_products(req: SearchRequest):
-    """站內搜尋（樂天 Ichiba API）：快、不開 Chrome。source=rakuten 全站 / amiami 只搜 amiami 店。
-    回傳已套代購售價 + 台幣參考價的商品卡；source_url 可直接餵 /api/create-order。"""
     try:
         q = (req.query or "").strip()
         if not q:
             return SearchResponse(success=False, error="請輸入搜尋關鍵字")
 
         from scrapers import rakuten_api
+        from jp_query import translate_to_jp, needs_translation
+
+        searched = q
+        if req.translate and needs_translation(q):
+            searched = await translate_to_jp(q) or q
 
         shop_code = "amiami" if req.source == "amiami" else None
         hits = max(1, min(req.hits, 30))
         page = max(1, req.page)
-
-        products = await rakuten_api.search_items(q, shop_code=shop_code, hits=hits, page=page)
+        products = await rakuten_api.search_items(searched, shop_code=shop_code, hits=hits, page=page)
 
         results = []
         for p in products:
-            sell = twd = None
+            sell = ref_twd = None
             if p.price_jpy:
                 pr = calculate_selling_price(p.price_jpy)
                 sell = pr["selling_price_jpy"]
-                twd = pr["reference_price_twd"]
+                ref_twd = pr["reference_price_twd"]
             results.append(SearchResultItem(
                 title=p.title, brand=p.brand, price_jpy=p.price_jpy,
-                selling_price_jpy=sell, reference_price_twd=twd,
+                selling_price_jpy=sell, reference_price_twd=ref_twd,
                 image_url=p.image_url, source_url=p.source_url, in_stock=p.in_stock,
             ))
-        return SearchResponse(success=True, source=req.source, count=len(results), results=results)
-    except Exception as e:
+
+        return SearchResponse(success=True, source=req.source, query=q,
+                              searched_query=searched, count=len(results), results=results)
+    except Exception:
         print(f"[API] search error: {traceback.format_exc()}")
-        return SearchResponse(success=False, error=f"搜尋失敗：{str(e) or type(e).__name__}")
+        return SearchResponse(success=False, error="搜尋失敗，請稍後再試")
 
-
+@app.post("/api/suggest", response_model=SuggestResponse, dependencies=[Depends(verify_api_key)])
+async def suggest_products(req: SuggestRequest):
+    try:
+        q = (req.query or "").strip()
+        if not q:
+            return SuggestResponse(success=True, query="", suggestions=[])
+        from jp_query import suggest as jp_suggest
+        items = await jp_suggest(q)
+        return SuggestResponse(success=True, query=q,
+                               suggestions=[SuggestItem(**x) for x in items])
+    except Exception:
+        print(f"[API] suggest error: {traceback.format_exc()}")
+        return SuggestResponse(success=False, error="建議失敗，請稍後再試")
 
 
 # === 清理端點（管理員用）===
