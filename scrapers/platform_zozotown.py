@@ -355,7 +355,11 @@ class ZozotownPlatform(Platform):
     sources = [ZozoYahooSource(), ZozoLegacySource()]
 
     def matches(self, url: str) -> bool:
-        return "zozo" in (urlparse(url).hostname or "").lower()
+        host = (urlparse(url).hostname or "").lower()
+        if "zozo" in host:
+            return True
+        # ZOZO 的雅虎店連結：store.shopping.yahoo.co.jp/zozo/...
+        return "yahoo" in host and "/zozo/" in (url or "").lower()
 
     def parse_url(self, url: str) -> str:
         return _zozo_gid(url)
