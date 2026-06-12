@@ -1,0 +1,270 @@
+{%- comment -%}
+  GOYOUTATI 站內搜尋 section v2（中文候補下拉 + 中→日翻譯）
+  - 打中文 → 停頓後出候補下拉（/api/suggest），點選用精準日文搜
+  - 直接按搜尋（沒選候補）→ 後端自動翻日文（translate=true）
+  - 顯示實際搜尋的日文關鍵字
+  - 商品卡可一鍵 /api/create-order
+{%- endcomment -%}
+
+{%- assign uid = section.id -%}
+
+<style>
+  #gpds-{{ uid }}{ --navy:#1e2d5a; --gold:#f0a500; max-width:1100px; margin:0 auto; padding:24px 16px; box-sizing:border-box; }
+  #gpds-{{ uid }} *{ box-sizing:border-box; }
+  #gpds-{{ uid }} .gpds-h{ color:var(--navy); font-size:24px; font-weight:700; margin:0 0 6px; }
+  #gpds-{{ uid }} .gpds-sub{ color:#666; font-size:14px; margin:0 0 18px; }
+  #gpds-{{ uid }} .gpds-bar{ display:flex; gap:8px; margin-bottom:10px; }
+  #gpds-{{ uid }} .gpds-inwrap{ position:relative; flex:1; }
+  #gpds-{{ uid }} .gpds-input{ width:100%; height:44px; border:1px solid #ccc; border-radius:8px; padding:0 14px; font-size:15px; }
+  #gpds-{{ uid }} .gpds-input:focus{ outline:none; border-color:var(--navy); }
+  #gpds-{{ uid }} .gpds-btn{ height:44px; padding:0 22px; background:var(--navy); color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; cursor:pointer; }
+  #gpds-{{ uid }} .gpds-btn:disabled{ opacity:.55; cursor:default; }
+  #gpds-{{ uid }} .gpds-sug{ position:absolute; left:0; right:0; top:48px; z-index:30; background:#fff; border:1px solid var(--navy); border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,.1); overflow:hidden; display:none; }
+  #gpds-{{ uid }} .gpds-sug-h{ padding:7px 14px; font-size:12px; color:#999; }
+  #gpds-{{ uid }} .gpds-sug-row{ display:flex; align-items:center; gap:10px; padding:9px 14px; cursor:pointer; border-top:1px solid #f0f0f0; }
+  #gpds-{{ uid }} .gpds-sug-row:hover{ background:rgba(30,45,90,.06); }
+  #gpds-{{ uid }} .gpds-sug-zh{ font-size:15px; color:#222; }
+  #gpds-{{ uid }} .gpds-sug-jp{ margin-left:auto; font-size:13px; color:#888; }
+  #gpds-{{ uid }} .gpds-srcs{ display:flex; gap:8px; margin-bottom:12px; }
+  #gpds-{{ uid }} .gpds-src{ font-size:13px; padding:6px 16px; border-radius:999px; border:1px solid #ccc; background:#fff; color:#666; cursor:pointer; }
+  #gpds-{{ uid }} .gpds-src.on{ background:var(--navy); color:#fff; border-color:var(--navy); }
+  #gpds-{{ uid }} .gpds-info{ font-size:13px; color:#666; margin:0 0 14px; display:none; }
+  #gpds-{{ uid }} .gpds-info b{ color:var(--navy); font-weight:600; }
+  #gpds-{{ uid }} .gpds-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; }
+  #gpds-{{ uid }} .gpds-card{ border:1px solid #eee; border-radius:12px; overflow:hidden; background:#fff; display:flex; flex-direction:column; }
+  #gpds-{{ uid }} .gpds-imgwrap{ aspect-ratio:1/1; background:#f5f5f5; position:relative; }
+  #gpds-{{ uid }} .gpds-imgwrap img{ width:100%; height:100%; object-fit:contain; }
+  #gpds-{{ uid }} .gpds-oos{ position:absolute; top:8px; left:8px; background:#777; color:#fff; font-size:11px; padding:2px 8px; border-radius:4px; }
+  #gpds-{{ uid }} .gpds-body{ padding:10px 12px; display:flex; flex-direction:column; gap:6px; flex:1; }
+  #gpds-{{ uid }} .gpds-title{ font-size:13px; line-height:1.45; color:#222; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; min-height:54px; }
+  #gpds-{{ uid }} .gpds-price{ color:var(--navy); font-size:17px; font-weight:700; }
+  #gpds-{{ uid }} .gpds-twd{ color:#888; font-size:12px; font-weight:400; margin-left:6px; }
+  #gpds-{{ uid }} .gpds-buy{ margin-top:auto; width:100%; background:var(--gold); color:var(--navy); border:none; border-radius:8px; padding:9px 0; font-size:14px; font-weight:700; cursor:pointer; }
+  #gpds-{{ uid }} .gpds-buy:disabled{ opacity:.6; cursor:default; }
+  #gpds-{{ uid }} .gpds-msg{ text-align:center; color:#888; font-size:14px; padding:30px 0; }
+  #gpds-{{ uid }} .gpds-more{ display:block; margin:22px auto 0; height:42px; padding:0 28px; background:#fff; color:var(--navy); border:1px solid var(--navy); border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  @media (max-width:600px){ #gpds-{{ uid }} .gpds-grid{ grid-template-columns:repeat(2,1fr); gap:10px; } }
+</style>
+
+<div id="gpds-{{ uid }}"
+     data-api-base="{{ section.settings.api_base }}"
+     data-api-key="{{ section.settings.api_key }}"
+     data-source="{{ section.settings.default_source }}"
+     data-hits="{{ section.settings.hits }}">
+
+  {%- if section.settings.heading != blank -%}
+    <h2 class="gpds-h">{{ section.settings.heading }}</h2>
+  {%- endif -%}
+  {%- if section.settings.subheading != blank -%}
+    <p class="gpds-sub">{{ section.settings.subheading }}</p>
+  {%- endif -%}
+
+  <div class="gpds-bar">
+    <div class="gpds-inwrap">
+      <input class="gpds-input" type="text" autocomplete="off"
+             placeholder="搜尋日本商品…（例：鋼彈、櫃子、Snow Peak）" />
+      <div class="gpds-sug" data-role="sug"></div>
+    </div>
+    <button class="gpds-btn" data-act="search">搜尋</button>
+  </div>
+
+  <div class="gpds-srcs">
+    <button class="gpds-src on" data-src="rakuten">樂天全站</button>
+    <button class="gpds-src" data-src="amiami">amiami</button>
+  </div>
+
+  <p class="gpds-info" data-role="info"></p>
+
+  <div class="gpds-grid"></div>
+  <div class="gpds-msg" data-role="msg">輸入關鍵字開始搜尋日本商品</div>
+  <button class="gpds-more" data-act="more" style="display:none;">載入更多</button>
+</div>
+
+<script>
+(function(){
+  var root = document.getElementById('gpds-{{ uid }}');
+  if(!root) return;
+
+  var API_BASE = (root.dataset.apiBase || '').replace(/\/+$/,'');
+  var API_KEY  = root.dataset.apiKey || '';
+  var source   = root.dataset.source || 'rakuten';
+  var HITS     = parseInt(root.dataset.hits || '24', 10) || 24;
+
+  var input = root.querySelector('.gpds-input');
+  var grid  = root.querySelector('.gpds-grid');
+  var msg   = root.querySelector('[data-role="msg"]');
+  var info  = root.querySelector('[data-role="info"]');
+  var sug   = root.querySelector('[data-role="sug"]');
+  var moreBtn = root.querySelector('[data-act="more"]');
+  var searchBtn = root.querySelector('[data-act="search"]');
+
+  var page = 1, lastQuery = '', lastTranslate = true, busy = false;
+  var sugTimer = null, sugSeq = 0;
+
+  function yen(n){ return '¥' + Number(n).toLocaleString('ja-JP'); }
+  function twd(n){ return '≈ NT$' + Number(n).toLocaleString('en-US'); }
+  function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+  function hasCJK(s){ return /[\u4e00-\u9fff]/.test(s); }
+  function hasKana(s){ return /[\u3040-\u30ff]/.test(s); }
+  function setMsg(t){ msg.textContent = t; msg.style.display = t ? 'block' : 'none'; }
+  function hideSug(){ sug.style.display = 'none'; sug.innerHTML = ''; }
+
+  // ── 候補下拉（中文 → 日文）──
+  input.addEventListener('input', function(){
+    var v = input.value.trim();
+    clearTimeout(sugTimer);
+    if(!v || hasKana(v) || !hasCJK(v)){ hideSug(); return; }
+    sugTimer = setTimeout(function(){ fetchSug(v); }, 500);
+  });
+  input.addEventListener('keydown', function(e){
+    if(e.key === 'Enter'){ hideSug(); runSearch(true, true); }
+    else if(e.key === 'Escape'){ hideSug(); }
+  });
+  document.addEventListener('click', function(e){ if(!root.contains(e.target)) hideSug(); });
+
+  function fetchSug(v){
+    var seq = ++sugSeq;
+    fetch(API_BASE + '/api/suggest', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-api-key':API_KEY },
+      body: JSON.stringify({ query: v })
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(seq !== sugSeq) return;                 // 過時的回應丟棄
+      if(input.value.trim() !== v) return;
+      if(!d || !d.success || !d.suggestions || !d.suggestions.length){ hideSug(); return; }
+      renderSug(d.suggestions);
+    })
+    .catch(function(){ hideSug(); });
+  }
+
+  function renderSug(list){
+    var html = '<div class="gpds-sug-h">你要找哪一種？（點選用日文搜尋）</div>';
+    list.forEach(function(s){
+      html += '<div class="gpds-sug-row" data-jp="' + esc(s.keyword_jp) + '">' +
+                '<span class="gpds-sug-zh">' + esc(s.label_zh) + '</span>' +
+                '<span class="gpds-sug-jp">' + esc(s.keyword_jp) + '</span>' +
+              '</div>';
+    });
+    sug.innerHTML = html;
+    sug.style.display = 'block';
+    sug.querySelectorAll('.gpds-sug-row').forEach(function(row){
+      row.addEventListener('click', function(){
+        input.value = row.dataset.jp;            // 帶入日文關鍵字
+        hideSug();
+        runSearch(true, false);                  // 已是日文，不再翻譯
+      });
+    });
+  }
+
+  // ── 來源切換 / 搜尋 / 載入更多 ──
+  root.querySelectorAll('.gpds-src').forEach(function(b){
+    b.addEventListener('click', function(){
+      root.querySelectorAll('.gpds-src').forEach(function(x){ x.classList.remove('on'); });
+      b.classList.add('on');
+      source = b.dataset.src;
+      if(lastQuery){ runSearchRaw(true, lastQuery, lastTranslate); }
+    });
+  });
+  searchBtn.addEventListener('click', function(){ hideSug(); runSearch(true, true); });
+  moreBtn.addEventListener('click', function(){ runSearchRaw(false, lastQuery, lastTranslate); });
+
+  function runSearch(reset, translate){
+    var q = input.value.trim();
+    if(!q){ setMsg('請先輸入搜尋關鍵字'); return; }
+    runSearchRaw(reset, q, translate);
+  }
+
+  function runSearchRaw(reset, q, translate){
+    if(!q || busy) return;
+    if(reset){ page = 1; grid.innerHTML = ''; lastQuery = q; lastTranslate = translate; }
+    busy = true; searchBtn.disabled = true; moreBtn.style.display = 'none';
+    if(reset) setMsg('搜尋中…');
+
+    fetch(API_BASE + '/api/search', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-api-key':API_KEY },
+      body: JSON.stringify({ query: q, source: source, hits: HITS, page: page, translate: translate })
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      busy = false; searchBtn.disabled = false;
+      if(!data || !data.success){ setMsg((data && data.error) || '搜尋失敗，請稍後再試'); return; }
+      if(reset){
+        var sq = data.searched_query || '';
+        if(sq && sq !== data.query){
+          info.innerHTML = '搜尋關鍵字：<b>' + esc(sq) + '</b>（自動翻譯自「' + esc(data.query) + '」）';
+          info.style.display = 'block';
+        } else {
+          info.style.display = 'none';
+        }
+      }
+      if(reset && (!data.results || data.results.length === 0)){ setMsg('找不到符合的商品，換個關鍵字試試'); return; }
+      setMsg('');
+      (data.results || []).forEach(function(it){ grid.appendChild(card(it)); });
+      moreBtn.style.display = (data.results && data.results.length >= HITS) ? 'block' : 'none';
+      page += 1;
+    })
+    .catch(function(){ busy = false; searchBtn.disabled = false; setMsg('連線失敗，請稍後再試'); });
+  }
+
+  function card(it){
+    var el = document.createElement('div');
+    el.className = 'gpds-card';
+    var price = it.selling_price_jpy ? yen(it.selling_price_jpy) : '—';
+    var twdStr = it.reference_price_twd ? '<span class="gpds-twd">' + twd(it.reference_price_twd) + '</span>' : '';
+    var oos = it.in_stock ? '' : '<span class="gpds-oos">缺貨</span>';
+    var img = it.image_url ? '<img loading="lazy" src="' + esc(it.image_url) + '" alt="">' : '';
+    el.innerHTML =
+      '<div class="gpds-imgwrap">' + img + oos + '</div>' +
+      '<div class="gpds-body">' +
+        '<div class="gpds-title">' + esc(it.title) + '</div>' +
+        '<div><span class="gpds-price">' + price + '</span>' + twdStr + '</div>' +
+        '<button class="gpds-buy">代購此商品</button>' +
+      '</div>';
+    el.querySelector('.gpds-buy').addEventListener('click', function(e){ buy(it, e.target); });
+    return el;
+  }
+
+  function buy(it, btn){
+    if(btn.disabled) return;
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '建立中…請稍候';
+    fetch(API_BASE + '/api/create-order', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-api-key':API_KEY },
+      body: JSON.stringify({ url: it.source_url })
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if(data && data.success && data.checkout_url){
+        window.location.href = data.checkout_url;
+      } else {
+        btn.disabled = false; btn.textContent = orig;
+        alert((data && data.error) || '建立失敗，請稍後再試或改用貼連結');
+      }
+    })
+    .catch(function(){ btn.disabled = false; btn.textContent = orig; alert('連線失敗，請稍後再試'); });
+  }
+})();
+</script>
+
+{% schema %}
+{
+  "name": "daigo 搜尋商品",
+  "tag": "section",
+  "settings": [
+    { "type": "header", "content": "後端設定" },
+    { "type": "text", "id": "api_base", "label": "API 網址", "default": "https://goyoutatidaigo.zeabur.app" },
+    { "type": "text", "id": "api_key", "label": "API key（API_SECRET_KEY）", "info": "與 daigo.liquid 同一把" },
+    { "type": "header", "content": "顯示" },
+    { "type": "text", "id": "heading", "label": "標題", "default": "搜尋日本商品．一鍵代購" },
+    { "type": "text", "id": "subheading", "label": "副標", "default": "輸入中文也行，挑日文候補搜得更準，含稅包稅送到家" },
+    { "type": "select", "id": "default_source", "label": "預設來源", "options": [ { "value": "rakuten", "label": "樂天全站" }, { "value": "amiami", "label": "amiami" } ], "default": "rakuten" },
+    { "type": "range", "id": "hits", "label": "每頁筆數", "min": 6, "max": 30, "step": 6, "default": 24 }
+  ],
+  "presets": [ { "name": "daigo 搜尋商品" } ]
+}
+{% endschema %}

@@ -3,18 +3,19 @@
 ==========================================
 自 scrapers/amiami.py 的已驗證樂天邏輯抽出（認證 / 重試 / 解析一致），給：
   - amiami Platform（platform_amiami.py）的官方 API Source
-  - programmatic SEO 的 search_items()（轉型藍圖 維度三）
+  - programmatic SEO 的 search_items()
 共用，行為與線上版一致。
 
+v1.1：search_items 加 AND→OR 退路——樂天 keyword 多字預設 AND（全字都要中），
+  多字查無時自動改 orFlag=1（OR）再試一次，避免「櫃子 黑色」這種多字查無。
+
 限制（重要）：Rakuten API 無變體 / SKU、availability 只有 0/1。
-  → 適合 amiami（單 SKU）。rakuten.co.jp 一般站需要變體，維持原 RakutenMixin 爬蟲，
-     不走這支（見 scrapers/rakuten.py，本檔不影響它）。
+  → 適合 amiami（單 SKU）。rakuten.co.jp 一般站需要變體，維持原 RakutenMixin 爬蟲，不走這支。
 
 環境變數（Zeabur）：
   RAKUTEN_APP_ID      樂天 Application ID（UUID）   ← 必填
   RAKUTEN_ACCESS_KEY  樂天 Access Key（pk_...）     ← 必填
   RAKUTEN_REFERER     預設 https://goyoutati.com/   ← 須對應 App 後台 Allowed websites
-                      （新 API 真正把關 Origin，由 Referer 推出；錯誤訊息會誤寫成 Referer）
 """
 import os
 import re
@@ -44,10 +45,7 @@ def _creds():
 
 
 async def _call(extra_params: dict) -> dict | None:
-    """
-    呼叫樂天 Ichiba Item Search API。回 dict；失敗回 None。
-    必帶 Referer + Origin（對應 App 後台 Allowed websites）。403/429 自動重試。
-    """
+    """呼叫樂天 Ichiba Item Search API。回 dict；失敗回 None。403/429 自動重試。"""
     app_id, access_key, referer = _creds()
     if not app_id or not access_key:
         print("[Rakuten] ⚠️ 缺 RAKUTEN_APP_ID / RAKUTEN_ACCESS_KEY")
@@ -59,7 +57,7 @@ async def _call(extra_params: dict) -> dict | None:
         "formatVersion": 2,
         **extra_params,
     }
-    origin = re.sub(r'(https?://[^/]+).*', r'\1', referer)  # → https://goyoutati.com
+    origin = re.sub(r'(https?://[^/]+).*', r'\1', referer)
     headers = {
         "Referer": referer,
         "Origin": origin,
@@ -98,8 +96,8 @@ async def _call(extra_params: dict) -> dict | None:
         return None
 
     if last_status == 403:
-        print("[Rakuten] ❌ 403 重試後仍失敗。檢查 Allowed websites 是否含 'goyoutati.com'、"
-              f"設定是否已生效。回應：{last_text}")
+        print("[Rakuten] ❌ 403 重試後仍失敗。檢查 Allowed websites 是否含 'goyoutati.com'。"
+              f" 回應：{last_text}")
     else:
         print(f"[Rakuten] ❌ 重試後仍失敗（HTTP {last_status}）：{last_text}")
     return None
@@ -109,7 +107,6 @@ async def _call(extra_params: dict) -> dict | None:
 # 解析 helpers（自 amiami.py 沿用）
 # ─────────────────────────────────────────────────────────────────────
 def _items(data: dict) -> list:
-    """相容 formatVersion 1/2、Items/items、Item/item，回傳 item dict 清單。"""
     items = data.get("Items")
     if items is None:
         items = data.get("items")
@@ -142,7 +139,6 @@ def _clean_title(name: str) -> str:
 
 
 def _brand_from_title(name: str) -> str:
-    """樂天無 brand 欄位；amiami 標題尾 [メーカー] 抽品牌。"""
     brackets = re.findall(r'\[([^\]]+)\]', name or "")
     if brackets:
         b = brackets[-1].strip()
@@ -152,7 +148,6 @@ def _brand_from_title(name: str) -> str:
 
 
 def _extract_images(item: dict) -> list:
-    """mediumImageUrls 可能是 str 或 {'imageUrl':...}；去掉 ?_ex=WxH 取原圖。"""
     raw = item.get("mediumImageUrls") or item.get("smallImageUrls") or []
     out, seen = [], set()
     for entry in raw:
@@ -208,16 +203,13 @@ def _slug_of(item: dict, shop_code: str) -> str:
 # 公開 API
 # ─────────────────────────────────────────────────────────────────────
 async def find_by_code(code: str, shop_code: str) -> ProductInfo | None:
-    """
-    店內關鍵字搜 scode，再以 itemUrl slug 比對；命中回 ProductInfo，否則 None。
-    （itemCode 是內部流水號、無法由 scode 推算，故用 keyword 搜尋 + slug 比對。）
-    """
+    """店內關鍵字搜 scode，再以 itemUrl slug 比對；命中回 ProductInfo，否則 None。"""
     if not code:
         return None
     data = await _call({
         "shopCode": shop_code,
         "keyword": code,
-        "availability": 0,   # 連缺貨也回（庫存另以 availability 標記）
+        "availability": 0,
         "hits": 10,
     })
     if data is None:
@@ -229,16 +221,16 @@ async def find_by_code(code: str, shop_code: str) -> ProductInfo | None:
 
     target = code.lower()
     chosen = None
-    for it in items:                       # 1) slug 完全相等
+    for it in items:
         if _slug_of(it, shop_code) == target:
             chosen = it
             break
     if not chosen:
-        for it in items:                   # 2) slug 以 scode 開頭（-s001 變體）
+        for it in items:
             if _slug_of(it, shop_code).startswith(target):
                 chosen = it
                 break
-    if not chosen:                         # 3) 不亂配
+    if not chosen:
         return None
 
     try:
@@ -248,28 +240,10 @@ async def find_by_code(code: str, shop_code: str) -> ProductInfo | None:
         return None
 
 
-async def search_items(keyword: str, shop_code: str = None, hits: int = 30,
-                       available_only: bool = False, **extra) -> list:
-    """
-    關鍵字搜尋 → list[ProductInfo]（只回 is_valid 的）。
-    給 programmatic SEO 落地頁批量產生用（維度一 × 維度三）。
-    可額外傳 page、genreId 等樂天參數（**extra 直通）。
-    """
-    if not keyword:
-        return []
-    params = {
-        "keyword": keyword,
-        "availability": 1 if available_only else 0,
-        "hits": max(1, min(int(hits), 30)),   # 樂天單頁上限 30
-    }
-    if shop_code:
-        params["shopCode"] = shop_code
-    params.update(extra)
-
+async def _do_search(params: dict) -> list:
     data = await _call(params)
     if data is None:
         return []
-
     out = []
     for it in _items(data):
         try:
@@ -278,4 +252,32 @@ async def search_items(keyword: str, shop_code: str = None, hits: int = 30,
                 out.append(p)
         except Exception:
             continue
+    return out
+
+
+async def search_items(keyword: str, shop_code: str = None, hits: int = 30,
+                       available_only: bool = False, or_fallback: bool = True, **extra) -> list:
+    """
+    關鍵字搜尋 → list[ProductInfo]（只回 is_valid 的）。
+    多字預設 AND；AND 查無且為多字時，自動改 orFlag=1（OR）再試一次。
+    可額外傳 page、genreId、sort、NGKeyword 等樂天參數（**extra 直通）。
+    """
+    if not keyword:
+        return []
+    base = {
+        "keyword": keyword,
+        "availability": 1 if available_only else 0,
+        "hits": max(1, min(int(hits), 30)),   # 樂天單頁上限 30
+    }
+    if shop_code:
+        base["shopCode"] = shop_code
+    base.update(extra)
+
+    out = await _do_search(base)
+
+    # 多字 AND 查無 → 改 OR 再試一次（寧可多給點結果）
+    if not out and or_fallback and len(str(keyword).split()) > 1:
+        print(f"[Rakuten] AND 查無，改 OR 再試：{keyword!r}")
+        out = await _do_search({**base, "orFlag": 1})
+
     return out
