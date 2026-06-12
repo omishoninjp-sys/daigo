@@ -539,10 +539,16 @@ async def search_products(req: SearchRequest):
         if req.translate and needs_translation(q):
             searched = await translate_to_jp(q) or q
 
-        shop_code = "amiami" if req.source == "amiami" else None
         hits = max(1, min(req.hits, 30))
         page = max(1, req.page)
-        products = await rakuten_api.search_items(searched, shop_code=shop_code, hits=hits, page=page)
+
+        if req.source == "zozo":
+            from scrapers import yahoo_api
+            start = (page - 1) * hits + 1          # Yahoo 用 start 位移翻頁
+            products = await yahoo_api.search_items(searched, seller_id="zozo", hits=hits, start=start)
+        else:
+            shop_code = "amiami" if req.source == "amiami" else None
+            products = await rakuten_api.search_items(searched, shop_code=shop_code, hits=hits, page=page)
 
         results = []
         for p in products:
