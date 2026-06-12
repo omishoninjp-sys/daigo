@@ -1,17 +1,17 @@
 """
-中文 → 日文 查詢處理（加速版）
-==============================
+中文 → 日文 查詢處理（加速版 + 品牌組合）
+========================================
 - needs_translation(q)：有假名=已是日文不翻；純拉丁/數字=原樣；漢字無假名=翻
 - translate_to_jp(q)：回最佳單一日文關鍵字（/api/search 的 fallback）
 - suggest(q)：回候補 [{label_zh, keyword_jp}]（/api/suggest，給前台下拉）
 
-加速重點：
-1. 先查靜態對照表 jp_query_seed（常用詞秒回，完全不打 LLM）。
-2. 共用一個 httpx.AsyncClient（免每次 TLS 握手）。
-3. LLM 輸出改「中文|日文」精簡行（token 少約 4 成、生成更快、免 JSON 解析失敗），候補上限 6。
-4. in-memory 快取（熱門長尾詞翻一次就存）。
-
-重用 config 的 OPENAI_API_KEY / OPENAI_MODEL（與 seo_title.py 同一把 gpt-4o-mini）。
+處理順序（suggest / translate 都一致）：
+0. 組合查詢「英文/品牌 + 中文分類」（例：snidel 上衣）
+   → 保留品牌原樣，只把中文分類展開成日文，品牌接在每個日文關鍵字前
+   （走靜態對照表，秒回；不打 LLM）
+1. 靜態對照表 jp_query_seed（常用詞秒回）
+2. in-memory 快取
+3. LLM（gpt-4o-mini，精簡行輸出；prompt 也叮嚀保留品牌字當後援）
 """
 import re
 
@@ -57,7 +57,49 @@ def needs_translation(q: str) -> bool:
     return False
 
 
-async def _openai_chat(prompt: str, max_tokens: int = 160, temperature: float = 0.2) -> str:
+# ─────────────────────────────────────────────────────────────────────
+# 組合查詢：英文/品牌 + 中文分類（例：「snidel 上衣」「NB 鞋子」）
+# ─────────────────────────────────────────────────────────────────────
+def _combo_split(zh: str):
+    """
+    偵測「非中文前綴（品牌/英數）+ 單一中文分類」。
+    僅當：恰好一個 token 能在對照表命中，且其餘 token 皆非中文時成立
+    （中文修飾詞如「黑色」交給 LLM，避免半翻譯怪怪的）。
+    回 (prefix, base_candidates) 或 None。
+    """
+    toks = (zh or "").split()
+    if len(toks) < 2:
+        return None
+    cat_idx = [i for i, t in enumerate(toks) if seed_lookup(t)]
+    if len(cat_idx) != 1:
+        return None
+    ci = cat_idx[0]
+    others = [t for i, t in enumerate(toks) if i != ci]
+    if any(has_cjk(t) for t in others):
+        return None                      # 還有中文修飾詞 → 交給 LLM
+    prefix = " ".join(others).strip()
+    base = seed_lookup(toks[ci])
+    if not prefix or not base:
+        return None
+    return prefix, base
+
+
+def _combo_suggest(prefix: str, base: list, limit: int) -> list:
+    out = []
+    for c in base:
+        out.append({
+            "label_zh": f"{prefix} {c['label_zh']}",
+            "keyword_jp": f"{prefix} {c['keyword_jp']}",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LLM
+# ─────────────────────────────────────────────────────────────────────
+async def _openai_chat(prompt: str, max_tokens: int = 200, temperature: float = 0.2) -> str:
     if not OPENAI_API_KEY:
         return ""
     try:
@@ -85,7 +127,13 @@ async def translate_to_jp(zh: str) -> str:
     if not z or not needs_translation(z):
         return z
 
-    # 1) 先查對照表（命中用第一個候補的日文，秒回、不打 LLM）
+    # 0) 品牌 + 中文分類 → 品牌 + 對照表第一個日文（秒回）
+    combo = _combo_split(z)
+    if combo:
+        prefix, base = combo
+        return f"{prefix} {base[0]['keyword_jp']}"
+
+    # 1) 對照表
     seeded = seed_lookup(z)
     if seeded:
         return seeded[0]["keyword_jp"]
@@ -95,8 +143,9 @@ async def translate_to_jp(zh: str) -> str:
 
     prompt = (
         "你是日本樂天/Yahoo購物的搜尋助手。把下面的中文購物查詢，轉成最能命中商品的"
-        "『日文搜尋關鍵字』。品牌/動漫 IP 用日文或片假名（鋼彈→ガンダム、寶可夢→ポケモン）；"
-        "屬性用日文（黑色→ブラック）；只輸出日文關鍵字本身，不要說明、標點、引號。\n查詢：" + z
+        "『日文搜尋關鍵字』。保留查詢中的英文或品牌字（原樣不翻）；中文品牌/IP 用日文或"
+        "片假名（鋼彈→ガンダム）；屬性用日文（黑色→ブラック）；只輸出日文關鍵字本身，"
+        "不要說明、標點、引號。\n查詢：" + z
     )
     out = await _openai_chat(prompt, max_tokens=40)
     jp = out.splitlines()[0].strip().strip('「」"\'　') if out else ""
@@ -127,7 +176,13 @@ async def suggest(zh: str, limit: int = 6) -> list:
     if not z:
         return []
 
-    # 1) 對照表命中 → 秒回，不打 LLM
+    # 0) 品牌 + 中文分類（例：snidel 上衣）→ 保留品牌、展開分類，秒回
+    combo = _combo_split(z)
+    if combo:
+        prefix, base = combo
+        return _combo_suggest(prefix, base, limit)
+
+    # 1) 對照表命中 → 秒回
     seeded = seed_lookup(z)
     if seeded:
         return seeded[:limit]
@@ -137,14 +192,16 @@ async def suggest(zh: str, limit: int = 6) -> list:
     if key in _suggest_cache:
         return _suggest_cache[key]
 
-    # 3) LLM（精簡行格式）
+    # 3) LLM（精簡行格式；叮嚀保留品牌字）
     prompt = (
         f"使用者在日本樂天/Yahoo購物用中文搜尋「{z}」，可能對應多種日文商品分類。"
-        f"列出最多 {limit} 個候補，每行一個，格式為「中文標籤|日文關鍵字」（用半形直線 | 分隔）。"
-        "依最可能的意圖排序；查詢很明確就回 1～3 個即可。品牌/IP 用日文或片假名。"
-        "只輸出這些行，不要編號、不要其它文字。"
+        f"列出最多 {limit} 個候補，每行一個，格式「中文標籤|日文關鍵字」（用半形直線 | 分隔）。"
+        "規則：保留查詢裡的英文或品牌字（原樣不翻），只把中文分類詞展開成不同日文關鍵字，"
+        "並把品牌字放在每個日文關鍵字前面（例：『snidel 上衣』→ snidel 上衣|snidel トップス、"
+        "snidel T恤|snidel Tシャツ）。中文品牌/IP 用日文或片假名。"
+        "依最可能的意圖排序；查詢很明確就回 1～3 個即可。只輸出這些行，不要編號或其它文字。"
     )
-    out = await _openai_chat(prompt, max_tokens=200)
+    out = await _openai_chat(prompt, max_tokens=220)
     result = _parse_lines(out, limit)
     _suggest_cache[key] = result
     return result
