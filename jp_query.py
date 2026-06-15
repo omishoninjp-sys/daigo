@@ -22,7 +22,11 @@ import re
 
 import httpx
 
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from config import OPENAI_API_KEY
+try:
+    from config import OPENAI_MODEL
+except ImportError:
+    OPENAI_MODEL = "gpt-4o-mini"   # config 沒定義就用預設，避免 import 失敗拖垮整個搜尋
 from jp_query_seed import seed_lookup        # 分類對照（含別名），回 [{label_zh, keyword_jp}] 或 None
 
 _KANA = re.compile(r'[\u3040-\u30ff]')
