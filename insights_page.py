@@ -8,6 +8,8 @@ main.py 加一個路由回傳 INSIGHTS_HTML 即可：
         return HTMLResponse(content=INSIGHTS_HTML)
 開 https://<你的daigo網址>/admin/insights ，填 API key → 載入。
 （頁面外殼不含資料；/api/search-stats 仍需 x-api-key，網址外流也看不到資料。）
+
+2026-06 新增：一鍵下載 CSV（純前端，把已載入的資料轉成 CSV，後端不用改）。
 """
 
 INSIGHTS_HTML = r"""<!DOCTYPE html>
@@ -27,6 +29,8 @@ INSIGHTS_HTML = r"""<!DOCTYPE html>
   .cfg input, .cfg select{ height:38px; border:1px solid #ccc; border-radius:7px; padding:0 10px; font-size:14px; }
   .cfg input.key{ flex:1; min-width:200px; }
   .cfg button{ height:38px; padding:0 20px; background:var(--navy); color:#fff; border:none; border-radius:7px; font-size:14px; font-weight:600; cursor:pointer; }
+  .cfg button.dl{ background:var(--gold); color:var(--navy); }
+  .cfg button:disabled{ opacity:.45; cursor:not-allowed; }
   .cards{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:20px; }
   .kpi{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
   .kpi .n{ font-size:26px; font-weight:700; color:var(--navy); }
@@ -66,6 +70,7 @@ INSIGHTS_HTML = r"""<!DOCTYPE html>
       <option value="90">近 90 天</option>
     </select>
     <button id="load">載入</button>
+    <button id="dl" class="dl" disabled>⬇ 下載 CSV</button>
   </div>
 
   <div id="err" class="err" style="display:none;"></div>
@@ -101,6 +106,7 @@ INSIGHTS_HTML = r"""<!DOCTYPE html>
 <script>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
+  var lastData = null;   // 存最後一次載入的資料，供下載 CSV 用
   try { $('key').value = localStorage.getItem('gp_si_key') || ''; } catch(e){}
 
   function esc(s){ var d=document.createElement('div'); d.textContent=s==null?'':s; return d.innerHTML; }
@@ -130,6 +136,8 @@ INSIGHTS_HTML = r"""<!DOCTYPE html>
   }
 
   function render(d){
+    lastData = d;                       // ← 記住資料
+    $('dl').disabled = false;           // ← 開放下載
     $('content').style.display = 'block';
     var t = d.totals || {};
     $('k-total').textContent = (t.searches||0).toLocaleString();
@@ -180,8 +188,70 @@ INSIGHTS_HTML = r"""<!DOCTYPE html>
       : '<div class="muted">尚無資料</div>';
   }
 
+  // ── 一鍵下載 CSV ──────────────────────────────────────────────
+  function csvCell(v){
+    v = (v==null ? '' : String(v));
+    if(/[",\n]/.test(v)){ return '"' + v.replace(/"/g, '""') + '"'; }
+    return v;
+  }
+  function buildCSV(d){
+    var t = d.totals || {};
+    var rows = [];
+    rows.push(['GOYOUTATI 搜尋需求情報']);
+    rows.push(['統計區間（天）', d.days || '']);
+    rows.push(['匯出時間', new Date().toLocaleString()]);
+    rows.push([]);
+
+    rows.push(['總覽']);
+    rows.push(['搜尋次數', '不重複關鍵字', '零結果搜尋次數']);
+    rows.push([t.searches||0, t.distinct_terms||0, t.zero_result_searches||0]);
+    rows.push([]);
+
+    rows.push(['零結果搜尋詞（未滿足需求＝選品雷達）']);
+    rows.push(['關鍵字', '搜尋次數', '最後一次']);
+    (d.zero_terms||[]).forEach(function(it){
+      rows.push([it.raw, it.count, (it.last_ts||'').slice(0,10)]);
+    });
+    rows.push([]);
+
+    rows.push(['熱門搜尋詞']);
+    rows.push(['關鍵字', '搜尋次數', '平均結果數', '零結果率']);
+    (d.top_terms||[]).forEach(function(it){
+      rows.push([it.raw, it.count, it.avg_results||0, Math.round((it.zero_rate||0)*100) + '%']);
+    });
+    rows.push([]);
+
+    rows.push(['每日搜尋量']);
+    rows.push(['日期', '次數']);
+    (d.daily||[]).forEach(function(x){ rows.push([x.date, x.count]); });
+    rows.push([]);
+
+    rows.push(['最近搜尋']);
+    rows.push(['時間', '原始關鍵字', '翻譯後', '來源', '結果數']);
+    (d.recent||[]).forEach(function(r){
+      rows.push([(r.ts||'').slice(0,16).replace('T',' '), r.raw, r.translated, r.source, r.result_count]);
+    });
+
+    var body = rows.map(function(row){ return row.map(csvCell).join(','); }).join('\n');
+    return '\ufeff' + body;   // BOM → Excel 開繁中不亂碼
+  }
+  function downloadCSV(d){
+    var csv = buildCSV(d);
+    var blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var ymd = new Date().toISOString().slice(0,10).replace(/-/g, '');
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'goyoutati-search-insights-' + ymd + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   $('load').addEventListener('click', load);
   $('key').addEventListener('keydown', function(e){ if(e.key==='Enter') load(); });
+  $('dl').addEventListener('click', function(){ if(lastData) downloadCSV(lastData); });
 })();
 </script>
 </body>
