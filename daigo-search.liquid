@@ -300,39 +300,27 @@
     runSearchRaw(reset, q, translate);
   }
 
-  // 貼連結 → 呼叫 /api/scrape 解析單一商品，渲染成一張結果卡（沿用 card / 代購流程）
+  // 貼連結 → 直接呼叫 /api/create-order（內部會解析網址＋計價＋建立商品），完成後跳轉到商品頁
   function runLink(url){
     if(busy) return;
     busy = true; searchBtn.disabled = true;
     page = 1; grid.innerHTML = ''; moreBtn.style.display = 'none';
     if(info) info.style.display = 'none';
     hideGuide(); hideSug();
-    setMsg('解析連結中…（約 10–30 秒，請稍候）');
-    fetch(API_BASE + '/api/scrape', {
+    setMsg('建立商品中…（解析連結約 10–30 秒，完成後自動跳轉，請勿關閉頁面）');
+    fetch(API_BASE + '/api/create-order', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'x-api-key':API_KEY },
       body: JSON.stringify({ url: url })
     })
     .then(function(r){ return r.json(); })
     .then(function(data){
-      busy = false; searchBtn.disabled = false;
-      if(!data || !data.success){
-        setMsg((data && (data.error || data.detail)) || '無法從這個連結取得商品，請確認網址是否正確，或改用關鍵字搜尋');
+      if(data && data.success && data.checkout_url){
+        window.location.href = data.checkout_url;   // → 生成的商品頁／結帳
         return;
       }
-      var p = data.product || {};
-      var pr = data.pricing || {};
-      var imgUrl = p.image_url || (p.image_base64 ? ('data:image/jpeg;base64,' + p.image_base64) : '');
-      var it = {
-        title: p.title || '商品',
-        selling_price_jpy: pr.selling_price_jpy || null,
-        reference_price_twd: pr.reference_price_twd || null,
-        image_url: imgUrl,
-        source_url: p.source_url || url,
-        in_stock: (p.in_stock !== false)
-      };
-      setMsg('');
-      grid.appendChild(card(it));
+      busy = false; searchBtn.disabled = false;
+      setMsg((data && (data.error || data.detail)) || '無法從這個連結建立商品，請確認網址是否正確，或改用關鍵字搜尋');
     })
     .catch(function(){ busy = false; searchBtn.disabled = false; setMsg('連線失敗，請稍後再試'); });
   }
