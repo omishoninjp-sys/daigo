@@ -5,8 +5,13 @@ BOOKOFF 公式オンラインストア Platform（shopping.bookoff.co.jp）v1
 BOOKOFF 商品頁在伺服器 HTML 裡就內嵌 schema.org 的 JSON-LD（Product/offers），
 價格、庫存、狀態、圖片全在裡面，httpx 直抓即可。
 
-  BookoffJsonLdSource   httpx 抓頁 + 解析 JSON-LD    kind=scraper
-     · 沿用共用 config.PROXY_URL：若 BOOKOFF 擋機房 IP，比照 ZOZO 走 proxy 繞。
+  BookoffJsonLdSource    httpx 抓頁 + 解析 JSON-LD             kind=scraper
+     · 沿用共用 config.PROXY_URL：若有設 proxy 則走 proxy。
+  BookoffSeleniumSource  httpx 被擋時退回引擎 UC driver 抓頁    kind=scraper
+     · 委派 engine._fetch_with_selenium（uc_open_with_reconnect），
+       再用同一個 parse_bookoff 解析 page_source。
+     · BOOKOFF 會切斷機房 IP 的 httpx 直連（RemoteProtocolError），
+       真瀏覽器 UC 有機會通過（不保證，機房 IP 仍可能被 Akamai 擋）。
 
 要點：
   · 頁面上有推薦商品的數字（2,420 / 1,800 / ¥5,170…）——一律只走 JSON-LD，
@@ -229,11 +234,34 @@ class BookoffJsonLdSource(Source):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Source（退路）：引擎 UC driver 抓頁（httpx 被擋時）
+# ─────────────────────────────────────────────────────────────────────
+class BookoffSeleniumSource(Source):
+    kind = "scraper"
+
+    async def get(self, url, ref, engine):
+        fetch = getattr(engine, "_fetch_with_selenium", None)
+        if fetch is None:
+            return None  # 沒有引擎（例如純解析測試）→ 交回上層
+        try:
+            # 比照 generic._scrape_with_playwright：_fetch_with_selenium 為同步、
+            # 內部有 _driver_lock，配合請求佇列序列化，直接呼叫即可。
+            html = fetch(url)
+        except Exception as e:
+            print(f"[BookOff] Selenium 失敗: {type(e).__name__}: {e}")
+            return None
+        if not html:
+            return None
+        product = parse_bookoff(html, url)
+        return product if (product and product.price_jpy) else None
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Platform
 # ─────────────────────────────────────────────────────────────────────
 class BookoffPlatform(Platform):
     id = "bookoff"
-    sources = [BookoffJsonLdSource()]
+    sources = [BookoffJsonLdSource(), BookoffSeleniumSource()]
 
     def matches(self, url: str) -> bool:
         host = (urlparse(url).hostname or "").lower()
