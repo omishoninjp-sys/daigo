@@ -561,15 +561,25 @@ class ShopifyClient:
                     age_days = (datetime.now(timezone.utc) - created_at).days
                     print(f"[Cleanup] 🗑️  刪除商品 {pid}（{age_days} 天前）: {title_short}")
 
-                    del_resp = await client.delete(
-                        f"{self.base_url}/products/{pid}.json",
-                        headers=self.headers,
-                    )
-                    if del_resp.status_code == 200:
-                        deleted.append(pid)
-                        print(f"[Cleanup] ✅ 已刪除: {pid}")
-                    else:
-                        msg = f"product_id={pid}, status={del_resp.status_code}, body={del_resp.text[:100]}"
+                    # GraphQL productDelete：REST 對 >100 變體商品會 422 拒刪，GraphQL 無此限制
+                    try:
+                        gql = await self._graphql(
+                            """mutation daigoDelete($input: ProductDeleteInput!) {
+                                productDelete(input: $input) { deletedProductId userErrors { field message } }
+                            }""",
+                            {"input": {"id": f"gid://shopify/Product/{pid}"}},
+                        )
+                        pd = gql.get("data", {}).get("productDelete", {})
+                        uerrs = pd.get("userErrors") or []
+                        if pd.get("deletedProductId"):
+                            deleted.append(pid)
+                            print(f"[Cleanup] ✅ 已刪除: {pid}")
+                        else:
+                            msg = f"product_id={pid}, userErrors={json.dumps(uerrs, ensure_ascii=False)[:150]}"
+                            errors.append(msg)
+                            print(f"[Cleanup] ❌ 刪除失敗: {msg}")
+                    except Exception as e:
+                        msg = f"product_id={pid}, {type(e).__name__}: {e}"
                         errors.append(msg)
                         print(f"[Cleanup] ❌ 刪除失敗: {msg}")
 
