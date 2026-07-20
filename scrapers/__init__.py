@@ -69,12 +69,14 @@ from scrapers.makeshop import MakeShopMixin
 from scrapers.platform import register, get_platform, LegacyPlatform
 from scrapers.platform_zozotown import ZozotownPlatform
 from scrapers.platform_amiami import AmiamiPlatform
-from scrapers.platform_bookoff import BookoffPlatform 
+from scrapers.platform_bookoff import BookoffPlatform
+from scrapers.platform_snidel import SnidelPlatform 
 
 # 真 Platform 先註冊；LegacyPlatform 最後（catch-all）
 register(ZozotownPlatform())
 register(AmiamiPlatform())
 register(BookoffPlatform())
+register(SnidelPlatform())
 register(LegacyPlatform())
 
 
