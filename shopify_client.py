@@ -11,6 +11,7 @@ payload materialize variants/options（實測 variants:1），導致代購商品
 因此改用 inventoryItem.tracked=false（不追蹤庫存＝永遠可下單），符合代購非現貨本質，
 並避開該 bug。若日後要逐變體擋缺貨，再加 tracked=true + inventorySetQuantities。
 """
+import asyncio
 import json
 import base64 as _b64
 import httpx
@@ -498,6 +499,75 @@ class ShopifyClient:
         except Exception as e:
             print(f"[Shopify] Collection error: {e}")
 
+    # ──────────────────────────────────────────────────────────────────
+    # 訂單保護：被下單過的商品永不刪除
+    # ──────────────────────────────────────────────────────────────────
+    # 作法：每次清理前撈近期訂單，把有被下單的商品打上 PROTECT_TAG。
+    # 標籤永久留在商品上，所以即使日後訂單超出 API 可查範圍（read_orders
+    # 只能看近 60 天），標籤仍然保護得住。
+    PROTECT_TAG = "已下單"
+
+    async def _fetch_ordered_product_ids(self, days: int = 60) -> set:
+        """回傳近 N 天內任何訂單（含已取消／已退款）碰過的商品 id 集合。
+
+        失敗時直接拋出例外，由呼叫端決定中止清理——寧可不刪，
+        也不能因為查不到訂單就把客人下單過的商品頁刪掉。
+        """
+        from datetime import datetime, timezone, timedelta
+
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        query = """
+        query OrderedProducts($cursor: String, $q: String!) {
+          orders(first: 50, after: $cursor, query: $q) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id
+              lineItems(first: 100) { nodes { product { id } } }
+            }
+          }
+        }
+        """
+        ids = set()
+        cursor = None
+        order_count = 0
+        while True:
+            data = await self._graphql(query, {"cursor": cursor, "q": f"created_at:>={since}"})
+            conn = data["data"]["orders"]
+            for o in conn["nodes"]:
+                order_count += 1
+                for li in (o.get("lineItems") or {}).get("nodes", []):
+                    prod = li.get("product")
+                    if prod and prod.get("id"):
+                        ids.add(int(prod["id"].split("/")[-1]))
+            if not conn["pageInfo"]["hasNextPage"]:
+                break
+            cursor = conn["pageInfo"]["endCursor"]
+            await asyncio.sleep(0.3)
+
+        print(f"[Cleanup] 訂單掃描：近 {days} 天 {order_count} 筆訂單，涉及 {len(ids)} 件商品")
+        return ids
+
+    async def _protect_products(self, product_ids: set) -> int:
+        """替被下單過、但還沒有保護標籤的商品補上標籤。"""
+        mutation = """
+        mutation AddProtectTag($id: ID!, $tags: [String!]!) {
+          tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+        }
+        """
+        tagged = 0
+        for pid in product_ids:
+            try:
+                await self._graphql(mutation, {
+                    "id": f"gid://shopify/Product/{pid}",
+                    "tags": [self.PROTECT_TAG],
+                })
+                tagged += 1
+                await asyncio.sleep(0.25)
+            except Exception as e:
+                # 打標籤失敗不致命：本次仍會用 id 集合擋下刪除
+                print(f"[Cleanup] ⚠️ 標籤寫入失敗 {pid}: {type(e).__name__}: {e}")
+        return tagged
+
     async def cleanup_old_daigo_products(self, days: int = 10) -> dict:
         """
         刪除指定系列（DAIGO_COLLECTION_ID）中超過 N 天的商品。
@@ -516,20 +586,37 @@ class ShopifyClient:
         deleted = []
         errors = []
         skipped = 0
+        protected = 0
         page_info = None
         fetched = 0
 
         print(f"[Cleanup] 開始清理：Collection {DAIGO_COLLECTION_ID}，刪除 {days} 天前 ({cutoff.strftime('%Y-%m-%d %H:%M UTC')}) 的商品")
 
+        # ── 先取得「被下單過」的商品，查不到就整個中止 ──
+        try:
+            ordered_ids = await self._fetch_ordered_product_ids(days=60)
+        except Exception as e:
+            msg = f"無法取得訂單資料，為避免誤刪已下單商品，本次清理中止：{type(e).__name__}: {e}"
+            print(f"[Cleanup] ❌ {msg}")
+            return {
+                "deleted_count": 0, "deleted_ids": [], "skipped_count": 0,
+                "protected_count": 0, "error_count": 1, "errors": [msg],
+                "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+            }
+
+        if ordered_ids:
+            tagged = await self._protect_products(ordered_ids)
+            print(f"[Cleanup] 保護標籤：已標記 {tagged}/{len(ordered_ids)} 件")
+
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
                 params = {
                     "collection_id": DAIGO_COLLECTION_ID,
-                    "fields": "id,title,created_at,status",
+                    "fields": "id,title,created_at,status,tags",
                     "limit": 250,
                 }
                 if page_info:
-                    params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status"}
+                    params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status,tags"}
 
                 resp = await client.get(
                     f"{self.base_url}/products.json",
@@ -556,6 +643,13 @@ class ShopifyClient:
 
                     if created_at >= cutoff:
                         skipped += 1
+                        continue
+
+                    # 被下單過的商品：不論多舊都保留
+                    tag_list = [t.strip() for t in (p.get("tags") or "").split(",")]
+                    if pid in ordered_ids or self.PROTECT_TAG in tag_list:
+                        protected += 1
+                        print(f"[Cleanup] 🔒 保留（已下單）: {pid} {title_short}")
                         continue
 
                     age_days = (datetime.now(timezone.utc) - created_at).days
@@ -594,11 +688,13 @@ class ShopifyClient:
                 if not page_info or not products:
                     break
 
-        print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，錯誤 {len(errors)} 件")
+        print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，"
+              f"保護 {protected} 件，錯誤 {len(errors)} 件")
         return {
             "deleted_count": len(deleted),
             "deleted_ids": deleted,
             "skipped_count": skipped,
+            "protected_count": protected,
             "error_count": len(errors),
             "errors": errors,
             "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
