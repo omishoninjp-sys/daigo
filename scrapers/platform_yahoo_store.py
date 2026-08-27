@@ -108,7 +108,14 @@ def canonical_url(seller: str, code: str) -> str:
 # 小工具
 # ─────────────────────────────────────────────────────────────────────
 def _to_int(value):
-    if value is None:
+    """數字/字串 → int（帶合理價格區間檢查）。
+
+    dict / list 一律拒收：本函式是拿 str(value) 抽數字的，把 dict 丟進來會把裡面
+    每個數字黏成一串（{"applicablePrice":4950,"immediatePrice":4620} → 49504620），
+    運氣好超出區間變 None、運氣不好（990/890 → 990890）就變成一個「看起來正常」
+    的假價。價格欄位若是巢狀結構，請走 _sku_price()。
+    """
+    if value is None or isinstance(value, (dict, list, tuple, set)):
         return None
     s = re.sub(r'[^0-9]', '', str(value))
     if not s:
@@ -118,6 +125,27 @@ def _to_int(value):
     except ValueError:
         return None
     return v if _MIN_PRICE <= v <= _MAX_PRICE else None
+
+
+def _sku_price(raw):
+    """individualItemList[].price → int（取不到回 None）。
+
+    實測有三種形態：
+      None                                          該 SKU 與主商品同價（多數頁面）
+      {"applicablePrice": N, "immediatePrice": M}   N＝該 SKU 的正常售價
+      N                                             純數字（少數頁面）
+
+    immediatePrice（今すぐ買える価格＝即時折扣後）不採用：主商品價取的是
+    applicablePrice，變體若改用 immediatePrice 會變成主／變體兩套基準，
+    上架後價差會亂掉。兩者一律取 applicablePrice。
+    """
+    if isinstance(raw, dict):
+        for key in ("applicablePrice", "price"):
+            v = _to_int(raw.get(key))
+            if v:
+                return v
+        return None
+    return _to_int(raw)
 
 
 def _strip_html(s) -> str:
@@ -255,11 +283,18 @@ def _variants_from_item(item: dict, seller: str):
             elif not size:                # 第二軸當尺寸槽
                 size = _clean_size(cv)
 
+        raw_price = it.get("price")
+        price = _sku_price(raw_price)
+        if raw_price is not None and price is None:
+            # 有給價卻讀不出來 → 這支 SKU 會被當成同主價，寧可吵一聲也別靜靜賣錯
+            print(f"[YahooStore] ⚠️ SKU {it.get('skuId')!r} 價格無法解析，退用主商品價："
+                  f"{raw_price!r}")
+
         variants.append({
             "color": color,
             "size": size,
             "sku": str(it.get("skuId") or "") or "-".join(p for p in (color, size) if p),
-            "price": _to_int(it.get("price")) or 0,   # null → 0 → shopify 用主價
+            "price": price or 0,   # 0 → shopify 用主商品價（該 SKU 與主商品同價）
             "in_stock": True,
             "image": _image_url(it.get("image"), seller) or img_by_choice.get(color, ""),
         })
