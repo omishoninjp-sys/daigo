@@ -21,6 +21,12 @@ from pricing import calculate_selling_price
 # ★ 版本標記：啟動時會印一次。若 log 看不到這行，代表跑的不是這支檔案。
 print("[shopify_client] LOADED build=GRAPHQL-PRODUCTSET-v2 (2026-06-11)")
 
+# Shopify 每商品變體上限。實測本店 shop.resourceLimits.maxProductVariants = 2048
+# （2024 起的預設值；舊的 100 上限已不適用，店內現存最多的商品有 169 個變體）。
+SHOPIFY_MAX_VARIANTS = 2048
+# 超過這個數就印警告讓人看得到——不是限制，只是「這件很不尋常，值得瞄一眼」。
+VARIANT_WARN_THRESHOLD = 100
+
 
 class ShopifyClient:
     def __init__(self):
@@ -41,10 +47,11 @@ class ShopifyClient:
                 json={"query": query, "variables": variables or {}},
             )
             if resp.status_code != 200:
-                raise Exception(f"Shopify GraphQL HTTP {resp.status_code}: {resp.text[:300]}")
+                raise Exception(f"Shopify GraphQL HTTP {resp.status_code}: {resp.text}")
             data = resp.json()
             if data.get("errors"):
-                raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)[:400]}")
+                # 不截斷：Shopify 的錯誤原文是唯一能指出「哪個欄位/哪個變體」出問題的線索
+                raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)}")
             return data
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
@@ -264,11 +271,25 @@ class ShopifyClient:
         # ══════════════════════════════════════════════════════════════
         # 4. productSet mutation（建立商品 + options + variants）
         # ══════════════════════════════════════════════════════════════
+        # 變體數不做截斷：截掉就是靜默丟掉款式，客人看到的清單不完整卻沒有任何跡象。
+        # 寧可讓 Shopify 明確拒絕（錯誤原文照印），也不要默默少賣幾款。
+        # 本店 shop.resourceLimits.maxProductVariants 實測 = 2048。
+        n_variants = len(gql_variants)
+        if n_variants > VARIANT_WARN_THRESHOLD:
+            print(f"[Shopify] ⚠️ 變體數偏多：{n_variants} 個"
+                  f"（Shopify 每商品上限 {SHOPIFY_MAX_VARIANTS}）")
+            print(f"[Shopify] ⚠️   商品：{final_title}")
+            print(f"[Shopify] ⚠️   來源：{source_url}")
+            if n_variants > SHOPIFY_MAX_VARIANTS:
+                print(f"[Shopify] ⚠️   已超過上限，productSet 預計會被拒絕；"
+                      f"不截斷，讓它明確失敗以便人工處理")
+
         mutation = """mutation CreateDaigo($input: ProductSetInput!) {
           productSet(synchronous: true, input: $input) {
             product {
               id
               handle
+              variantsCount { count }
               variants(first: 100) { nodes { id selectedOptions { name value } } }
             }
             userErrors { field message }
@@ -279,15 +300,26 @@ class ShopifyClient:
         ps = data.get("data", {}).get("productSet", {})
         errs = ps.get("userErrors", [])
         if errs:
-            raise Exception(f"productSet userErrors: {json.dumps(errs, ensure_ascii=False)[:400]}")
+            # 原封不動印出來（不截斷）——錯誤訊息被切掉就查不出是哪個變體出問題
+            print(f"[Shopify] ❌ productSet userErrors（{n_variants} 個變體）："
+                  f"{json.dumps(errs, ensure_ascii=False)}")
+            print(f"[Shopify] ❌   商品：{final_title}")
+            print(f"[Shopify] ❌   來源：{source_url}")
+            raise Exception(f"productSet userErrors: {json.dumps(errs, ensure_ascii=False)}")
         product = ps.get("product")
         if not product:
-            raise Exception(f"productSet 無回傳 product: {json.dumps(data, ensure_ascii=False)[:300]}")
+            print(f"[Shopify] ❌ productSet 無回傳 product：{json.dumps(data, ensure_ascii=False)}")
+            raise Exception(f"productSet 無回傳 product: {json.dumps(data, ensure_ascii=False)}")
 
         product_id = int(product["id"].split("/")[-1])
         handle = product["handle"]
-        gql_nodes = product.get("variants", {}).get("nodes", [])
-        print(f"[Shopify] 商品已建立(GraphQL): {product_id} / {handle} / variants: {len(gql_nodes)}")
+        # variants(first:100) 只回前 100 筆，拿它當數量會誤導（實際可能更多）→ 用 variantsCount
+        created_n = (product.get("variantsCount") or {}).get("count")
+        if created_n is None:
+            created_n = len(product.get("variants", {}).get("nodes", []))
+        print(f"[Shopify] 商品已建立(GraphQL): {product_id} / {handle} / variants: {created_n}")
+        if created_n != n_variants:
+            print(f"[Shopify] ⚠️ 送出 {n_variants} 個變體但實際建立 {created_n} 個 —— 請人工確認")
         print(f"[Shopify] 標題: {final_title}")
         print(f"[Shopify] Tags: {final_tags}")
 

@@ -21,6 +21,177 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
 
 
+_SKU_MIN_PRICE = 100
+_SKU_MAX_PRICE = 10_000_000
+
+# _build_variants 判斷顏色軸用的關鍵字（_parse_sku_json 沿用同一組，行為一致）
+_COLOR_KEYWORDS = ["色分類", "カラー", "color", "色"]
+
+
+def _grab_json_array(html: str, key: str):
+    """
+    從 HTML 找出 key 之後的第一個 JSON 陣列，用括號配對取完整片段再 json.loads。
+
+    樂天商品頁把整包 itemInfoSku 塞在 <script> 裡，沒有獨立的 script id 可抓，
+    只能從 key 往後做括號配對。字串內的中括號要略過（商品說明裡有大量 HTML），
+    否則會在字串中間斷開。取不到回 None。
+    """
+    j = html.find(key)
+    if j < 0:
+        return None
+    try:
+        start = html.index("[", j)
+    except ValueError:
+        return None
+
+    depth = 0
+    in_str = False
+    esc = False
+    for k in range(start, len(html)):
+        ch = html[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(html[start:k + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _parse_sku_json(html: str):
+    """
+    解析樂天商品頁內嵌的 itemInfoSku SKU 資料（httpx 的原始 HTML 就有，不必 driver）。
+
+    三塊資料：
+      "variantSelectors"        軸定義 [{label:"サイズ", values:[…]}, …]，順序對應 selectorValues
+      "sku"                     真實存在的 SKU：selectorValues / taxIncludedPrice /
+                                images[].location / merchantDefinedSkuId / hidden
+      "variantMappedInventories" 逐 SKU 庫存 [{sku:"r-sku…", quantity:46}, …]
+
+    比 _parse_sku_options（笛卡爾積）好的地方：
+      · 逐變體真實價格（笛卡爾積版本一律 price=0＝全部套主商品價）
+      · 逐變體庫存（笛卡爾積版本一律 in_stock=True）
+      · 逐變體圖片
+      · 只有實際存在的組合（笛卡爾積會生出賣家根本沒有的色×尺寸）
+      · 軸名直接讀 label，不必用關鍵字猜哪一軸是顏色
+
+    回傳 (variants, found, any_in_stock)：
+      found=False        → 這頁沒有這塊 JSON（單品或舊模板）→ 呼叫端退回笛卡爾積解析
+      any_in_stock=False → 有 SKU 但全部缺貨 → 呼叫端把整件標為缺貨
+    variants 預設只含有庫存的 SKU；但「全部缺貨」時會保留完整清單（見下方註解），
+    不會因為庫存判斷把商品變成零變體。濾完剩 <=1 個時回 []（視為單品，不建選單）。
+    """
+    skus = _grab_json_array(html, '"sku":[')
+    if not isinstance(skus, list) or not skus:
+        return [], False, False
+
+    selectors = _grab_json_array(html, '"variantSelectors":[') or []
+    labels = [str((s or {}).get("label") or "").strip()
+              for s in selectors if isinstance(s, dict)]
+
+    inventories = _grab_json_array(html, '"variantMappedInventories":[') or []
+    qty_by_sku = {}
+    for entry in inventories:
+        if isinstance(entry, dict) and entry.get("sku") is not None:
+            qty_by_sku[str(entry["sku"])] = entry.get("quantity")
+
+    # 哪一軸是顏色（沿用 _build_variants 的關鍵字判斷）；其餘軸用「 / 」併成 size
+    color_idx = -1
+    for i, label in enumerate(labels):
+        if any(kw.lower() in label.lower() for kw in _COLOR_KEYWORDS):
+            color_idx = i
+            break
+
+    built = []          # [(variant_dict, in_stock)]
+    hidden = 0
+    for s in skus:
+        if not isinstance(s, dict):
+            continue
+        if s.get("hidden"):
+            hidden += 1
+            continue
+
+        variant_id = str(s.get("variantId") or "")
+        quantity = qty_by_sku.get(variant_id)
+        # quantity 只代表「手上有幾個」，不等於不能買：
+        # 有 backOrderDeliveryDateId 的店家是取り寄せ／受注生產，quantity 長期為 0 仍可下單
+        # （實測 kamiya/20000956 全 12 個 SKU quantity=0，但頁面寫「14営業日以内発送」）。
+        # 沒有庫存資料的店家一律當有貨（維持舊行為，寧可讓客人下單再確認）。
+        has_backorder = s.get("backOrderDeliveryDateId") is not None
+        in_stock = True if quantity is None else ((quantity or 0) > 0 or has_backorder)
+
+        values = [str(v).strip() for v in (s.get("selectorValues") or []) if str(v).strip()]
+        if 0 <= color_idx < len(values):
+            color = values[color_idx]
+            rest = [v for i, v in enumerate(values) if i != color_idx]
+        else:
+            color = ""
+            rest = list(values)
+        size = " / ".join(rest)
+
+        price = 0
+        raw_price = s.get("taxIncludedPrice")
+        if raw_price is not None:
+            try:
+                price = int(float(raw_price))
+            except (TypeError, ValueError):
+                price = 0
+            if not (_SKU_MIN_PRICE <= price <= _SKU_MAX_PRICE):
+                price = 0
+
+        image = ""
+        images = s.get("images") or []
+        if images and isinstance(images[0], dict):
+            image = str(images[0].get("location") or "").strip()
+
+        sku_code = str(s.get("merchantDefinedSkuId") or "").strip() or variant_id
+        built.append(({
+            "color": color,
+            "size": size,
+            "sku": sku_code[:80],
+            "price": price,      # 0 → shopify_client 用主商品價
+            "in_stock": True,
+            "image": image,
+        }, in_stock))
+
+    if hidden:
+        print(f"[Rakuten] SKU JSON：隱藏商品已排除 {hidden} 個")
+
+    in_stock_only = [v for v, ok in built if ok]
+    any_in_stock = bool(in_stock_only)
+
+    if any_in_stock:
+        variants = in_stock_only
+        skipped = len(built) - len(in_stock_only)
+        if skipped:
+            print(f"[Rakuten] SKU JSON：缺貨變體已排除 {skipped} 個（只保留有庫存）")
+    else:
+        # 全部判定缺貨 → 不做排除，保留完整選項清單，改由呼叫端把整件標成缺貨。
+        # （庫存訊號沒到可以據以刪光選項的可信度，寧可讓客人看得到有哪些款式）
+        variants = [v for v, _ in built]
+
+    # 只有「完全沒有可選項目」才回空交給 shopify_client 當單品。
+    # 只剩一個有貨的 SKU 時仍然回傳它 —— 24 選 1 的商品若退成無選項單品，
+    # 客人看不出自己買到的是哪一款（實測 sidecar/0188583-1 就是這種情況）。
+    if not variants or not any(v["color"] or v["size"] for v in variants):
+        return [], True, any_in_stock
+
+    return variants, True, any_in_stock
+
+
 def _parse_sku_options(soup: BeautifulSoup) -> list:
     """
     解析 Rakuten 商品頁的 SKU 選項（色、サイズ等）。
@@ -317,15 +488,27 @@ class RakutenMixin:
                         product.brand = shop_m.group(1)
 
                 # ── SKU 選項（色分類、サイズ等）展開為 variant 格式 ──
-                soup = BeautifulSoup(html, "html.parser")
-                product.variants = _parse_sku_options(soup)
+                # 優先走頁面內嵌的 itemInfoSku JSON：有逐變體價格/庫存/圖，且是真實
+                # 存在的組合。抓得到就不必再走 DOM 解析與 driver fallback。
+                sku_variants, sku_found, sku_any_stock = _parse_sku_json(html)
+                if sku_found:
+                    product.variants = sku_variants
+                    if not sku_any_stock:
+                        product.in_stock = False   # 所有 SKU 都缺貨 → 整件缺貨
+                        print("[Rakuten] SKU JSON：所有變體皆缺貨 → 整件標為缺貨")
+                    print(f"[Rakuten] SKU JSON 命中 → variants={len(product.variants)}")
+                else:
+                    soup = BeautifulSoup(html, "html.parser")
+                    product.variants = _parse_sku_options(soup)
 
                 # ⚠️ 無條件 fallback：httpx 抓不到 SKU 就用 driver 重抓
                 # 樂天新版 RMS 的 SKU 選項是 React 動態渲染，httpx 連 placeholder 都看不到
                 # 連標識字串都拿不到，所以無法事先判斷「該不該」用 driver
                 # → 簡單的策略：只要 httpx 抓出 0 個 variants，就無條件試 driver 一次
                 # 副作用：純單品商品也會多花一次 driver 時間（~10s），但保證有 SKU 的能抓到
-                if not product.variants:
+                # SKU JSON 命中時不再走 driver：那份資料就是權威來源，
+                # 濾完是空的代表「單品」或「整件缺貨」，不是抓不到。
+                if not product.variants and not sku_found:
                     print(f"[Rakuten] httpx 抓不到 SKU → 嘗試 driver fallback（驗證 Zeabur IP 是否可拿到 RMS）")
                     try:
                         driver_html = await asyncio.to_thread(self._rakuten_driver_fetch, url)
