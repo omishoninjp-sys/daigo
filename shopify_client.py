@@ -21,11 +21,10 @@ from pricing import calculate_selling_price
 # ★ 版本標記：啟動時會印一次。若 log 看不到這行，代表跑的不是這支檔案。
 print("[shopify_client] LOADED build=GRAPHQL-PRODUCTSET-v2 (2026-06-11)")
 
-# Shopify 每商品變體上限。實測本店 shop.resourceLimits.maxProductVariants = 2048
-# （2024 起的預設值；舊的 100 上限已不適用，店內現存最多的商品有 169 個變體）。
-SHOPIFY_MAX_VARIANTS = 2048
-# 超過這個數就印警告讓人看得到——不是限制，只是「這件很不尋常，值得瞄一眼」。
-VARIANT_WARN_THRESHOLD = 100
+# 每商品變體上限不寫死：向 Shopify 查本店實際值（shop.resourceLimits.maxProductVariants）。
+# 寫死會過期——舊的 100 上限自 2024 起已改為 2048，之後也可能再變。
+# 查一次快取整個 process；查不到就不做上限警告（絕不因此擋下上架）。
+_variant_limit_cache = {"value": None, "fetched": False}
 
 
 class ShopifyClient:
@@ -53,6 +52,28 @@ class ShopifyClient:
                 # 不截斷：Shopify 的錯誤原文是唯一能指出「哪個欄位/哪個變體」出問題的線索
                 raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)}")
             return data
+
+    async def _max_product_variants(self):
+        """
+        本店每商品的變體上限，向 Shopify 查實際值後快取。
+
+        查不到（欄位被移除、權限不足、網路失敗…）回 None —— 呼叫端就略過上限警告，
+        照常送出讓 Shopify 自己裁決。這道保護只負責「先喊一聲」，不負責擋下上架。
+        """
+        if _variant_limit_cache["fetched"]:
+            return _variant_limit_cache["value"]
+        _variant_limit_cache["fetched"] = True
+        try:
+            data = await self._graphql("{ shop { resourceLimits { maxProductVariants } } }")
+            limit = (((data.get("data") or {}).get("shop") or {})
+                     .get("resourceLimits") or {}).get("maxProductVariants")
+            limit = int(limit) if limit else None
+            _variant_limit_cache["value"] = limit
+            print(f"[Shopify] 本店每商品變體上限（查得）：{limit}")
+        except Exception as e:
+            _variant_limit_cache["value"] = None
+            print(f"[Shopify] ⚠️ 查不到變體上限（{type(e).__name__}: {e}）→ 略過上限警告，照常送出")
+        return _variant_limit_cache["value"]
 
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
@@ -273,16 +294,14 @@ class ShopifyClient:
         # ══════════════════════════════════════════════════════════════
         # 變體數不做截斷：截掉就是靜默丟掉款式，客人看到的清單不完整卻沒有任何跡象。
         # 寧可讓 Shopify 明確拒絕（錯誤原文照印），也不要默默少賣幾款。
-        # 本店 shop.resourceLimits.maxProductVariants 實測 = 2048。
+        # 上限向 Shopify 查（_max_product_variants），不寫死。
         n_variants = len(gql_variants)
-        if n_variants > VARIANT_WARN_THRESHOLD:
-            print(f"[Shopify] ⚠️ 變體數偏多：{n_variants} 個"
-                  f"（Shopify 每商品上限 {SHOPIFY_MAX_VARIANTS}）")
+        variant_limit = await self._max_product_variants()
+        if variant_limit and n_variants > variant_limit:
+            print(f"[Shopify] ⚠️ 變體數 {n_variants} 已超過本店上限 {variant_limit}"
+                  f" —— 不截斷，照常送出讓 Shopify 明確裁決")
             print(f"[Shopify] ⚠️   商品：{final_title}")
             print(f"[Shopify] ⚠️   來源：{source_url}")
-            if n_variants > SHOPIFY_MAX_VARIANTS:
-                print(f"[Shopify] ⚠️   已超過上限，productSet 預計會被拒絕；"
-                      f"不截斷，讓它明確失敗以便人工處理")
 
         mutation = """mutation CreateDaigo($input: ProductSetInput!) {
           productSet(synchronous: true, input: $input) {
