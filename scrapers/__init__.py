@@ -8,6 +8,8 @@ Scraper class 仍是「引擎」（持有 driver + 各 Mixin 方法），供 Pla
 
 真 Platform：
   - ZozotownPlatform（platform_zozotown.py）：雅虎店 SSR，自含，已脫離 Mixin。
+  - YahooStorePlatform（platform_yahoo_store.py）：Yahoo!商店街 SSR（__NEXT_DATA__），
+        帶變體＋逐變體庫存；官方商品検索 API / UC / generic 依序退路。
   - AmiamiPlatform（platform_amiami.py）：樂天 Ichiba 官方 API + amiami.jp UC fallback。
         · 官方 API 走共用 scrapers/rakuten_api.py
         · UC fallback 委派 AmiamiMixin._amiami_scrape_jp（故 AmiamiMixin 保留在引擎）
@@ -72,6 +74,7 @@ from scrapers.platform_amiami import AmiamiPlatform
 from scrapers.platform_bookoff import BookoffPlatform
 from scrapers.platform_snidel import SnidelPlatform
 from scrapers.platform_muji import MujiPlatform 
+from scrapers.platform_yahoo_store import YahooStorePlatform
 
 # 真 Platform 先註冊；LegacyPlatform 最後（catch-all）
 register(ZozotownPlatform())
@@ -79,6 +82,7 @@ register(AmiamiPlatform())
 register(BookoffPlatform())
 register(SnidelPlatform())
 register(MujiPlatform())
+register(YahooStorePlatform())
 register(LegacyPlatform())
 
 
