@@ -334,7 +334,7 @@ async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
-        from scrapers.base import detect_blocked
+        from scrapers.base import detect_blocked, detect_invalid_link
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站: {url[:80]}")
@@ -342,6 +342,16 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,
                 error=blocked_reason,
+                queue_info={"active": _active_count, "waiting": _queue_count},
+            )
+        # ★ 非商品頁連結（圖片直連／搜尋結果／短網址／本站自己）擋在爬取之前，
+        #   也不進 scrape_monitor 的失敗紀錄（那份資料是用來排「哪個網域該修」的）
+        invalid_reason = detect_invalid_link(url)
+        if invalid_reason:
+            print(f"[API] 🔗 非商品頁連結: {url[:80]}")
+            return ScrapeResponse(
+                success=False,
+                error=invalid_reason,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         product: ProductInfo = await scrape_with_queue(url)
@@ -377,7 +387,7 @@ async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站
-        from scrapers.base import detect_blocked
+        from scrapers.base import detect_blocked, detect_invalid_link
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
@@ -385,6 +395,14 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=blocked_reason,
+            )
+        # ★ 非商品頁連結，同 /api/scrape
+        invalid_reason = detect_invalid_link(url)
+        if invalid_reason:
+            print(f"[API] 🔗 非商品頁連結（建單嘗試）: {url[:80]}")
+            return CreateOrderResponse(
+                success=False,
+                error=invalid_reason,
             )
         # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
         # 一般平台：先試 cache，沒有才爬

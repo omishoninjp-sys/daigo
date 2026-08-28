@@ -115,6 +115,119 @@ def detect_blocked(url: str) -> str | None:
     return None
 
 
+# ============ 非商品頁連結攔截 ============
+#
+# 客人貼錯連結（圖片直連、搜尋結果、短網址、本站自己）在爬取「之前」就擋掉：
+#   · 省掉一次沒有意義的爬取（generic 那條要開瀏覽器，很貴）
+#   · 更重要的是不要進 scrape_monitor 的失敗紀錄 —— 那份資料是用來決定
+#     「哪個網域該修」的，混進客人貼錯的連結就沒法排序了
+#
+# ★ 網域比對一律用 _host_matches()（完整網域或其子網域），絕不可用子字串 in。
+#   `"t.co" in host` 會命中 tocco-closet.co.jp、golfdigest.co.jp、dot-st.com、
+#   newart.co.jp、uniformnext.com、lilith-soft.com 等一堆正常商店 ——
+#   實測第一版就是這樣誤擋了 7 家。
+
+_IMAGE_EXTS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+    ".avif", ".heic", ".tiff", ".tif", ".ico",
+)
+
+# 主機名第一段是這些字 → 圖片/靜態資源主機（image.rakuten.co.jp 這類）
+_ASSET_HOST_LABELS = {"img", "image", "images", "static", "assets", "cdn"}
+
+# 已知的圖床／CDN
+_IMAGE_HOSTS = (
+    "filestackcontent.com", "cdn.shopify.com", "imgz.jp",
+    "akamaized.net", "cloudfront.net", "googleusercontent.com",
+)
+
+# 搜尋引擎與短網址（短網址展不開就不知道客人要買什麼）
+_SEARCH_SHORTLINK_HOSTS = (
+    "google.com", "google.co.jp", "share.google", "goo.gl",
+    "bing.com", "t.co", "bit.ly", "lin.ee", "reurl.cc",
+    "pse.is", "tinyurl.com",
+)
+
+# 本站自己
+_OWN_HOSTS = ("goyoutati.com", "myshopify.com")
+
+_MSG_IMAGE = (
+    "您貼的是圖片檔的直接連結，不是商品頁面，我們無法從圖片取得商品名稱與價格。"
+    "請回到該商品的購物網站，複製網址列上的商品頁連結（通常會包含商品名稱或商品編號）再試一次。"
+)
+_MSG_SEARCH = (
+    "您貼的是搜尋結果或短網址，不是商品頁面。"
+    "請點進您要購買的那一件商品，進入商品頁後再複製網址列上的連結給我們。"
+)
+_MSG_OWN = (
+    "您貼的是本站自己的商品頁連結。"
+    "如果要代購新商品，請提供日本購物網站（Amazon JP、樂天、ZOZOTOWN、Yahoo 商店街等）的商品連結；"
+    "若是要購買本站已上架的商品，直接在該商品頁下單即可。"
+)
+_MSG_MALFORMED = (
+    "這不是一個有效的商品網址。"
+    "請從購物網站的商品頁複製完整網址（以 http:// 或 https:// 開頭）再試一次。"
+)
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    """
+    完整網域或其子網域才算命中。
+
+    ★ 絕對不要改成子字串比對。`domain in host` 會讓 "t.co" 命中
+    tocco-closet.co.jp、dot-st.com 等正常商店，客人會被無故擋下。
+    """
+    host = (host or "").lower().strip().rstrip(".")
+    domain = (domain or "").lower().strip().rstrip(".")
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def detect_invalid_link(url: str) -> str | None:
+    """
+    非商品頁連結 → 回傳給客人看的繁中說明；正常商品連結 → None。
+
+    掛在 /api/scrape 與 /api/create-order，detect_blocked 之後、爬取之前。
+    """
+    raw = (url or "").strip()
+
+    # ── 4. 結構不成立：非 http(s)、沒有 host ──
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return _MSG_MALFORMED
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if scheme not in ("http", "https") or not host:
+        return _MSG_MALFORMED
+
+    # ── 3. 本站自己 ──
+    for domain in _OWN_HOSTS:
+        if _host_matches(host, domain):
+            return _MSG_OWN
+
+    # ── 2. 搜尋引擎與短網址 ──
+    for domain in _SEARCH_SHORTLINK_HOSTS:
+        if _host_matches(host, domain):
+            return _MSG_SEARCH
+
+    # ── 1. 圖片直連 ──
+    for domain in _IMAGE_HOSTS:
+        if _host_matches(host, domain):
+            return _MSG_IMAGE
+    # 主機名第一段是 img/image/images/static/assets/cdn
+    labels = host.split(".")
+    if len(labels) > 1 and labels[0] in _ASSET_HOST_LABELS:
+        return _MSG_IMAGE
+    # 路徑副檔名是圖片（只看 path，query string 不算）
+    path = (parsed.path or "").lower()
+    if path.endswith(_IMAGE_EXTS):
+        return _MSG_IMAGE
+
+    return None
+
+
 # ============ Platform Detection ============
 
 def detect_platform(url: str) -> str:
