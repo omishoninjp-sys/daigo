@@ -332,10 +332,14 @@ class ShopifyClient:
 
         product_id = int(product["id"].split("/")[-1])
         handle = product["handle"]
-        # variants(first:100) 只回前 100 筆，拿它當數量會誤導（實際可能更多）→ 用 variantsCount
+        # 下方第 6 段的顏色圖連動要用這份 node 清單（含 variant id 與 selectedOptions），
+        # 不要為了算數量就把它拿掉——這行被刪掉造成過線上 NameError。
+        gql_nodes = product.get("variants", {}).get("nodes", [])
+        # 數量另外用 variantsCount：variants(first:100) 只回前 100 筆，
+        # 拿它的長度當數量會誤導（實際可能更多）。
         created_n = (product.get("variantsCount") or {}).get("count")
         if created_n is None:
-            created_n = len(product.get("variants", {}).get("nodes", []))
+            created_n = len(gql_nodes)
         print(f"[Shopify] 商品已建立(GraphQL): {product_id} / {handle} / variants: {created_n}")
         if created_n != n_variants:
             print(f"[Shopify] ⚠️ 送出 {n_variants} 個變體但實際建立 {created_n} 個 —— 請人工確認")
