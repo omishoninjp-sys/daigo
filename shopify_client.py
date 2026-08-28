@@ -53,6 +53,42 @@ class ShopifyClient:
                 raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)}")
             return data
 
+    async def _fetch_all_variant_nodes(self, product_gid: str) -> list:
+        """
+        分頁抓某商品的完整變體清單（id + selectedOptions）。
+
+        productSet 的回傳只帶 variants(first: 100)，超過 100 的變體拿不到 id，
+        顏色圖就連動不上——客人選了顏色但圖不換，而且不會有任何錯誤訊息，是
+        靜默缺陷。把 first 調大（250）只是把問題推遠：每商品上限是 2048。
+
+        任一頁失敗就回傳已取得的部分，由呼叫端印警告；絕不因此擋下上架。
+        """
+        query = """
+        query VariantPage($id: ID!, $cursor: String) {
+          product(id: $id) {
+            variants(first: 250, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes { id selectedOptions { name value } }
+            }
+          }
+        }"""
+        nodes, cursor = [], None
+        for _ in range(20):          # 2048 / 250 ≈ 9 頁，20 頁是防呆上限
+            try:
+                data = await self._graphql(query, {"id": product_gid, "cursor": cursor})
+            except Exception as e:
+                print(f"[Shopify] ⚠️ 變體分頁查詢失敗（已取得 {len(nodes)} 筆）："
+                      f"{type(e).__name__}: {e}")
+                return nodes
+            conn = (((data.get("data") or {}).get("product") or {}).get("variants") or {})
+            nodes.extend(conn.get("nodes") or [])
+            page = conn.get("pageInfo") or {}
+            cursor = page.get("endCursor")
+            if not page.get("hasNextPage") or not cursor:
+                return nodes
+        print(f"[Shopify] ⚠️ 變體分頁達到 20 頁上限，取得 {len(nodes)} 筆後停止")
+        return nodes
+
     async def _max_product_variants(self):
         """
         本店每商品的變體上限，向 Shopify 查實際值後快取。
@@ -355,6 +391,20 @@ class ShopifyClient:
         # ══════════════════════════════════════════════════════════════
         # 6. 顏色圖連動（用 GraphQL 回傳的變體做 color → variant_ids 對映）
         # ══════════════════════════════════════════════════════════════
+        if color_image_map:
+            # productSet 只回前 100 筆變體。超過的部分要另外分頁補齊，否則第 101 個
+            # 之後的變體不會有顏色連動圖（客人選了顏色圖卻不變，且無任何錯誤訊息）。
+            if created_n and created_n > len(gql_nodes):
+                print(f"[Shopify] 變體 {created_n} 個 > productSet 回傳的 "
+                      f"{len(gql_nodes)} 筆 → 分頁補齊完整清單")
+                full = await self._fetch_all_variant_nodes(product["id"])
+                if len(full) > len(gql_nodes):
+                    gql_nodes = full
+                print(f"[Shopify] 分頁後取得 {len(gql_nodes)} 筆變體")
+            if created_n and len(gql_nodes) < created_n:
+                print(f"[Shopify] ⚠️ 只取得 {len(gql_nodes)}/{created_n} 個變體，"
+                      f"其餘變體不會有顏色連動圖 —— 請人工確認")
+
         if color_image_map and gql_nodes:
             color_to_variant_ids = {}
             for node in gql_nodes:
