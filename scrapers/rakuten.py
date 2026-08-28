@@ -21,6 +21,16 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
 
 
+def _note_http(status, body=""):
+    """回報 HTTP 狀態給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body)
+    except Exception:
+        pass
+
+
+
 _SKU_MIN_PRICE = 100
 _SKU_MAX_PRICE = 10_000_000
 
@@ -376,6 +386,7 @@ class RakutenMixin:
                 headers=headers,
             ) as client:
                 resp = await client.get(url)
+                _note_http(resp.status_code, resp.text)
 
                 # 樂天頁面是 EUC-JP，手動解碼
                 try:

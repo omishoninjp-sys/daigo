@@ -31,6 +31,16 @@ except Exception:
     PROXY_URL = None
 
 
+def _note_http(status, body=""):
+    """回報 HTTP 狀態給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body)
+    except Exception:
+        pass
+
+
+
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -213,6 +223,7 @@ class JsonLdHttpxSource(Source):
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
                 resp = await client.get(url.strip(), headers=headers)
+                _note_http(resp.status_code, resp.text)
                 print(f"[{self.tag}] {url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code == 200 and resp.text:
                     return resp.text

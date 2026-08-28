@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .venv/
+
+# 爬取監控紀錄（本機 fallback 目錄，不進版控）
+scrape_log/

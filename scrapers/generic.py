@@ -15,6 +15,23 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo, normalize_price
 
 
+def _note_http(status, body=""):
+    """回報 HTTP 狀態給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body)
+    except Exception:
+        pass
+
+
+def _note_source(name):
+    try:
+        import scrape_monitor
+        scrape_monitor.note_source(name)
+    except Exception:
+        pass
+
+
 class GenericMixin:
 
     # ============================================================
@@ -65,6 +82,7 @@ class GenericMixin:
             ) as client:
                 resp = await client.get(url)
                 html = resp.text
+                _note_http(resp.status_code, html)
         except Exception as e:
             print(f"[Generic] httpx 失敗: {e}")
 
@@ -77,6 +95,7 @@ class GenericMixin:
 
         if is_blocked:
             print(f"[Generic] httpx 被擋，改用 Selenium UC: {url}")
+            _note_source("generic:selenium")
             html = self._fetch_with_selenium(url)
 
         return html

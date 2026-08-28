@@ -16,6 +16,15 @@ from abc import ABC, abstractmethod
 from scrapers.base import ProductInfo, detect_platform
 
 
+def _note_source(name: str) -> None:
+    """把命中的 Source 名稱交給爬取監控。監控不可用時完全略過（fail-safe）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_source(name)
+    except Exception:
+        pass
+
+
 class Source(ABC):
     """
     單一取得策略。kind ∈ {official_api, partner, scraper}。
@@ -59,6 +68,7 @@ class Platform(ABC):
                 r = None
             if r and r.is_valid:
                 r.platform_id = self.id
+                _note_source(f"{src.__class__.__name__}({src.kind})")
                 return r
             if r:
                 last = r
@@ -98,6 +108,7 @@ class LegacyPlatform(Platform):
             raise RuntimeError(f"[legacy] 找不到爬取方法: {method}")
 
         product = await fn(url)
+        _note_source(f"legacy:{method}")
         if not getattr(product, "platform_id", ""):
             product.platform_id = tag
         return product

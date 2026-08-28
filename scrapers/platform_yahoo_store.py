@@ -55,6 +55,16 @@ from scrapers.platform import Platform, Source
 from scrapers.yahoo_api import search_items as _api_search, has_credentials as _api_ready
 
 
+def _note_http(status, body=""):
+    """回報 HTTP 狀態給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body)
+    except Exception:
+        pass
+
+
+
 _MIN_PRICE = 50
 _MAX_PRICE = 2_000_000
 
@@ -489,6 +499,7 @@ class YahooStoreHttpxSource(Source):
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
                 resp = await client.get(url, headers=headers)
+                _note_http(resp.status_code, resp.text)
                 print(f"[YahooStore] {url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code == 200 and resp.text:
                     return resp.text

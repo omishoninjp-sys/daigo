@@ -22,6 +22,7 @@ from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
 from seo_title import generate_seo_title
+import scrape_monitor
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
@@ -184,10 +185,26 @@ async def scrape_with_queue(url: str) -> ProductInfo:
                 print(f"[Queue] ✅ 排隊期間快取命中: {url[:60]}")
                 future.set_result(cached)
                 return cached
-            product = await asyncio.wait_for(
-                scraper.scrape(url),
-                timeout=60,
-            )
+            # ── 爬取監控（spec-scrape-monitoring.md 第一～三節；目前只記錄不寄信）──
+            # 記在這裡而不是 endpoint：/api/scrape 與 /api/create-order 都走這條，
+            # 而且快取命中與 in-flight 共享不會走到這裡，天然不會重複計數。
+            scrape_monitor.start(url)
+            _t0 = time.time()
+            try:
+                product = await asyncio.wait_for(
+                    scraper.scrape(url),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                scrape_monitor.record(url, elapsed_ms=(time.time() - _t0) * 1000,
+                                      timed_out=True)
+                raise
+            except Exception as _scrape_err:
+                scrape_monitor.record(url, error=_scrape_err,
+                                      elapsed_ms=(time.time() - _t0) * 1000)
+                raise
+            scrape_monitor.record(url, product=product,
+                                  elapsed_ms=(time.time() - _t0) * 1000)
             if product.title:
                 cache_set(url, product)  # 即時價格平台不會寫入
             future.set_result(product)
