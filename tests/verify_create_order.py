@@ -1,8 +1,12 @@
 """
 create_daigo_product 的回歸測試 —— 實際執行函式本體，不是只 import。
 
-怎麼跑（在專案根目錄）：
-    PYTHONPATH=. python -X utf8 tests/verify_create_order.py
+怎麼跑（在專案根目錄）——PowerShell 5.1：
+    $env:PYTHONPATH = "."; python -X utf8 tests\verify_create_order.py
+
+（bash／CI 用 `PYTHONPATH=. python -X utf8 tests/verify_create_order.py`；
+  PowerShell 沒有「VAR=值 指令」這種前綴語法，直接貼會 CommandNotFoundException。）
+
 全部通過 exit 0，任一 case 失敗 exit 1。不會連到 Shopify，也不會建任何商品。
 
 為什麼需要這支：
