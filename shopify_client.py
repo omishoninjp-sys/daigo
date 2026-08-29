@@ -58,21 +58,27 @@ class ShopifyClient:
     # ──────────────────────────────────────────────────────────────────
     # GraphQL helper
     # ──────────────────────────────────────────────────────────────────
-    async def _graphql(self, query: str, variables: dict = None) -> dict:
+    async def _graphql(self, query: str, variables: dict = None,
+                       idempotent: bool = True) -> dict:
         """
-        送一次 GraphQL；429 / THROTTLED / 5xx 會退避重試（與 _get_with_retry 同一套
-        參數：最多 RETRY_MAX_ATTEMPTS 次，1→2→4→8 秒，上限 16，看 Retry-After）。
+        送一次 GraphQL；退避重試與 _get_with_retry 同一套參數
+        （最多 RETRY_MAX_ATTEMPTS 次，1→2→4→8 秒，上限 16，看 Retry-After）。
 
-        會重試的：HTTP 429、HTTP 5xx、errors 裡帶 extensions.code = THROTTLED、
-                  以及連線層例外（超時、斷線）。
-        不重試的：其他 GraphQL errors（欄位寫錯、權限不足…）與其他 HTTP 狀態碼 ——
-                  重試也不會變好，而且會蓋掉真正的錯誤原文。
+        idempotent=True（預設，查詢與 productDelete / tagsAdd 這類重做無害的操作）
+          會重試：HTTP 429、HTTP 5xx、errors 帶 extensions.code=THROTTLED、
+                  連線層例外（超時、斷線）
+        idempotent=False（**會產生新東西的 mutation**，目前只有
+        create_daigo_product 的 productSet 建立商品）
+          只重試 **HTTP 429 與 THROTTLED** —— 這兩種是 Shopify 明確拒收、
+          確定沒有執行過的情況，重送安全。
+          **5xx 與連線層例外一律不重試**：那些情況沒辦法判斷 Shopify 到底建好了
+          沒有，重送就可能建出第二件。
+          代價不對稱才是重點：重複建商品是**靜默出錯**，沒有人會發現，直到客人
+          買了其中一件、另一件還掛在站上；建立失敗則是**明確的失敗**，客人當場
+          看得到、會再貼一次連結。
 
-        ★ 重試一個 mutation 的前提是它可以安全重來。這個專案實際會重來的是
-          productDelete / tagsAdd / 各種查詢，都是冪等的。**唯一要小心的是
-          create_daigo_product 的 productSet 建立商品**：如果 Shopify 其實已經
-          建好了才回 5xx，重試會建出第二件。發生機率低，但看到重複商品時
-          要想到這條。
+        兩種模式都不重試其他 GraphQL errors（欄位寫錯、權限不足）與其他 HTTP
+        狀態碼 —— 重試不會變好，只會蓋掉真正的錯誤原文。
         """
         delay = 1.0
         last = ""
@@ -84,7 +90,11 @@ class ShopifyClient:
                         json={"query": query, "variables": variables or {}},
                     )
             except Exception as e:
-                last = f"{type(e).__name__}: {e}"          # 連線層失敗，值得重試
+                last = f"{type(e).__name__}: {e}"          # 連線層失敗
+                if not idempotent:
+                    # 送出去了但沒收到回應 —— Shopify 可能已經執行。重送會建出第二件。
+                    raise Exception(
+                        f"Shopify GraphQL 連線失敗，非冪等操作不重試（避免重複建立）：{last}")
             else:
                 if resp.status_code == 200:
                     data = resp.json()
@@ -100,6 +110,11 @@ class ShopifyClient:
                     last = "THROTTLED"
                 elif resp.status_code in self.RETRY_STATUSES:
                     last = f"HTTP {resp.status_code}"
+                    if not idempotent and resp.status_code != 429:
+                        # 5xx 無法判斷 Shopify 執行了沒有；429 才是確定沒執行
+                        raise Exception(
+                            f"Shopify GraphQL HTTP {resp.status_code}，非冪等操作不重試"
+                            f"（避免重複建立）: {resp.text}")
                     retry_after = resp.headers.get("Retry-After")
                     if retry_after:
                         try:
@@ -415,7 +430,10 @@ class ShopifyClient:
           }
         }"""
 
-        data = await self._graphql(mutation, {"input": ps_input})
+        # ★ 建立商品是唯一「重送會多生一件」的 mutation：只吃 429/THROTTLED 的重試，
+        #   5xx 與連線層例外一律讓它失敗（客人看得到失敗會再貼一次，
+        #   重複的假商品卻沒有人會發現）。
+        data = await self._graphql(mutation, {"input": ps_input}, idempotent=False)
         ps = data.get("data", {}).get("productSet", {})
         errs = ps.get("userErrors", [])
         if errs:

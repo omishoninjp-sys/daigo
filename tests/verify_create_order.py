@@ -52,6 +52,7 @@ class FakeShopify(sc.ShopifyClient):
         self.color_image_calls = []
         self.sent_variants = []
         self.variant_pages = 0
+        self.graphql_calls = []
 
     def _nodes_for(self, sent, start, count):
         out = []
@@ -63,7 +64,9 @@ class FakeShopify(sc.ShopifyClient):
             })
         return out
 
-    async def _graphql(self, query, variables=None):
+    async def _graphql(self, query, variables=None, idempotent=True):
+        # 記下每次呼叫用的模式，才驗得出「建立商品不吃 5xx 重試」
+        self.graphql_calls.append((query, idempotent))
         if "resourceLimits" in query:
             return {"data": {"shop": {"resourceLimits":
                     {"maxProductVariants": self.variant_limit}}}}
@@ -150,6 +153,17 @@ async def run_case(name, expect_ok=True, expect_linked=None, **kw):
     if not expect_ok:
         print("  ❌ FAIL：預期要擲出例外，卻正常回傳")
         return False
+
+    # ★ 建立商品的 productSet 一定要用 idempotent=False：5xx 重送會建出第二件，
+    #   而重複的商品沒有人會發現，直到客人買了其中一件。
+    creates = [(q, idem) for q, idem in client.graphql_calls if "ProductSetInput" in q]
+    if not creates:
+        print("  ❌ FAIL：沒有看到 productSet 呼叫")
+        return False
+    if any(idem for _, idem in creates):
+        print("  ❌ FAIL：productSet 用了冪等模式，5xx 重送會建出重複商品")
+        return False
+    print(f"  ✅ productSet 走非冪等模式（不吃 5xx 重試）×{len(creates)}")
 
     linked = sum(len(v) for m in client.color_image_calls for v in m.values())
     print(f"  走完全程，product_id={result.get('product_id')}"

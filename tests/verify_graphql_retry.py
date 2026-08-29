@@ -74,7 +74,7 @@ async def fast_sleep(sec):
     SLEPT.append(sec)
 
 
-async def run(script):
+async def run(script, idempotent=True):
     """跑一次 _graphql，回傳 (結果或例外, 呼叫次數)。"""
     SLEPT.clear()
     poster = FakePost(script)
@@ -83,7 +83,8 @@ async def run(script):
     asyncio.sleep = fast_sleep
     try:
         try:
-            out = await ShopifyClient()._graphql("query { shop { name } }")
+            out = await ShopifyClient()._graphql("query { shop { name } }",
+                                                 idempotent=idempotent)
         except Exception as e:
             out = e
     finally:
@@ -166,6 +167,40 @@ async def test_exhausted():
     check("訊息說得出是重試用盡", "重試" in str(out) and "503" in str(out), str(out)[:70])
 
 
+async def test_non_idempotent():
+    print("\n【10】★ 非冪等（建立商品）：5xx 與連線層例外一律不重試")
+    # 代價不對稱：重複建商品是靜默出錯，沒人會發現，直到客人買了其中一件而
+    # 另一件還掛著；建立失敗是明確的失敗，客人當場看到會再貼一次連結。
+    out, calls = await run([FakeResp(503), FakeResp(200, OK_BODY)], idempotent=False)
+    check("5xx 立刻拋，不重送", isinstance(out, Exception) and calls == 1, f"calls={calls}")
+    check("沒有退避等待", SLEPT == [], str(SLEPT))
+    check("訊息說得出為什麼不重試",
+          "非冪等" in str(out) and "503" in str(out), str(out)[:70])
+
+    out, calls = await run([httpx.ReadTimeout("no response"), FakeResp(200, OK_BODY)],
+                           idempotent=False)
+    check("連線層例外也不重送（送出去了但不知道有沒有執行）",
+          isinstance(out, Exception) and calls == 1, f"calls={calls}")
+    check("訊息點出是連線失敗", "連線失敗" in str(out), str(out)[:70])
+
+    # 429 / THROTTLED 是 Shopify 明確拒收、確定沒執行 → 重送安全，仍要重試
+    out, calls = await run([FakeResp(429), FakeResp(200, OK_BODY)], idempotent=False)
+    check("429 仍然重試（確定沒被執行過）", out == OK_BODY and calls == 2, f"calls={calls}")
+
+    out, calls = await run([FakeResp(200, THROTTLE_BODY), FakeResp(200, OK_BODY)],
+                           idempotent=False)
+    check("THROTTLED 仍然重試", out == OK_BODY and calls == 2, f"calls={calls}")
+
+    out, calls = await run([FakeResp(200, OK_BODY)], idempotent=False)
+    check("正常情況不受影響", out == OK_BODY and calls == 1, f"calls={calls}")
+
+
+async def test_default_is_idempotent():
+    print("\n【11】預設仍是冪等模式（查詢、productDelete、tagsAdd 不受影響）")
+    out, calls = await run([FakeResp(503), FakeResp(200, OK_BODY)])
+    check("沒帶參數時 5xx 照樣重試", out == OK_BODY and calls == 2, f"calls={calls}")
+
+
 # ─────────────────────────────────────────────────────────────────────
 async def main():
     print("=" * 74)
@@ -180,6 +215,8 @@ async def main():
     await test_field_error_not_retried()
     await test_non_retryable_http()
     await test_exhausted()
+    await test_non_idempotent()
+    await test_default_is_idempotent()
 
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

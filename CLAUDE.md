@@ -230,6 +230,15 @@ path 空的卻確實是商品頁。分類頁（`/items?bc=J`）目前擋不掉�
 
 ## 驗證慣例
 
+**`/code-review` 回報「0 件問題」不等於沒問題。**
+它的 verify 階段會把**真實的問題**判成「卻下」，而 CLI 端只拿得到確認清單，
+**看不到被駁回的候選、也看不到駁回理由**。
+2026-08-30 實例：review 找到「`_graphql` 對 `productSet` 的 5xx 重試會產生重複商品」
+—— 那是真的，隨後就改成 `idempotent=False` 了 —— 但它被自己的 verify 駁回，
+最終回報 0 件。
+**所以跑完 review 一定要自己去 review 頁面看被駁回的那些候選**，
+不要只看最後那個數字。
+
 **`py_compile` 通過不算驗證。** 2026-08 的 `gql_nodes` NameError 就是
 py_compile 抓不到、只在特定分支才爆的錯：`if color_image_map and gql_nodes:`
 會短路，舊解析每個變體 `image: ""` 所以那行從來沒被執行過。
@@ -257,10 +266,14 @@ py_compile 抓不到、只在特定分支才爆的錯：`if color_image_map and 
   上限 16，看 `Retry-After`），涵蓋 **429 / THROTTLED / 5xx** 與連線層例外：
   `_graphql()` 內建，REST 分頁用 `_get_with_retry()`。
   其他 GraphQL errors（欄位寫錯、權限不足）**不重試**，重試只會蓋掉真正的錯誤原文。
-  - ⚠️ **重試 mutation 的前提是它可以安全重來。** 實際會重來的
-    `productDelete` / `tagsAdd` / 各種查詢都是冪等的；唯一的例外是
-    `create_daigo_product` 的 `productSet` 建立商品 —— Shopify 若已建好才回 5xx，
-    重試會建出第二件。看到重複商品時要想到這條。
+  - **重試 mutation 的前提是它可以安全重來。** `productDelete` / `tagsAdd` /
+    各種查詢都是冪等的，走預設 `idempotent=True`。
+    **`create_daigo_product` 的 `productSet` 建立商品用 `idempotent=False`**：
+    只重試 429／THROTTLED（Shopify 明確拒收、確定沒執行），5xx 與連線層例外
+    一律讓它失敗。理由是代價不對稱 —— 重複建商品是**靜默出錯**，
+    沒有人會發現，直到客人買了其中一件而另一件還掛著；建立失敗是**明確的失敗**，
+    客人當場看到會再貼一次。**日後新增任何「會產生新東西」的 mutation，
+    一律要帶 `idempotent=False`。**
   - 這兩支都是 2026-08-30 才寫的。在那之前**這份文件描述了不存在的機制**：
     「重試要涵蓋 429/THROTTLED/5xx」是從一支一次性腳本抄進來的慣例，正式碼裡沒有。
     跟當時「`detect_invalid_link()` 已經有了」是同一種錯。
