@@ -253,7 +253,18 @@ py_compile 抓不到、只在特定分支才爆的錯：`if color_image_map and 
 
 - 商品建立用 GraphQL `productSet`；刪除用 `productDelete`
   （REST 對 >100 變體的商品會 422 拒刪）
-- 節流：約 2 req/s；重試要涵蓋 429、THROTTLED **和 5xx**
+- 節流：約 2 req/s。重試走 `ShopifyClient` 的共用退避（最多 5 次，1→2→4→8 秒，
+  上限 16，看 `Retry-After`），涵蓋 **429 / THROTTLED / 5xx** 與連線層例外：
+  `_graphql()` 內建，REST 分頁用 `_get_with_retry()`。
+  其他 GraphQL errors（欄位寫錯、權限不足）**不重試**，重試只會蓋掉真正的錯誤原文。
+  - ⚠️ **重試 mutation 的前提是它可以安全重來。** 實際會重來的
+    `productDelete` / `tagsAdd` / 各種查詢都是冪等的；唯一的例外是
+    `create_daigo_product` 的 `productSet` 建立商品 —— Shopify 若已建好才回 5xx，
+    重試會建出第二件。看到重複商品時要想到這條。
+  - 這兩支都是 2026-08-30 才寫的。在那之前**這份文件描述了不存在的機制**：
+    「重試要涵蓋 429/THROTTLED/5xx」是從一支一次性腳本抄進來的慣例，正式碼裡沒有。
+    跟當時「`detect_invalid_link()` 已經有了」是同一種錯。
+    **寫進這份文件之前先確認正式碼裡真的有；沒有的話寫成「還沒有」。**
   （2026-08 批次改 2,086 件時中了一次 503，因為只對 throttle 退避而整件失敗）
 - 批次作業一定要有 checkpoint 檔，中斷後可續跑
 - storefront 的公開 `products.json` **看不到未上架/草稿商品**

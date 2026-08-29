@@ -59,18 +59,63 @@ class ShopifyClient:
     # GraphQL helper
     # ──────────────────────────────────────────────────────────────────
     async def _graphql(self, query: str, variables: dict = None) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                self.graphql_url, headers=self.headers,
-                json={"query": query, "variables": variables or {}},
-            )
-            if resp.status_code != 200:
-                raise Exception(f"Shopify GraphQL HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
-            if data.get("errors"):
-                # 不截斷：Shopify 的錯誤原文是唯一能指出「哪個欄位/哪個變體」出問題的線索
-                raise Exception(f"Shopify GraphQL errors: {json.dumps(data['errors'], ensure_ascii=False)}")
-            return data
+        """
+        送一次 GraphQL；429 / THROTTLED / 5xx 會退避重試（與 _get_with_retry 同一套
+        參數：最多 RETRY_MAX_ATTEMPTS 次，1→2→4→8 秒，上限 16，看 Retry-After）。
+
+        會重試的：HTTP 429、HTTP 5xx、errors 裡帶 extensions.code = THROTTLED、
+                  以及連線層例外（超時、斷線）。
+        不重試的：其他 GraphQL errors（欄位寫錯、權限不足…）與其他 HTTP 狀態碼 ——
+                  重試也不會變好，而且會蓋掉真正的錯誤原文。
+
+        ★ 重試一個 mutation 的前提是它可以安全重來。這個專案實際會重來的是
+          productDelete / tagsAdd / 各種查詢，都是冪等的。**唯一要小心的是
+          create_daigo_product 的 productSet 建立商品**：如果 Shopify 其實已經
+          建好了才回 5xx，重試會建出第二件。發生機率低，但看到重複商品時
+          要想到這條。
+        """
+        delay = 1.0
+        last = ""
+        for attempt in range(1, self.RETRY_MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        self.graphql_url, headers=self.headers,
+                        json={"query": query, "variables": variables or {}},
+                    )
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"          # 連線層失敗，值得重試
+            else:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    errs = data.get("errors")
+                    if not errs:
+                        return data
+                    # 不截斷：Shopify 的錯誤原文是唯一能指出「哪個欄位/哪個變體」出問題的線索
+                    text = json.dumps(errs, ensure_ascii=False)
+                    codes = [str(((e or {}).get("extensions") or {}).get("code") or "")
+                             for e in errs if isinstance(e, dict)]
+                    if not any(c.upper() == "THROTTLED" for c in codes):
+                        raise Exception(f"Shopify GraphQL errors: {text}")
+                    last = "THROTTLED"
+                elif resp.status_code in self.RETRY_STATUSES:
+                    last = f"HTTP {resp.status_code}"
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except ValueError:
+                            pass
+                else:
+                    raise Exception(f"Shopify GraphQL HTTP {resp.status_code}: {resp.text}")
+
+            if attempt < self.RETRY_MAX_ATTEMPTS:
+                print(f"[Shopify] ⏳ GraphQL 失敗（{last}），{delay:.0f}s 後重試"
+                      f"（第 {attempt}/{self.RETRY_MAX_ATTEMPTS - 1} 次）")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 16)
+
+        raise Exception(f"Shopify GraphQL 重試 {self.RETRY_MAX_ATTEMPTS} 次仍失敗：{last}")
 
     async def _fetch_all_variant_nodes(self, product_gid: str) -> list:
         """
@@ -631,8 +676,9 @@ class ShopifyClient:
     # 只能看近 60 天），標籤仍然保護得住。
     PROTECT_TAG = "已下單"
 
-    # 退避重試（REST）。★ 這支專案原本一處重試都沒有 —— _graphql 也是一撞錯就 raise，
-    # CLAUDE.md 寫的「重試要涵蓋 429、THROTTLED 和 5xx」其實從來沒實作。
+    # 退避重試的共用參數（REST 分頁與 _graphql 都用這組）。
+    # ★ 2026-08-30 之前這支專案一處重試都沒有 —— _graphql 一撞錯就 raise。
+    #   CLAUDE.md 寫的「重試要涵蓋 429、THROTTLED 和 5xx」當時只是慣例，沒有實作。
     RETRY_STATUSES = (429, 500, 502, 503, 504)
     RETRY_MAX_ATTEMPTS = 5
 
