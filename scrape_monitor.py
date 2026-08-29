@@ -48,11 +48,22 @@ _LOG_DIR_CANDIDATES = [
 _log_dir: str = ""
 
 # 被擋的內容特徵（規格第二節：Akamai / Cloudflare / reCAPTCHA）
-_BLOCK_MARKERS = (
-    "access denied", "403 forbidden", "captcha", "recaptcha", "bot detected",
-    "are you a human", "cloudflare", "cf-ray", "akamai", "reference #",
+#
+# ★ 分成「強」「弱」兩組，弱的只有在頁面很小的時候才算數。
+#   2026-08-30 實測 coldbeer.jp：Shopify 商店的正常頁面內嵌
+#   <script id="captcha-bootstrap">，整頁 433KB 也照樣命中 "captcha"。
+#   照舊寫法，每一家 Shopify 日本商店只要抓失敗就會被分類成 blocked，
+#   然後我們去買住宅代理解一個根本不存在的問題。
+#   真正的擋頁（Akamai / Cloudflare / reCAPTCHA challenge）都是很小的一頁，
+#   所以弱特徵加一道大小門檻，強特徵（明講被拒絕的字樣）才不看大小。
+_BLOCK_MARKERS_STRONG = (
+    "access denied", "403 forbidden", "bot detected", "are you a human",
     "attention required", "unusual traffic", "アクセスが拒否",
 )
+_BLOCK_MARKERS_WEAK = (
+    "captcha", "recaptcha", "cloudflare", "cf-ray", "akamai", "reference #",
+)
+_WEAK_MARKER_MAX_BYTES = 50_000
 
 # 明確下架/完售的頁面字樣（規格第二節：not_found 不只看 404）
 _GONE_MARKERS = (
@@ -70,22 +81,38 @@ def start(url: str) -> None:
     """爬取開始前呼叫，建立本次爬取的暫存狀態。"""
     try:
         _ctx.set({"url": url, "http_status": None, "source": "",
+                  "platform_id": "", "errors": [], "redirect_to": "",
                   "block_hint": False, "gone_hint": False})
     except Exception as e:
         print(f"[ScrapeLog] start 失敗（略過）: {type(e).__name__}: {e}")
 
 
-def note_http(status, body: str = "") -> None:
-    """Source 拿到 HTTP 回應時呼叫。body 只用來看特徵，不會被存下來。"""
+def note_http(status, body: str = "", final_url: str = "") -> None:
+    """
+    Source 拿到 HTTP 回應時呼叫。body 只用來看特徵，不會被存下來。
+
+    final_url 是跟隨轉址後的最終網址（httpx 的 resp.url）。轉到別的主機通常代表
+    我們根本沒抓到商品頁 —— order.mandarake.co.jp 的每個路徑都 302 到
+    www.mandarake.co.jp 首頁，抓回來的是 200 的公司首頁，看起來像「解析失敗」，
+    其實是被轉走。這件事不記下來，光看紀錄永遠判斷不出來。
+    """
     try:
         state = _ctx.get()
         if state is None:
             return
         if status is not None:
             state["http_status"] = int(status)
+        if final_url:
+            src_host = _domain(state.get("url", ""))
+            dst_host = _domain(final_url)
+            if dst_host and src_host and dst_host != src_host:
+                state["redirect_to"] = dst_host
         if body:
-            low = body[:4000].lower()
-            if any(m in low for m in _BLOCK_MARKERS):
+            low = body[:8000].lower()
+            strong = any(m in low for m in _BLOCK_MARKERS_STRONG)
+            weak = (len(body) < _WEAK_MARKER_MAX_BYTES
+                    and any(m in low for m in _BLOCK_MARKERS_WEAK))
+            if strong or weak:
                 state["block_hint"] = True
             if any(m.lower() in low for m in _GONE_MARKERS):
                 state["gone_hint"] = True
@@ -101,6 +128,49 @@ def note_source(name: str) -> None:
             state["source"] = str(name)
     except Exception as e:
         print(f"[ScrapeLog] note_source 失敗（略過）: {type(e).__name__}: {e}")
+
+
+def note_platform(platform_id: str) -> None:
+    """
+    記下這次走到哪支 Platform。
+
+    ★ 不可以只從 ProductInfo 上拿：timeout 與例外路徑根本沒有 product，
+      那正是最需要知道「是哪支在爬」的時候（2026-08-30 的 coldbeer.jp 那筆
+      就是 60 秒逾時、platform_id 空白）。
+    """
+    try:
+        state = _ctx.get()
+        if state is not None and platform_id:
+            state["platform_id"] = str(platform_id)
+    except Exception as e:
+        print(f"[ScrapeLog] note_platform 失敗（略過）: {type(e).__name__}: {e}")
+
+
+def note_error(error, where: str = "") -> None:
+    """
+    Source 內部把例外吞掉時，把失敗原因交給監控。
+
+    ★ 這是 error_brief 全空的根因：Platform.fetch 對每個 Source 都
+      try/except + print，然後回傳一個空的 ProductInfo，上層看起來是「成功回傳」，
+      record() 收到 error=None，於是 14 筆失敗沒有一筆說得出原因。
+    只留最後 3 個，join 起來仍受 200 字上限限制。
+    """
+    try:
+        state = _ctx.get()
+        if state is None:
+            return
+        brief = error if isinstance(error, str) else _error_brief(error)
+        brief = (brief or "").replace("\n", " ").strip()
+        if not brief:
+            return
+        if where:
+            brief = f"{where}: {brief}"
+        errs = state.setdefault("errors", [])
+        if brief not in errs:
+            errs.append(brief)
+        del errs[:-3]
+    except Exception as e:
+        print(f"[ScrapeLog] note_error 失敗（略過）: {type(e).__name__}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -166,7 +236,15 @@ def _pick_dir() -> str:
 
 
 def _domain(url: str) -> str:
-    host = (urlparse(url or "").hostname or "").lower()
+    """
+    正規化網域：小寫、去 www.、去尾端的點。
+
+    尾端點（jp.mercari.com.）是合法的 FQDN 寫法，指的是同一個站，不去掉就會在
+    統計裡多出一列。開頭是點或中間有空 label 的壞主機名**故意保持原樣** ——
+    那是客人貼錯的證據，安靜地正規化成 mercari.com 只會讓人再也查不出原因；
+    這種連結該由 detect_invalid_link() 擋在爬取之前。
+    """
+    host = (urlparse(url or "").hostname or "").lower().rstrip(".")
     return host[4:] if host.startswith("www.") else host
 
 
@@ -187,6 +265,36 @@ def _error_brief(error) -> str:
     except Exception:
         msg = ""
     return f"{type(error).__name__}: {msg}"[:200]
+
+
+def _failure_brief(error, product, state) -> str:
+    """
+    失敗原因，依可信度排序取第一個拿得到的：
+
+      1. 上層真的收到的例外
+      2. Source 吞掉、透過 note_error() 補回來的例外
+      3. 被轉址到別的主機（看起來像解析失敗，其實沒抓到商品頁）
+      4. 什麼例外都沒有 —— 那就講清楚「哪個欄位沒抓到」，
+         parse_failed 要修的正是這個
+
+    永遠 200 字以內，永遠不含 traceback（規格第一節）。
+    """
+    if error is not None:
+        return _error_brief(error)
+
+    noted = " | ".join(state.get("errors") or [])
+    if noted:
+        return noted[:200]
+
+    redirect_to = state.get("redirect_to") or ""
+    if redirect_to:
+        return f"Redirected: {_domain(state.get('url', ''))} → {redirect_to}"[:200]
+
+    title = getattr(product, "title", "") if product is not None else ""
+    price = getattr(product, "price_jpy", None) if product is not None else None
+    img = getattr(product, "image_url", "") if product is not None else ""
+    return (f"NoFields: 抽不到必要欄位（title={'有' if title else '無'}, "
+            f"price={'有' if price else '無'}, image={'有' if img else '無'}）")[:200]
 
 
 def record(url: str, product=None, error=None, elapsed_ms=None,
@@ -210,7 +318,12 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "domain": _domain(url),
-            "platform_id": platform_id or getattr(product, "platform_id", "") or "",
+            # platform_id 三段退路：呼叫端明講 → product 上的 → Platform 自己回報的。
+            # 最後那段是 timeout／例外路徑唯一拿得到的來源。
+            "platform_id": (platform_id
+                            or getattr(product, "platform_id", "")
+                            or state.get("platform_id", "")
+                            or ""),
             "source": state.get("source", ""),
             "ok": ok,
             "failure_kind": "" if ok else classify_failure(
@@ -221,7 +334,7 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
             ),
             "http_status": http_status,
             "elapsed_ms": int(elapsed_ms) if elapsed_ms is not None else None,
-            "error_brief": _error_brief(error),
+            "error_brief": "" if ok else _failure_brief(error, product, state),
             "url_path": _url_path(url),
         }
 

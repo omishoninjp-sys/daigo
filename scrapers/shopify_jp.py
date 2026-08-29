@@ -97,7 +97,9 @@ class ShopifyJpMixin:
             handle = path_parts[idx + 1] if idx + 1 < len(path_parts) else ""
 
         if not handle:
-            return await self._scrape_with_playwright(url)
+            # 不是 /products/ 的頁面（語系首頁、分類頁…）。★ 必須關掉 Shopify 分支，
+            # 否則 generic 偵測到 Shopify 又會呼叫回這裡，無限互相遞迴。
+            return await self._scrape_with_playwright(url, allow_shopify=False)
 
         json_url = f"{base_url}/products/{handle}.json"
         js_url   = f"{base_url}/products/{handle}.js"
@@ -279,4 +281,5 @@ class ShopifyJpMixin:
         except Exception as e:
             print(f"[Shopify] 例外: {type(e).__name__}: {e}，改用 Playwright")
 
-        return await self._scrape_with_playwright(url)
+        # 同上：退回 generic 時不可以再讓它轉回 Shopify 解析
+        return await self._scrape_with_playwright(url, allow_shopify=False)

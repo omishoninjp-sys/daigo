@@ -15,11 +15,42 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo, normalize_price
 
 
-def _note_http(status, body=""):
-    """回報 HTTP 狀態給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
+def _note_http(status, body="", final_url=""):
+    """回報 HTTP 狀態與最終網址給爬取監控（fail-safe，監控壞掉不影響爬取）。"""
     try:
         import scrape_monitor
-        scrape_monitor.note_http(status, body)
+        scrape_monitor.note_http(status, body, final_url)
+    except Exception:
+        pass
+
+
+# 擋頁特徵。★ 弱特徵只在頁面很小的時候才算數 —— 2026-08-30 實測 coldbeer.jp：
+# Shopify 商店的正常頁面內嵌 <script id="captcha-bootstrap">，整頁 433KB 也命中
+# "captcha"，於是每一家 Shopify 日本商店都被判定「被擋」，白跑一次 Selenium，
+# 最後 60 秒逾時。真正的 challenge 頁都很小。
+# （scrape_monitor 的分類端有一份同樣意思的清單，但兩邊刻意不互相 import：
+#   監控壞掉不可以影響爬取。）
+_BLOCKED_STRONG = ("access denied", "403 forbidden", "bot detected", "are you a human")
+_BLOCKED_WEAK = ("robot", "captcha", "recaptcha", "cloudflare", "attention required")
+_BLOCKED_WEAK_MAX_BYTES = 50_000
+
+
+def _looks_blocked(html: str) -> bool:
+    """httpx 拿到的內容像不像擋頁 —— 像的話才值得再花一次 Selenium。"""
+    html = html or ""
+    if len(html) < 5000:
+        return True
+    low = html.lower()
+    if any(kw in low for kw in _BLOCKED_STRONG):
+        return True
+    return len(html) < _BLOCKED_WEAK_MAX_BYTES and any(kw in low for kw in _BLOCKED_WEAK)
+
+
+def _note_error(error, where=""):
+    """把被吞掉的例外交給監控（fail-safe：監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
     except Exception:
         pass
 
@@ -37,12 +68,18 @@ class GenericMixin:
     # ============================================================
     # 通用 - httpx（其他日本網站）
     # ============================================================
-    async def _scrape_with_playwright(self, url: str) -> ProductInfo:
+    async def _scrape_with_playwright(self, url: str, allow_shopify: bool = True) -> ProductInfo:
+        """
+        allow_shopify=False：不要再轉進 Shopify 專用解析。
+        ★ 從 _scrape_shopify_jp 退回來的時候一定要關掉，否則兩支會互相呼叫 ——
+          每一圈都重抓一次整頁，直到上層 60 秒逾時（coldbeer.jp/zh 的 timeout
+          就是這樣來的，不是網站慢）。
+        """
         product = ProductInfo(source_url=url)
         try:
             html = await self._fetch_playwright(url)
 
-            if 'Shopify.shop' in html or '"shopify"' in html.lower() or 'cdn.shopify.com' in html:
+            if allow_shopify and ('Shopify.shop' in html or '"shopify"' in html.lower() or 'cdn.shopify.com' in html):
                 shopify_product = await self._scrape_shopify_jp(url)
                 if shopify_product.title and shopify_product.variants:
                     return shopify_product
@@ -63,6 +100,7 @@ class GenericMixin:
 
         except Exception as e:
             print(f"[Generic] ❌ 錯誤: {e}")
+            _note_error(e, "generic")
 
         return product
 
@@ -82,16 +120,12 @@ class GenericMixin:
             ) as client:
                 resp = await client.get(url)
                 html = resp.text
-                _note_http(resp.status_code, html)
+                _note_http(resp.status_code, html, str(resp.url))
         except Exception as e:
             print(f"[Generic] httpx 失敗: {e}")
+            _note_error(e, "generic:httpx")
 
-        # 偵測被擋：Access Denied / 403 / HTML 太短
-        blocked_keywords = ["access denied", "403 forbidden", "robot", "captcha", "bot detected"]
-        is_blocked = (
-            len(html) < 5000 or
-            any(kw in html.lower() for kw in blocked_keywords)
-        )
+        is_blocked = _looks_blocked(html)
 
         if is_blocked:
             print(f"[Generic] httpx 被擋，改用 Selenium UC: {url}")

@@ -164,6 +164,11 @@ _MSG_OWN = (
     "如果要代購新商品，請提供日本購物網站（Amazon JP、樂天、ZOZOTOWN、Yahoo 商店街等）的商品連結；"
     "若是要購買本站已上架的商品，直接在該商品頁下單即可。"
 )
+_MSG_HOMEPAGE = (
+    "您貼的是網站首頁（或語言切換頁），不是商品頁面，上面通常有很多件商品，"
+    "我們無法判斷您要買哪一件。請點進您要購買的那一件商品，"
+    "進入商品頁後再複製網址列上的連結給我們。"
+)
 _MSG_MALFORMED = (
     "這不是一個有效的商品網址。"
     "請從購物網站的商品頁複製完整網址（以 http:// 或 https:// 開頭）再試一次。"
@@ -184,6 +189,39 @@ def _host_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+# 只有一段路徑、而且那一段是語言代碼 → 語系首頁，不可能是商品頁
+_LANG_ONLY_SEGMENTS = {
+    "zh", "zh-tw", "zh-cn", "zh-hk", "zh-hant", "zh-hans", "tw", "cn",
+    "en", "en-us", "en-gb", "ja", "ja-jp", "jp", "ko", "ko-kr",
+    "th", "vi", "id", "fr", "de", "es", "it", "pt", "ru",
+}
+
+
+def _host_is_structurally_valid(host: str) -> bool:
+    """
+    主機名結構上可不可能是一個網域。
+
+    擋的是「絕對不可能存在」的形狀，不是「我沒看過」的網域 ——
+    誤擋一家正常商店的代價遠高於放行一個壞連結：
+      · 空 label（.mercari.com、jp..mercari.com）
+      · 沒有點（單一 label，不是公開網域）
+      · TLD 少於兩個字，或不是字母（punycode 的 xn-- 例外）
+
+    2026-08-30：紀錄裡 jp.mercari.com 被拆成三列，其中 .mercari.com 這種形狀
+    根本不可能連得上，卻照樣被送去爬，在統計裡生出一個幽靈網域。
+    """
+    host = (host or "").strip().rstrip(".")
+    if not host:
+        return False
+    labels = host.split(".")
+    if len(labels) < 2 or any(not lab for lab in labels):
+        return False
+    tld = labels[-1]
+    if tld.startswith("xn--"):
+        return True
+    return len(tld) >= 2 and tld.isalpha()
+
+
 def detect_invalid_link(url: str) -> str | None:
     """
     非商品頁連結 → 回傳給客人看的繁中說明；正常商品連結 → None。
@@ -200,6 +238,8 @@ def detect_invalid_link(url: str) -> str | None:
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower().rstrip(".")
     if scheme not in ("http", "https") or not host:
+        return _MSG_MALFORMED
+    if not _host_is_structurally_valid(host):
         return _MSG_MALFORMED
 
     # ── 3. 本站自己 ──
@@ -224,6 +264,21 @@ def detect_invalid_link(url: str) -> str | None:
     path = (parsed.path or "").lower()
     if path.endswith(_IMAGE_EXTS):
         return _MSG_IMAGE
+
+    # ── 5. 首頁／語系首頁 ──
+    #
+    # 2026-08-30 實測 coldbeer.jp/zh：語系首頁照樣被爬，generic 從 og 標籤抓到
+    # 店名「冷啤酒店」加上某件商品的 ¥41,800，直接建出一件不存在的商品 ——
+    # **這是會被下單的假商品，不是統計問題。**
+    #
+    # ★ 有 query string 就一律不擋：カラーミーショップ 的商品網址長這樣
+    #   https://xxx.shop-pro.jp/?pid=123456789 —— path 是空的但確實是商品頁。
+    segments = [seg for seg in (parsed.path or "").split("/") if seg]
+    if not (parsed.query or "").strip():
+        if not segments:
+            return _MSG_HOMEPAGE
+        if len(segments) == 1 and segments[0].lower() in _LANG_ONLY_SEGMENTS:
+            return _MSG_HOMEPAGE
 
     return None
 

@@ -62,6 +62,13 @@ SHOULD_BLOCK = [
     ("https://goyoutati.com/products/abc", "goyoutati.com"),
     ("https://www.goyoutati.com/pages/abc", "goyoutati.com 子網域"),
     ("https://fd249b-ba.myshopify.com/products/abc", "myshopify.com"),
+    # 5. 首頁／語系首頁（不是商品頁，爬了會建出假商品）
+    ("https://coldbeer.jp/zh", "語系首頁 /zh"),
+    ("https://example.co.jp/", "首頁"),
+    ("https://example.co.jp", "首頁（沒有斜線）"),
+    ("https://example.co.jp/en", "語系首頁 /en"),
+    ("https://example.co.jp/ja/", "語系首頁 /ja/"),
+    ("https://example.co.jp/zh-TW", "語系首頁大小寫不敏感"),
     # 4. 結構不成立
     ("ftp://example.com/file.zip", "非 http(s)"),
     ("not a url", "不是網址"),
@@ -92,6 +99,12 @@ MUST_PASS = [
     "https://jp.mercari.com/item/m12345",
     "https://www.suruga-ya.jp/product/detail/123",
     "https://www.muji.com/jp/ja/store/cmdty/detail/1234",
+    # 首頁規則不可誤傷這些
+    "https://kawamura-shop.shop-pro.jp/?pid=123456789",  # カラーミー：path 空但有 pid
+    "https://example.co.jp/?product_id=55",              # 同上，query 就是商品識別
+    "https://example.co.jp/my-product-handle",           # 單段路徑但不是語言代碼
+    "https://example.co.jp/jacket",                      # 同上
+    "https://www.muji.com/jp/ja/store/cmdty/detail/x",   # 路徑含 ja 但不只一段
 ]
 
 # ── C. _host_matches 語意 ─────────────────────────────────────────

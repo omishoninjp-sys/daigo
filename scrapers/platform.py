@@ -25,6 +25,24 @@ def _note_source(name: str) -> None:
         pass
 
 
+def _note_platform(platform_id: str) -> None:
+    """把走到哪支 Platform 交給監控。timeout／例外路徑沒有 product，只能靠這個。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_platform(platform_id)
+    except Exception:
+        pass
+
+
+def _note_error(error, where: str = "") -> None:
+    """把 Source 內部被吞掉的例外交給監控（否則紀錄的 error_brief 會是空的）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
+    except Exception:
+        pass
+
+
 class Source(ABC):
     """
     單一取得策略。kind ∈ {official_api, partner, scraper}。
@@ -58,20 +76,29 @@ class Platform(ABC):
 
     async def fetch(self, url: str, engine) -> ProductInfo:
         """預設：依序試 self.sources，第一個 is_valid 即回；皆失敗回最後的部分結果。"""
+        _note_platform(self.id)
         ref = self.parse_url(url)
         last = None
+        tried = ""
         for src in self.sources:
+            tried = f"{src.__class__.__name__}({src.kind})"
             try:
                 r = await src.get(url, ref, engine)
             except Exception as e:
                 print(f"[{self.id}] Source {src.__class__.__name__} 失敗: {type(e).__name__}: {e}")
+                # ★ 這裡以前只有 print。例外被吞掉、回傳一個空的 ProductInfo，
+                #   上層看起來像「成功回傳」，紀錄的 error_brief 就是空的。
+                _note_error(e, src.__class__.__name__)
                 r = None
             if r and r.is_valid:
                 r.platform_id = self.id
-                _note_source(f"{src.__class__.__name__}({src.kind})")
+                _note_source(tried)
                 return r
             if r:
                 last = r
+        # 全部失敗：仍要記下最後試到哪個 Source，不然只看得到「失敗」兩個字
+        if tried:
+            _note_source(tried)
         out = last or ProductInfo(source_url=url)
         out.platform_id = self.id
         return out
@@ -103,6 +130,7 @@ class LegacyPlatform(Platform):
             method = "_scrape_" + plat
             tag = plat
 
+        _note_platform(tag)
         fn = getattr(engine, method, None) or getattr(engine, "_scrape_with_playwright", None)
         if fn is None:
             raise RuntimeError(f"[legacy] 找不到爬取方法: {method}")
