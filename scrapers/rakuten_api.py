@@ -25,7 +25,7 @@ import httpx
 
 from scrapers.base import ProductInfo
 
-_ENDPOINT = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260401"
+_ENDPOINT = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
 _DEFAULT_REFERER = "https://goyoutati.com/"
 _HTTP_TIMEOUT = 20.0
 _MIN_PRICE = 100
