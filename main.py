@@ -577,6 +577,8 @@ class CleanupResponse(BaseModel):
     errors: list[str] = []
     cutoff_date: str = ""
     message: str = ""
+    completed: bool = True          # 這輪有沒有掃完；False = 中途中止，不是做完
+    incomplete_reason: str = ""
 @app.post("/api/admin/cleanup", response_model=CleanupResponse, dependencies=[Depends(verify_api_key)])
 async def manual_cleanup(req: CleanupRequest):
     """
@@ -587,11 +589,13 @@ async def manual_cleanup(req: CleanupRequest):
         return CleanupResponse(success=False, message="days 至少為 1")
     try:
         result = await shopify.cleanup_old_daigo_products(days=req.days)
-        return CleanupResponse(
-            success=True,
-            message=f"清理完成：刪除 {result['deleted_count']} 件商品",
-            **result,
-        )
+        if result.get("completed", True):
+            message = f"清理完成：刪除 {result['deleted_count']} 件商品"
+        else:
+            # 中止就不可以說「完成」：呼叫端（與之後要接的警報）要看得出這輪不完整
+            message = (f"⚠️ 清理中止（不完整）：{result.get('incomplete_reason', '')}，"
+                       f"已刪除 {result['deleted_count']} 件，剩餘未處理")
+        return CleanupResponse(success=True, message=message, **result)
     except Exception as e:
         print(f"[API] cleanup error: {traceback.format_exc()}")
         return CleanupResponse(success=False, message=f"清理失敗：{str(e)}")

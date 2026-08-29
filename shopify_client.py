@@ -631,6 +631,47 @@ class ShopifyClient:
     # 只能看近 60 天），標籤仍然保護得住。
     PROTECT_TAG = "已下單"
 
+    # 退避重試（REST）。★ 這支專案原本一處重試都沒有 —— _graphql 也是一撞錯就 raise，
+    # CLAUDE.md 寫的「重試要涵蓋 429、THROTTLED 和 5xx」其實從來沒實作。
+    RETRY_STATUSES = (429, 500, 502, 503, 504)
+    RETRY_MAX_ATTEMPTS = 5
+
+    async def _get_with_retry(self, client, url, params, what="請求"):
+        """
+        GET + 429/5xx 退避重試。回傳 (resp, err)：成功時 err 為空字串；
+        重試用盡、或遇到重試也沒用的狀態碼時，resp 為 None、err 說明原因。
+
+        ★ 不可以「一撞 429 就 break 當成做完」。2026-08-30 的自動清理刪到第 262 件
+          撞上限，break 之後照樣印「完成」—— log 是唯一的觀測管道，給的卻是假訊號，
+          611 件該刪的留在站上，從外面完全看不出來。
+        """
+        delay = 1.0
+        last = ""
+        for attempt in range(1, self.RETRY_MAX_ATTEMPTS + 1):
+            resp = None
+            try:
+                resp = await client.get(url, headers=self.headers, params=params)
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            else:
+                if resp.status_code == 200:
+                    return resp, ""
+                last = f"HTTP {resp.status_code}"
+                if resp.status_code not in self.RETRY_STATUSES:
+                    return None, last          # 400/401/404 重試也沒用，直接回報
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        pass
+            if attempt < self.RETRY_MAX_ATTEMPTS:
+                print(f"[Cleanup] ⏳ {what} 失敗（{last}），{delay:.0f}s 後重試"
+                      f"（第 {attempt}/{self.RETRY_MAX_ATTEMPTS - 1} 次）")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 16)
+        return None, last
+
     async def _fetch_ordered_product_ids(self, days: int = 60) -> set:
         """回傳近 N 天內任何訂單（含已取消／已退款）碰過的商品 id 集合。
 
@@ -750,7 +791,8 @@ class ShopifyClient:
             return {
                 "deleted_count": 0, "deleted_ids": [], "skipped_count": 0,
                 "error_count": 1, "errors": ["DAIGO_COLLECTION_ID 未設定，中止清理"],
-                "cutoff_date": "",
+                "cutoff_date": "", "completed": False,
+                "incomplete_reason": "DAIGO_COLLECTION_ID 未設定",
             }
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -760,6 +802,9 @@ class ShopifyClient:
         protected = 0
         page_info = None
         fetched = 0
+        page = 0
+        completed = True          # 這一輪有沒有把整個系列掃完
+        incomplete_reason = ""
 
         print(f"[Cleanup] 開始清理：Collection {DAIGO_COLLECTION_ID}，刪除 {days} 天前 ({cutoff.strftime('%Y-%m-%d %H:%M UTC')}) 的商品")
 
@@ -773,6 +818,7 @@ class ShopifyClient:
                 "deleted_count": 0, "deleted_ids": [], "skipped_count": 0,
                 "protected_count": 0, "error_count": 1, "errors": [msg],
                 "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+                "completed": False, "incomplete_reason": "訂單查詢失敗，fail-closed 中止",
             }
 
         if ordered_ids:
@@ -790,13 +836,14 @@ class ShopifyClient:
                 if page_info:
                     params = {"page_info": page_info, "limit": 250, "fields": "id,title,created_at,status,tags"}
 
-                resp = await client.get(
-                    f"{self.base_url}/products.json",
-                    headers=self.headers,
-                    params=params,
+                page += 1
+                resp, err = await self._get_with_retry(
+                    client, f"{self.base_url}/products.json", params,
+                    what=f"商品分頁第 {page} 頁",
                 )
-                if resp.status_code != 200:
-                    print(f"[Cleanup] ❌ 無法取得商品列表: {resp.status_code}")
+                if resp is None:
+                    completed = False
+                    incomplete_reason = f"分頁在第 {page} 頁失敗（{err}）"
                     break
 
                 products = resp.json().get("products", [])
@@ -854,12 +901,21 @@ class ShopifyClient:
                     break
                 if page_info in seen_pages:
                     # 保險：cursor 重複代表分頁又解析錯了，寧可少掃也不要無限迴圈
-                    print("[Cleanup] ⚠️ page_info 重複，停止分頁")
+                    completed = False
+                    incomplete_reason = f"分頁 cursor 在第 {page} 頁重複，停止分頁"
                     break
                 seen_pages.add(page_info)
 
-        print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，"
-              f"保護 {protected} 件，錯誤 {len(errors)} 件")
+        if completed:
+            print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，"
+                  f"保護 {protected} 件，錯誤 {len(errors)} 件")
+        else:
+            # ★ 中途放棄絕對不可以印「完成」：log 是唯一的觀測管道，
+            #   假訊號比沒有訊號更糟。
+            errors.append(incomplete_reason)
+            print(f"[Cleanup] ⚠️ 中止：{incomplete_reason}，已刪除 {len(deleted)} 件，剩餘未處理"
+                  f"（掃描 {fetched} 件，跳過 {skipped} 件，保護 {protected} 件，"
+                  f"錯誤 {len(errors)} 件）")
         return {
             "deleted_count": len(deleted),
             "deleted_ids": deleted,
@@ -868,6 +924,8 @@ class ShopifyClient:
             "error_count": len(errors),
             "errors": errors,
             "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+            "completed": completed,
+            "incomplete_reason": incomplete_reason,
         }
 
     def _build_description(self, description, source_url, original_price_jpy,
