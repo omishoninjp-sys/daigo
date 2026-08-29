@@ -27,6 +27,25 @@ print("[shopify_client] LOADED build=GRAPHQL-PRODUCTSET-v2 (2026-06-11)")
 _variant_limit_cache = {"value": None, "fetched": False}
 
 
+def next_page_info(link_header: str) -> str:
+    """
+    從 Shopify 的 Link header 取「下一頁」的 page_info；沒有下一頁回空字串。
+
+    ★ 不可以用 re.search(r'page_info=([^&>]+).*?rel="next"') 對整個 header 比對。
+      第 2 頁起 header 長這樣：
+        <...page_info=PREV>; rel="previous", <...page_info=NEXT>; rel="next"
+      那個 regex 會抓到 **previous** 的 cursor，於是在第 1、2 頁之間來回，
+      永遠掃不完（2026-08-30 實測：一支掃描腳本因此跑了 80 分鐘沒有結束）。
+      正確做法是先用逗號切段，只看含 rel="next" 的那一段。
+    """
+    import re as _re
+    for seg in (link_header or "").split(","):
+        if 'rel="next"' in seg:
+            m = _re.search(r'page_info=([^&>]+)', seg)
+            return m.group(1) if m else ""
+    return ""
+
+
 class ShopifyClient:
     def __init__(self):
         self.base_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}"
@@ -713,6 +732,7 @@ class ShopifyClient:
             tagged = await self._protect_products(ordered_ids)
             print(f"[Cleanup] 保護標籤：已標記 {tagged}/{len(ordered_ids)} 件")
 
+        seen_pages = set()
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
                 params = {
@@ -782,16 +802,14 @@ class ShopifyClient:
                         errors.append(msg)
                         print(f"[Cleanup] ❌ 刪除失敗: {msg}")
 
-                link_header = resp.headers.get("Link", "")
-                if 'rel="next"' in link_header:
-                    import re as _re
-                    m = _re.search(r'page_info=([^&>]+).*?rel="next"', link_header)
-                    page_info = m.group(1) if m else None
-                else:
-                    page_info = None
-
+                page_info = next_page_info(resp.headers.get("Link", ""))
                 if not page_info or not products:
                     break
+                if page_info in seen_pages:
+                    # 保險：cursor 重複代表分頁又解析錯了，寧可少掃也不要無限迴圈
+                    print("[Cleanup] ⚠️ page_info 重複，停止分頁")
+                    break
+                seen_pages.add(page_info)
 
         print(f"[Cleanup] 完成：掃描 {fetched} 件，刪除 {len(deleted)} 件，跳過 {skipped} 件，"
               f"保護 {protected} 件，錯誤 {len(errors)} 件")

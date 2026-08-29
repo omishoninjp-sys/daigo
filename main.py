@@ -608,6 +608,7 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     to_delete = []
     page_info = None
+    seen_pages = set()
     try:
         async with __import__("httpx").AsyncClient(timeout=30) as client:
             while True:
@@ -635,15 +636,16 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
                             })
                     except Exception:
                         continue
-                import re as _re
-                link_header = resp.headers.get("Link", "")
-                if 'rel="next"' in link_header:
-                    m = _re.search(r'page_info=([^&>]+).*?rel="next"', link_header)
-                    page_info = m.group(1) if m else None
-                else:
-                    page_info = None
+                # ★ 分頁一律用 next_page_info()：自己寫 regex 會抓到 previous 的
+                #   cursor，在第 1、2 頁之間無限來回（這個端點不刪東西，所以是真的
+                #   永遠不會結束）。
+                from shopify_client import next_page_info
+                page_info = next_page_info(resp.headers.get("Link", ""))
                 if not page_info or not resp.json().get("products"):
                     break
+                if page_info in seen_pages:
+                    break
+                seen_pages.add(page_info)
         return {
             "collection_id": DAIGO_COLLECTION_ID,
             "cutoff_date": cutoff.strftime("%Y-%m-%d %H:%M UTC"),
