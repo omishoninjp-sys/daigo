@@ -12,6 +12,7 @@ import traceback
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from config import (
     API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID,
@@ -652,6 +653,142 @@ async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"預覽失敗：{str(e)}")
+# ══════════════════════════════════════════════════════════════════════
+# 爬取監控紀錄匯出（spec-scrape-monitoring.md 第六節第 2 步：
+# 「兩天後把 JSONL 匯出來看一次，確認分類準不準」）
+# 紀錄寫在容器內（/data/scrape_log 或退路），沒有這兩個端點就只能進 shell 撈。
+# ══════════════════════════════════════════════════════════════════════
+SCRAPE_LOG_MAX_DAYS = 30       # 一天一檔，往回撈太多天沒意義也拖慢回應
+
+# 樣本要給的欄位。error_brief 已經在寫入時截到 200 字、不含 traceback，
+# url_path 也已經去掉 query string，所以整筆直接給沒有外洩問題。
+_SAMPLE_FIELDS = ("ts", "domain", "platform_id", "source",
+                  "http_status", "elapsed_ms", "error_brief", "url_path")
+
+
+def _scrape_log_days(days: int) -> list[str]:
+    if days < 1:
+        raise HTTPException(status_code=400, detail="days 至少為 1")
+    return scrape_monitor.recent_days(min(days, SCRAPE_LOG_MAX_DAYS))
+
+
+def _pick_samples(rows: list, limit: int = 3) -> list:
+    """
+    每種 failure_kind 抽幾筆看細節。
+
+    優先抽不同網域：同一個壞掉的網域連刷 3 筆，看起來像 3 個證據，其實只有 1 個，
+    判斷不出分類準不準。網域不夠才拿同網域的補滿。
+    """
+    picked, seen_domain, seen_id = [], set(), set()
+    for r in rows:
+        d = r.get("domain")
+        if d in seen_domain:
+            continue
+        seen_domain.add(d)
+        seen_id.add(id(r))
+        picked.append(r)
+        if len(picked) >= limit:
+            break
+    if len(picked) < limit:
+        for r in rows:
+            if id(r) in seen_id:
+                continue
+            picked.append(r)
+            if len(picked) >= limit:
+                break
+    return [{k: r.get(k) for k in _SAMPLE_FIELDS} for r in picked]
+
+
+@app.get("/api/admin/scrape-log", dependencies=[Depends(verify_api_key)])
+async def export_scrape_log(days: int = 2):
+    """
+    把 scrape_log 的原始 JSONL 拉下來（最近 N 天，新到舊逐日串接，一行一筆）。
+
+    回**純文字**不是 JSON：這樣可以直接存成 .jsonl 給 jq／pandas 吃，
+    包成 JSON 字串反而要處理跳脫。空的一天不會有任何輸出，所以檔案是空的時候
+    看 response header 才能分辨「沒紀錄」和「路徑撈錯」：
+        X-Log-Dir / X-Log-Days / X-Log-Lines
+
+    PowerShell 5.1：
+        Invoke-RestMethod "https://<host>/api/admin/scrape-log?days=2" `
+          -Headers @{ "X-API-Key" = $env:API_SECRET_KEY } -OutFile scrape.jsonl
+    """
+    day_list = _scrape_log_days(days)
+    lines: list[str] = []
+    for day in day_list:
+        for line in scrape_monitor.read_raw(day).splitlines():
+            if line.strip():
+                lines.append(line)
+    body = ("\n".join(lines) + "\n") if lines else ""
+    return PlainTextResponse(
+        body,
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "X-Log-Dir": scrape_monitor.log_dir(),
+            "X-Log-Days": ",".join(day_list),
+            "X-Log-Lines": str(len(lines)),
+        },
+    )
+
+
+@app.get("/api/admin/scrape-log/summary", dependencies=[Depends(verify_api_key)])
+async def summarize_scrape_log(days: int = 2):
+    """
+    在伺服器端算好統計，不用把整份檔案拉下來就能先判斷分類準不準。
+
+    給的東西：總筆數、成功率、各 failure_kind 筆數、各網域失敗次數排序，
+    以及每種 failure_kind 抽 3 筆樣本（優先不同網域）。
+    """
+    day_list = _scrape_log_days(days)
+
+    by_day: dict[str, dict] = {}
+    entries: list[dict] = []
+    for day in day_list:
+        rows = scrape_monitor.read_day(day)
+        ok_n = sum(1 for r in rows if r.get("ok"))
+        by_day[day] = {"total": len(rows), "ok": ok_n, "failed": len(rows) - ok_n}
+        entries.extend(rows)
+
+    total = len(entries)
+    ok_count = sum(1 for r in entries if r.get("ok"))
+    failed = total - ok_count
+
+    kinds: dict[str, int] = {}
+    by_domain: dict[str, dict] = {}
+    failures_by_kind: dict[str, list] = {}
+    for r in entries:
+        dom = r.get("domain") or "(unknown)"
+        slot = by_domain.setdefault(dom, {"domain": dom, "total": 0, "failed": 0, "kinds": {}})
+        slot["total"] += 1
+        if r.get("ok"):
+            continue
+        kind = r.get("failure_kind") or "other"
+        kinds[kind] = kinds.get(kind, 0) + 1
+        slot["failed"] += 1
+        slot["kinds"][kind] = slot["kinds"].get(kind, 0) + 1
+        failures_by_kind.setdefault(kind, []).append(r)
+
+    # 只列有失敗的網域（沒失敗的網域不需要決定任何事），失敗次數多的排前面
+    domains = sorted(
+        (d for d in by_domain.values() if d["failed"] > 0),
+        key=lambda d: (-d["failed"], -d["total"], d["domain"]),
+    )
+
+    return {
+        "days": day_list,
+        "log_dir": scrape_monitor.log_dir(),
+        "by_day": by_day,
+        "total": total,
+        "ok": ok_count,
+        "failed": failed,
+        "success_rate_pct": round(ok_count / total * 100, 1) if total else None,
+        "failure_kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
+        "domains_by_failure": domains,
+        "samples": {k: _pick_samples(v) for k, v in
+                    sorted(failures_by_kind.items(), key=lambda kv: -len(kv[1]))},
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

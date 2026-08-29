@@ -32,7 +32,7 @@ import os
 import re
 import json
 import contextvars
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
 # 每次爬取的暫存狀態。放「可變 dict」而不是每次 set()，因為 asyncio.wait_for 會把
@@ -259,3 +259,45 @@ def read_day(day: str = "") -> list:
     except Exception as e:
         print(f"[ScrapeLog] 讀取失敗: {type(e).__name__}: {e}")
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 匯出用（/api/admin/scrape-log）
+# 路徑規則（一天一檔、目錄怎麼選）只有這支模組知道，所以讀檔的入口留在這裡，
+# 不要讓 main.py 自己去拼路徑。
+# ─────────────────────────────────────────────────────────────────────
+def log_dir() -> str:
+    """回傳目前實際在用的紀錄目錄（/data/scrape_log 或退路）。"""
+    try:
+        return _pick_dir()
+    except Exception:
+        return ""
+
+
+def recent_days(days: int = 2) -> list:
+    """最近 N 天的日期字串（UTC，新到舊，含今天）。檔名用 UTC 日期，這裡也要用。"""
+    try:
+        n = max(1, int(days))
+    except Exception:
+        n = 1
+    today = datetime.now(timezone.utc).date()
+    return [(today - timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def read_raw(day: str = "") -> str:
+    """
+    讀某天的原始 JSONL 文字（匯出用）。
+
+    與 read_day() 的差別：這支不解析、不丟壞行 —— 匯出要的是檔案裡實際長什麼樣，
+    壞行本身也是要看的資訊。檔案不存在回空字串。
+    """
+    try:
+        day = day or datetime.now(timezone.utc).date().isoformat()
+        path = os.path.join(_pick_dir(), f"{day}.jsonl")
+        if not os.path.exists(path):
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception as e:
+        print(f"[ScrapeLog] 讀取失敗: {type(e).__name__}: {e}")
+        return ""
