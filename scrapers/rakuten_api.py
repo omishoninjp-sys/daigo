@@ -25,7 +25,15 @@ import httpx
 
 from scrapers.base import ProductInfo
 
-_ENDPOINT = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
+# 樂天 Ichiba Item Search 的版本與端點 —— **全專案唯一一份**。
+# 2026-08-30 之前 scrapers/amiami.py 另外寫死了一份，兩邊版本各走各的
+# （這裡 20260701、那裡還停在 20260401）。官方 API Source 失敗會靜靜退到下一個
+# Source，不一致不會有人發現，所以改成從這裡 import。要升版本只動這一行。
+ICHIBA_API_VERSION = "20260701"
+ICHIBA_ITEM_SEARCH_ENDPOINT = (
+    f"https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/{ICHIBA_API_VERSION}"
+)
+_ENDPOINT = ICHIBA_ITEM_SEARCH_ENDPOINT
 _DEFAULT_REFERER = "https://goyoutati.com/"
 _HTTP_TIMEOUT = 20.0
 _MIN_PRICE = 100

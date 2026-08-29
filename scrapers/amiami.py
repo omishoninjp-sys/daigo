@@ -45,7 +45,10 @@ _MIN_PRICE = 100
 _MAX_PRICE = 10_000_000
 
 # 樂天新版端點（UUID 型 Application ID + Access Key 走這支）
-_RAKUTEN_ENDPOINT = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260401"
+# ★ 不要再寫死一份端點。這裡曾經停在 20260401 而 rakuten_api.py 已升到 20260701，
+#   兩處指向同一個 API 卻用不同版本 —— 版本被下線時這條會先壞，而且因為它是
+#   官方 API Source、失敗會靜靜退到下一個 Source，不會有人發現。
+from scrapers.rakuten_api import ICHIBA_ITEM_SEARCH_ENDPOINT as _RAKUTEN_ENDPOINT
 _RAKUTEN_SHOPCODE = "amiami"
 _DEFAULT_REFERER = "https://goyoutati.com/"
 _HTTP_TIMEOUT = 20.0
