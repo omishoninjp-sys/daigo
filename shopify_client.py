@@ -671,15 +671,62 @@ class ShopifyClient:
         print(f"[Cleanup] 訂單掃描：近 {days} 天 {order_count} 筆訂單，涉及 {len(ids)} 件商品")
         return ids
 
+    async def _fetch_tagged_ids(self, product_ids: set, tag: str):
+        """
+        回傳 (已經有該標籤的 id, 目前還存在的 id)。
+
+        一次查 250 件（GraphQL nodes），不是一件一次 —— 534 件只要 3 次查詢。
+        nodes 對已被刪掉的商品回 null，那些 id 不會出現在「還存在」裡，
+        後面就不會白打一次注定失敗的 mutation。
+        """
+        query = """
+        query TaggedProducts($ids: [ID!]!) {
+          nodes(ids: $ids) { ... on Product { id tags } }
+        }
+        """
+        have, alive = set(), set()
+        ids = list(product_ids)
+        for i in range(0, len(ids), 250):
+            chunk = [f"gid://shopify/Product/{pid}" for pid in ids[i:i + 250]]
+            data = await self._graphql(query, {"ids": chunk})
+            for node in (data.get("data", {}) or {}).get("nodes") or []:
+                if not node or not node.get("id"):
+                    continue                     # 商品已不存在
+                pid = int(node["id"].split("/")[-1])
+                alive.add(pid)
+                if tag in [t.strip() for t in (node.get("tags") or [])]:
+                    have.add(pid)
+            await asyncio.sleep(0.3)
+        return have, alive
+
     async def _protect_products(self, product_ids: set) -> int:
-        """替被下單過、但還沒有保護標籤的商品補上標籤。"""
+        """
+        替被下單過、**而且還沒有**保護標籤的商品補上標籤。
+
+        ★ 一定要先過濾。以前每輪對全部（2026-08 是 534 件）重打一次 tagsAdd，
+          每件 0.25s 間隔 ≈ 5–9 分鐘，而且**這段期間一件都還沒開始刪** ——
+          容器在這時被部署／重啟打斷，整輪清理等於白跑，下次啟動又從頭來。
+          而 534 這個數字只會往上長，某天會拉到跑不完。
+        標籤是永久的，所以過濾之後這段自然變成「只補新的」，中斷也不會退回原點。
+        """
         mutation = """
         mutation AddProtectTag($id: ID!, $tags: [String!]!) {
           tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
         }
         """
+        todo = product_ids
+        try:
+            have, alive = await self._fetch_tagged_ids(product_ids, self.PROTECT_TAG)
+            todo = alive - have
+            print(f"[Cleanup] 標籤檢查：涉及訂單 {len(product_ids)} 件，已有標籤 {len(have)} 件，"
+                  f"已不存在 {len(product_ids) - len(alive)} 件 → 要補 {len(todo)} 件")
+        except Exception as e:
+            # 查不到就退回舊行為（全部重打一次）。這裡不能中止清理：
+            # 刪除保護看的是「id 在訂單集合 or 有標籤」，訂單集合此時已經拿到了。
+            print(f"[Cleanup] ⚠️ 標籤查詢失敗，改為全部重打: {type(e).__name__}: {e}")
+
         tagged = 0
-        for pid in product_ids:
+        for pid in todo:
             try:
                 await self._graphql(mutation, {
                     "id": f"gid://shopify/Product/{pid}",
