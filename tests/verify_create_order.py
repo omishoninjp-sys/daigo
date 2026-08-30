@@ -53,6 +53,7 @@ class FakeShopify(sc.ShopifyClient):
         self.sent_variants = []
         self.variant_pages = 0
         self.graphql_calls = []
+        self.graphql_inputs = []
 
     def _nodes_for(self, sent, start, count):
         out = []
@@ -65,8 +66,9 @@ class FakeShopify(sc.ShopifyClient):
         return out
 
     async def _graphql(self, query, variables=None, idempotent=True):
-        # 記下每次呼叫用的模式，才驗得出「建立商品不吃 5xx 重試」
+        # 記下每次呼叫用的模式與輸入，才驗得出「建立商品不吃 5xx 重試」與 metafield
         self.graphql_calls.append((query, idempotent))
+        self.graphql_inputs.append((query, variables or {}))
         if "resourceLimits" in query:
             return {"data": {"shop": {"resourceLimits":
                     {"maxProductVariants": self.variant_limit}}}}
@@ -142,7 +144,7 @@ async def run_case(name, expect_ok=True, expect_linked=None, **kw):
             image_url="https://img.example/main.jpg",
             description="desc", source_url="https://item.rakuten.co.jp/shop/code/",
             original_price_jpy=5000, brand="TestBrand",
-            extra_images=[], platform_id="rakuten", **kw)
+            extra_images=[], platform_id="rakuten", created_via="auto", **kw)
     except Exception as e:
         if expect_ok:
             print(f"  ❌ FAIL：{type(e).__name__}: {str(e)[:400]}")
@@ -153,6 +155,19 @@ async def run_case(name, expect_ok=True, expect_linked=None, **kw):
     if not expect_ok:
         print("  ❌ FAIL：預期要擲出例外，卻正常回傳")
         return False
+
+    # ★ created_via 一定要進 metafield：分不出手動與爬取，就會像 2026-08-30 那樣
+    #   用 source_url 掃出來的清單誤刪工作人員手填的商品。
+    sets = [v for q, v in client.graphql_inputs if "ProductSetInput" in q]
+    mfs = [mf for v in sets for mf in (v.get("input", {}).get("metafields") or [])]
+    via = [mf for mf in mfs if mf.get("key") == "created_via"]
+    if not via:
+        print("  ❌ FAIL：productSet 沒有帶 created_via metafield")
+        return False
+    if any(mf.get("value") != "auto" for mf in via):
+        print(f"  ❌ FAIL：created_via 應為 auto，實際 {[mf.get('value') for mf in via]}")
+        return False
+    print(f"  ✅ created_via=auto 有寫進 metafield ×{len(via)}")
 
     # ★ 建立商品的 productSet 一定要用 idempotent=False：5xx 重送會建出第二件，
     #   而重複的商品沒有人會發現，直到客人買了其中一件。

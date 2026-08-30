@@ -449,7 +449,8 @@ async def create_order(req: CreateOrderRequest):
             extra_tags=["18+", "adult"] if product.is_adult else None,
             seo_title=seo_title, seo_tags=seo_tags,
             in_stock=product.in_stock,
-            platform_id=getattr(product, "platform_id", ""), 
+            platform_id=getattr(product, "platform_id", ""),
+            created_via="auto",
         )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
@@ -499,6 +500,9 @@ async def create_manual_order(req: ManualOrderRequest):
             image_url=req.image_url, source_url=req.source_url,
             original_price_jpy=req.original_price_jpy,
             seo_title=seo_title, seo_tags=seo_tags,
+            # ★ 手動填寫的商品 source_url 常常是首頁或不完整，但商品是真的。
+            #   任何「用 source_url 判斷商品品質」的掃描都要先看這個欄位排除掉。
+            created_via="manual",
         )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],

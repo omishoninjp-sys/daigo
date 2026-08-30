@@ -219,12 +219,37 @@ Shopify 頁面 → 轉進 Shopify 解析 → 路徑沒有 `/products/` → 退�
 
 **首頁連結會生出「看起來正常、可以下單」的假商品。**
 generic 從 og 標籤湊出店名 + 頁面上某件商品的價格，就當成一件商品建出來。
-實例：`https://yokumoku.co.jp/`（Yokumoku 是做餅乾的）→ 商品
-「未知 高爾夫球桿 - JPX 925 HOT METAL 5本套裝」**¥97,404**，
-**而且真的有客人下單（GYT20262543）**。
+實測把首頁丟給爬蟲，拿到的是**店名**：`decoto.jp/` → 「Decoto(デコット)「ありがとう」をカタチに」¥243；
+`fo-online.jp/` → 「子供服・ベビー服 通販のF.O.Online Store」¥8,800。
 `detect_invalid_link()` 現在擋首頁與語系首頁（`/zh`、`/en`…），
 但**有 query string 一律放行** —— カラーミー 的商品網址是 `/?pid=123456789`，
 path 空的卻確實是商品頁。分類頁（`/items?bc=J`）目前擋不掉，仍會生出假商品。
+
+**🔴 但不可以只憑 `source_url` 判定商品是不是假的 —— 手動填寫的商品不適用這條規則。**
+`/api/create-manual` 讓工作人員手動建商品，`source_url` 可能是首頁、可能不完整，
+之後才在後台補正連結與金額，**商品本身是真的**。
+
+**而且系統沒有記錄商品是怎麼被建立的**：`/api/create-order`（爬取）與
+`/api/create-manual`（手動）走同一支 `create_daigo_product`，tags、metafields
+完全一樣；連 `source:xxx` 標籤都不能用來分辨 —— 沒帶 `platform_id` 時它會
+退而用 `detect_platform(source_url)` 補上。商品刪掉之後 Shopify 也查不到痕跡
+（`/products/{id}/events.json` 回 404，全店 Product 事件翻 3,000 筆也沒有）。
+
+2026-08-30 的代價：用「source_url 是首頁」掃出 5 件並刪掉其中 4 件，事後比對
+才發現**至少 2 件是手動建的**——「未知 高爾夫球桿 JPX 925 5本套裝 ¥97,404」與
+「未知 短褲/童裝 ¥2,217」掛在 Yokumoku（做餅乾的）名下，而實際爬那兩個首頁
+只會得到「YOKUMOKU 公式サイト ¥1,998」「ヨックモック公式オンラインショップ ¥650」——
+**爬首頁不可能生出高爾夫球桿**，那是人填的。短褲那件已被刪除，救不回來。
+
+所以：
+- 判斷商品真假要看**標題／價格與該網域是否相干**，不是只看 source_url 的形狀
+- 刪除前一律先查訂單（見上面「訂單保護」），這次唯一有訂單的高爾夫球桿因此逃過一劫
+- **已經有來源標記了**（2026-08-30 補的）：metafield `daigo.created_via`，
+  `"auto"` = `/api/create-order` 爬取，`"manual"` = `/api/create-manual` 手動填寫，
+  `"restored"` = 事後重建的。**兩條路徑都明講**，不可以靠「沒有標記就是自動」推論
+  —— 這個欄位之前的舊商品本來就沒有，那樣推論會把全部舊資料誤判成自動。
+  用 metafield 不用 tag：tag 會出現在前台，也容易被別的邏輯掃到或被誤刪。
+  日後任何「用 source_url 判斷商品品質」的掃描，**先讀這個欄位排除 manual**。
 
 ---
 

@@ -193,7 +193,8 @@ class ShopifyClient:
     async def create_daigo_product(self, title, price_jpy, image_url="", description="",
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
-                                    seo_title="", seo_tags=None, in_stock=True, platform_id=""):
+                                    seo_title="", seo_tags=None, in_stock=True, platform_id="",
+                                    created_via=""):
         print(f"[Shopify] ▶ create_daigo_product build=GRAPHQL-PRODUCTSET-v2 | variants_in={len(variants) if variants else 0}")
         # ══════════════════════════════════════════════════════════════
         # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
@@ -381,8 +382,16 @@ class ShopifyClient:
             if src_tag not in final_tags:
                 final_tags.append(src_tag)
 
+        # ★ created_via：這件商品是怎麼來的（"auto" 爬取 / "manual" 手動填寫）。
+        #   兩條路徑都要明講，不可以靠「沒有標記就是自動」推論 —— 舊商品本來就沒有
+        #   這個欄位，那樣推論會把所有舊資料誤判成自動。
+        #   用 metafield 不用 tag：tag 會出現在前台，也容易被別的邏輯掃到或被誤刪。
+        #   2026-08-30 就是因為分不出手動與爬取，用「source_url 是首頁」掃出來的清單
+        #   誤刪了工作人員手填的商品（手填的 source_url 常常是首頁或不完整）。
         metafields = [mf for mf in [
             {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
+            {"namespace": "daigo", "key": "created_via", "value": created_via,
+             "type": "single_line_text_field"} if created_via else None,
             {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
             {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
             {"namespace": "daigo", "key": "platform", "value": src_id, "type": "single_line_text_field"} if src_id else None,
