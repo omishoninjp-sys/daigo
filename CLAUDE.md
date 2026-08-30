@@ -319,6 +319,31 @@ py_compile 抓不到、只在特定分支才爆的錯：`if color_image_map and 
 - storefront 的公開 `products.json` **看不到未上架/草稿商品**
   （實測 Admin API 比 storefront 多 25 件）
 
+### API 金鑰（三把，用途不可混用）
+
+| 變數 | Header | 保護什麼 | 可不可以進前端 |
+|---|---|---|---|
+| `API_SECRET_KEY` | `X-API-Key` | scrape / create-order / create-manual / search / suggest | **已經在前端**（見下） |
+| `ADMIN_SECRET_KEY` | `X-Admin-Key` | cleanup、cleanup preview、scrape-log | **絕對不可以** |
+| `API_SECRET_KEY_OLD` | `X-API-Key` | ⏳ 輪替過渡用，只認公開端點 | 不需要 |
+
+**公開金鑰等同公開。** 它印在 storefront 那頁的
+`window.DAIKO_CONFIG = { api_base, api_key }` 裡，任何人檢視原始碼就看得到。
+所以它只能擋隨機流量，**不能當信任邊界** —— 2026-08-30 之前 `/api/admin/cleanup`
+（會永久刪商品）與 `/api/admin/scrape-log` 都只靠它把關。
+**任何不可逆或會吐資料的端點一律走 `verify_admin_key`。**
+
+**金鑰沒設定時一律拒絕（503）。** 以前預設空字串、Header 預設也是空字串，
+變數沒設時「連 header 都不用帶」就會通過，等於整個 API 對外開放。
+
+🔴 **`API_SECRET_KEY_OLD` 是暫時的，輪替完成當天就要刪掉。**
+它的用途只有一個：Zeabur 換好新金鑰、但 storefront 頁面還沒改的那段空窗。
+舊那把已經公開很久，留著就是繼續開著門。
+- 判斷可以移除了沒：改完頁面後看 Zeabur log，不再出現
+  `[Auth] ⚠️ 仍有請求在用舊的公開金鑰` 就代表沒有流量在用它
+- 移除方式：Zeabur 刪掉 `API_SECRET_KEY_OLD` 這個環境變數（程式碼不用改）
+- **admin 金鑰永遠不吃舊值**，過渡機制只作用在公開端點
+
 ### Token
 
 app 是 **Ogura Scraper**（handle `ogura-scraper`），daigo 與 scrapers-monorepo 共用。

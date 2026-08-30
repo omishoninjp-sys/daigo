@@ -22,12 +22,14 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 # 紀錄目錄導到暫存目錄（必須在 import scrape_monitor / main 之前設）
 _TMP = tempfile.mkdtemp(prefix="scrapelogapi_test_")
 os.environ["SCRAPE_LOG_DIR"] = _TMP
+# admin 端點用獨立金鑰；本機 .env 通常沒設，給測試一把（不覆蓋已存在的設定）
+os.environ.setdefault("ADMIN_SECRET_KEY", "test-admin-key-for-verify")
 
 from fastapi.testclient import TestClient
 
 import scrape_monitor as sm
 import main
-from config import API_SECRET_KEY
+from config import API_SECRET_KEY, ADMIN_SECRET_KEY
 
 PASS, FAIL = [], []
 
@@ -105,19 +107,24 @@ def write_fixtures():
 
 
 client = TestClient(main.app)          # 不用 with：不跑 lifespan，不啟動清理任務
-HEAD = {"X-API-Key": API_SECRET_KEY}
+# ★ 2026-08-30 起 admin 端點改用獨立的 X-Admin-Key（公開金鑰印在 storefront 頁面上，
+#   不能拿來保護會吐爬取紀錄的端點）
+HEAD = {"X-Admin-Key": ADMIN_SECRET_KEY}
 
 
 # ─────────────────────────────────────────────────────────────────────
 def test_auth():
     print("\n【1】verify_api_key 保護")
     for path in ("/api/admin/scrape-log", "/api/admin/scrape-log/summary"):
-        r = client.get(path, headers={"X-API-Key": "definitely-wrong-key"})
+        # ★ 公開金鑰不可以打得開 admin 端點（那把印在 storefront 頁面上）
+        r = client.get(path, headers={"X-API-Key": API_SECRET_KEY})
+        check(f"公開金鑰打 {path} → 403", r.status_code == 403, str(r.status_code))
+        r = client.get(path, headers={"X-Admin-Key": "definitely-wrong-key"})
         check(f"錯的 key 打 {path} → 403", r.status_code == 403, str(r.status_code))
         r = client.get(path)
         check(f"沒帶 key 打 {path} → 403", r.status_code == 403, str(r.status_code))
-    if not API_SECRET_KEY:
-        print("  ⚠️ API_SECRET_KEY 是空的，後面的測試等於沒驗到金鑰")
+    if not ADMIN_SECRET_KEY:
+        print("  ⚠️ ADMIN_SECRET_KEY 是空的，後面的測試等於沒驗到金鑰")
 
 
 def test_export():

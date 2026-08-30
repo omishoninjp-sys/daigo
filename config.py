@@ -14,6 +14,22 @@ STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
 # ZOZOTOWN 憭?祈嚗憛恬??嚗?
 ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+# admin 端點（cleanup / cleanup preview / scrape-log）專用金鑰。
+# ★ 這把絕對不可以進前端。API_SECRET_KEY 是印在 storefront 頁面的
+#   window.DAIKO_CONFIG 裡的（任何人檢視原始碼就看得到），所以它只能擋隨機流量，
+#   不能拿來保護「會刪商品」「會吐爬取紀錄」的端點。
+ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "")
+
+# ⏳ 過渡用：輪替公開金鑰期間，同時接受舊的那一把，避免「Zeabur 換好了但
+#    storefront 頁面還沒改」的空窗。
+#
+# 🔴 **輪替完成當天就要把這個環境變數刪掉。**
+#    舊那把是印在 storefront 頁面 window.DAIKO_CONFIG 裡、已經公開很久的字串；
+#    留著它就等於門還開著，換新金鑰完全沒有意義。
+#    移除時機：改完頁面後，看 Zeabur log 不再出現
+#    「[Auth] ⚠️ 仍有請求在用舊的公開金鑰」→ 當天就把 API_SECRET_KEY_OLD 刪除。
+#    這個機制只給公開金鑰用，**admin 金鑰永遠不吃舊值**。
+API_SECRET_KEY_OLD = os.getenv("API_SECRET_KEY_OLD", "")
 # 摰
 PRICING_TIERS = [
     (0,      5000,    1.25),

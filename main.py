@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from config import (
-    API_SECRET_KEY, ALLOWED_ORIGINS, ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID,
+    API_SECRET_KEY, API_SECRET_KEY_OLD, ADMIN_SECRET_KEY, ALLOWED_ORIGINS,
+    ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID,
     CACHE_TTL, MAX_CONCURRENT_SCRAPES, SCRAPE_QUEUE_TIMEOUT,
     DAIGO_AUTO_DELETE_DAYS,
 )
@@ -27,6 +28,10 @@ import scrape_monitor
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
+print(f"[Config] ADMIN_SECRET_KEY {'已設定' if ADMIN_SECRET_KEY else '❌ 未設定（admin 端點會回 503）'}")
+if API_SECRET_KEY_OLD:
+    print("[Config] ⏳ API_SECRET_KEY_OLD 已設定 —— 這是輪替過渡用的，"
+          "舊金鑰已公開，**輪替完成當天就要刪掉這個變數**")
 # ──────────────────────────────────────────────────────────────────────
 # 即時價格平台白名單：這些域名不經 cache，每次都重新爬取
 # 因為 snkrdunk、mercari 等平台價格隨時變動，cache 舊價會誤導用戶下單
@@ -147,9 +152,55 @@ def cache_set(url: str, product: ProductInfo):
     expired = [k for k, (_, ts) in _scrape_cache.items() if now - ts > CACHE_TTL]
     for k in expired:
         del _scrape_cache[k]
-async def verify_api_key(x_api_key: str = Header(default="")):
-    if x_api_key != API_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
+_old_key_uses = {"n": 0}
+
+
+def _note_old_key_use() -> None:
+    """舊公開金鑰每被用一次就計數；前 10 次每次印，之後每 100 次印一次。"""
+    _old_key_uses["n"] += 1
+    n = _old_key_uses["n"]
+    if n <= 10 or n % 100 == 0:
+        print(f"[Auth] ⚠️ 仍有請求在用舊的公開金鑰（第 {n} 次）—— "
+              f"輪替完成後請刪掉 API_SECRET_KEY_OLD")
+
+
+async def verify_public_key(x_api_key: str = Header(default="")):
+    """
+    前端會帶的金鑰（scrape / search / suggest / create-order / create-manual）。
+
+    ★ 這把印在 storefront 頁面的 window.DAIKO_CONFIG 裡，**等同公開** ——
+      只能擋隨機流量，不能當成信任邊界。任何「不可逆」或「會吐資料」的端點
+      都不可以只靠它，要走 verify_admin_key。
+    """
+    if not API_SECRET_KEY:
+        # ★ 沒設定就一律拒絕。以前預設是空字串，而 Header 預設也是空字串，
+        #   所以變數沒設時「連 header 都不用帶」就能通過，等於整個 API 對外開放。
+        raise HTTPException(status_code=503, detail="API_SECRET_KEY 未設定")
+    if x_api_key == API_SECRET_KEY:
+        return
+    # ⏳ 過渡：輪替期間暫時接受舊金鑰（見 config.API_SECRET_KEY_OLD）。
+    #    🔴 輪替完成當天就要把 API_SECRET_KEY_OLD 從 Zeabur 刪掉 ——
+    #    舊那把已經公開很久，留著等於門還開著。
+    #    下面這行 log 就是判斷「可以拿掉了沒」的依據：頁面改完後如果不再出現，
+    #    代表沒有任何流量還在用舊金鑰。
+    if API_SECRET_KEY_OLD and x_api_key == API_SECRET_KEY_OLD:
+        _note_old_key_use()
+        return
+    raise HTTPException(status_code=403, detail="Invalid API key")
+
+
+async def verify_admin_key(x_admin_key: str = Header(default="")):
+    """
+    admin 端點專用（cleanup / cleanup preview / scrape-log）。Header 是 X-Admin-Key。
+
+    ★ 這把絕對不可以出現在前端任何地方，**也不接受公開金鑰** ——
+      cleanup 會永久刪商品、scrape-log 會吐出爬取紀錄，兩者都不該由
+      任何人檢視網頁原始碼就能取得的字串把關。
+    """
+    if not ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_SECRET_KEY 未設定")
+    if x_admin_key != ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
 # === 帶併發控制的爬取 ===
 # 同 URL 進行中的 Future（防止重複爬取同一頁面開多個 Chrome）
 _in_flight: dict[str, asyncio.Future] = {}
@@ -342,7 +393,7 @@ async def get_rate():
         "jpy_to_twd": get_jpy_to_twd_rate(),
         "pricing_tiers": [{"min_jpy": t[0], "max_jpy": t[1], "markup": t[2]} for t in PRICING_TIERS],
     }
-@app.post("/api/scrape", response_model=ScrapeResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/scrape", response_model=ScrapeResponse, dependencies=[Depends(verify_public_key)])
 async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
@@ -395,7 +446,7 @@ async def scrape_product(req: ScrapeRequest):
     except Exception as e:
         print(f"[API] scrape error: {traceback.format_exc()}")
         return ScrapeResponse(success=False, error=f"爬取失敗：{str(e) or type(e).__name__}")
-@app.post("/api/create-order", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/create-order", response_model=CreateOrderResponse, dependencies=[Depends(verify_public_key)])
 async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
@@ -471,13 +522,20 @@ async def create_order(req: CreateOrderRequest):
     except Exception as e:
         print(f"[API] create-order error: {traceback.format_exc()}")
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
-@app.post("/api/create-manual", response_model=CreateOrderResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/create-manual", response_model=CreateOrderResponse, dependencies=[Depends(verify_public_key)])
 async def create_manual_order(req: ManualOrderRequest):
     try:
         if not req.title:
             return CreateOrderResponse(success=False, error="請填寫商品名稱")
         if req.price_jpy <= 0:
             return CreateOrderResponse(success=False, error="價格錯誤")
+        # ★ 客人填的是「日本原價」，售價一律由伺服器套用跟爬取那條同一套 pricing。
+        #   以前是 create_daigo_product(price_jpy=req.price_jpy) —— 客人填多少就是
+        #   最終售價，完全跳過 pricing.py。前端只有「超過 ¥100,000 顯示警告」而且
+        #   註解自己寫著「只警告，不擋下單」，繞過前端直接打 API 填 ¥1 就能用 ¥1 買走。
+        #   **前端算的東西一律不可信。**
+        original_jpy = req.original_price_jpy if req.original_price_jpy > 0 else req.price_jpy
+        manual_pricing = calculate_selling_price(original_jpy)
         # ★ 新增：source_url 也要過黑名單（手動建單一樣要擋，防止繞過前端攔截）
         if req.source_url:
             from scrapers.base import detect_blocked
@@ -496,9 +554,9 @@ async def create_manual_order(req: ManualOrderRequest):
         seo_title = seo.get("title", "")
         seo_tags = seo.get("tags", [])
         result = await shopify.create_daigo_product(
-            title=req.title, price_jpy=req.price_jpy,
+            title=req.title, price_jpy=manual_pricing["selling_price_jpy"],
             image_url=req.image_url, source_url=req.source_url,
-            original_price_jpy=req.original_price_jpy,
+            original_price_jpy=original_jpy,
             seo_title=seo_title, seo_tags=seo_tags,
             # ★ 手動填寫的商品 source_url 常常是首頁或不完整，但商品是真的。
             #   任何「用 source_url 判斷商品品質」的掃描都要先看這個欄位排除掉。
@@ -511,7 +569,7 @@ async def create_manual_order(req: ManualOrderRequest):
     except Exception as e:
         print(f"[API] create-manual error: {traceback.format_exc()}")
         return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
-@app.post("/api/search", response_model=SearchResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/search", response_model=SearchResponse, dependencies=[Depends(verify_public_key)])
 async def search_products(req: SearchRequest):
     try:
         q = (req.query or "").strip()
@@ -555,7 +613,7 @@ async def search_products(req: SearchRequest):
     except Exception:
         print(f"[API] search error: {traceback.format_exc()}")
         return SearchResponse(success=False, error="搜尋失敗，請稍後再試")
-@app.get("/api/search-stats", dependencies=[Depends(verify_api_key)])
+@app.get("/api/search-stats", dependencies=[Depends(verify_public_key)])
 async def search_stats(days: int = 30):
     """搜尋詞需求情報：熱門詞、零結果詞、每日量。給 search-insights.html 用。"""
     from search_log import stats
@@ -568,7 +626,7 @@ async def insights_page():
     from insights_page import INSIGHTS_HTML
     return HTMLResponse(content=INSIGHTS_HTML)
     
-@app.post("/api/suggest", response_model=SuggestResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/suggest", response_model=SuggestResponse, dependencies=[Depends(verify_public_key)])
 async def suggest_products(req: SuggestRequest):
     try:
         q = (req.query or "").strip()
@@ -595,7 +653,7 @@ class CleanupResponse(BaseModel):
     message: str = ""
     completed: bool = True          # 這輪有沒有掃完；False = 中途中止，不是做完
     incomplete_reason: str = ""
-@app.post("/api/admin/cleanup", response_model=CleanupResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/admin/cleanup", response_model=CleanupResponse, dependencies=[Depends(verify_admin_key)])
 async def manual_cleanup(req: CleanupRequest):
     """
     手動觸發清理：刪除超過 N 天的 daigo 商品。
@@ -615,7 +673,7 @@ async def manual_cleanup(req: CleanupRequest):
     except Exception as e:
         print(f"[API] cleanup error: {traceback.format_exc()}")
         return CleanupResponse(success=False, message=f"清理失敗：{str(e)}")
-@app.get("/api/admin/cleanup/preview", dependencies=[Depends(verify_api_key)])
+@app.get("/api/admin/cleanup/preview", dependencies=[Depends(verify_admin_key)])
 async def preview_cleanup(days: int = DAIGO_AUTO_DELETE_DAYS):
     """
     預覽哪些商品會被清理（不實際刪除）。只看 DAIGO_COLLECTION_ID 內的商品。
@@ -721,7 +779,7 @@ def _pick_samples(rows: list, limit: int = 3) -> list:
     return [{k: r.get(k) for k in _SAMPLE_FIELDS} for r in picked]
 
 
-@app.get("/api/admin/scrape-log", dependencies=[Depends(verify_api_key)])
+@app.get("/api/admin/scrape-log", dependencies=[Depends(verify_admin_key)])
 async def export_scrape_log(days: int = 2):
     """
     把 scrape_log 的原始 JSONL 拉下來（最近 N 天，新到舊逐日串接，一行一筆）。
@@ -753,7 +811,7 @@ async def export_scrape_log(days: int = 2):
     )
 
 
-@app.get("/api/admin/scrape-log/summary", dependencies=[Depends(verify_api_key)])
+@app.get("/api/admin/scrape-log/summary", dependencies=[Depends(verify_admin_key)])
 async def summarize_scrape_log(days: int = 2):
     """
     在伺服器端算好統計，不用把整份檔案拉下來就能先判斷分類準不準。
