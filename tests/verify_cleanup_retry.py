@@ -199,6 +199,79 @@ async def test_5xx_also_retried():
           next((l for l in out.splitlines() if "503" in l), "")[:60])
 
 
+class _StopLoop(BaseException):
+    """跳出 while True 用。繼承 BaseException，才不會被迴圈自己的 except Exception 吃掉。"""
+
+
+async def _drive_auto_loop(result: dict) -> str:
+    """
+    真的跑一次 main._auto_cleanup_loop，回傳它印出來的東西。
+
+    ★ 故意驅動「正式的那個迴圈」而不是某個抽出來的 helper —— 這樣同一支測試在
+      **未修正的版本**上也跑得起來，才能先重現「中止卻印完成」再驗修正。
+    asyncio.sleep 換成假的：第 1 次是啟動前的 60 秒（直接放行），第 2 次是跑完
+    一輪後的 24 小時（丟 _StopLoop 跳出）。
+    """
+    import main as m
+
+    async def fake_cleanup(days=30):
+        return result
+
+    n = {"sleep": 0}
+
+    async def fake_sleep(sec):
+        n["sleep"] += 1
+        if n["sleep"] >= 2:
+            raise _StopLoop
+
+    orig_cleanup = m.shopify.cleanup_old_daigo_products
+    orig_sleep = asyncio.sleep
+    m.shopify.cleanup_old_daigo_products = fake_cleanup
+    asyncio.sleep = fake_sleep
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                await m._auto_cleanup_loop()
+            except _StopLoop:
+                pass
+    finally:
+        m.shopify.cleanup_old_daigo_products = orig_cleanup
+        asyncio.sleep = orig_sleep
+    return buf.getvalue()
+
+
+ABORTED = {"deleted_count": 87, "skipped_count": 240, "protected_count": 3,
+           "error_count": 1, "errors": ["分頁在第 3 頁失敗（HTTP 429）"],
+           "deleted_ids": [], "cutoff_date": "",
+           "completed": False, "incomplete_reason": "分頁在第 3 頁失敗（HTTP 429）"}
+
+FINISHED = {"deleted_count": 12, "skipped_count": 5, "protected_count": 1,
+            "error_count": 0, "errors": [], "deleted_ids": [], "cutoff_date": "",
+            "completed": True, "incomplete_reason": ""}
+
+
+async def test_auto_loop_log():
+    print(chr(10) + "【7】★ 每天在跑的 _auto_cleanup_loop 也不可以無條件印「完成」")
+    # cleanup_old_daigo_products 的四條中止路徑全是 return 不是 raise，迴圈的
+    # except 一條都攔不到。每天跑的是這支、不是 /api/admin/cleanup —— 這裡印錯，
+    # 唯一的觀測管道就在給假訊號（2026-08-30 少刪 611 件就是這樣沒被發現的）。
+    out = await _drive_auto_loop(ABORTED)
+    check("中止時印「⚠️ 中止」", "[AutoCleanup] ⚠️ 中止：" in out,
+          next((l for l in out.splitlines() if "中止" in l), "")[:70])
+    check("★ 中止時不可以印「✅ 完成」（未修版本會在這裡紅燈）",
+          "[AutoCleanup] ✅ 完成" not in out,
+          next((l for l in out.splitlines() if "✅ 完成" in l), "")[:70])
+    check("印得出中止原因", "第 3 頁" in out, out[-90:])
+    check("印得出已刪除幾件與剩餘未處理",
+          "已刪除 87 件" in out and "剩餘未處理" in out)
+
+    # 反向：正常跑完那條不可以被改成一律印中止
+    out = await _drive_auto_loop(FINISHED)
+    check("跑完時印「✅ 完成」", "[AutoCleanup] ✅ 完成：" in out, out.strip()[-60:])
+    check("跑完時不出現「中止」", "中止" not in out)
+
+
 # ─────────────────────────────────────────────────────────────────────
 async def main():
     print("=" * 74)
@@ -210,6 +283,7 @@ async def main():
     await test_exhausted_is_abort_not_complete()
     await test_non_retryable_status()
     await test_5xx_also_retried()
+    await test_auto_loop_log()
 
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

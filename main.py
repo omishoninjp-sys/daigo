@@ -53,7 +53,19 @@ async def _auto_cleanup_loop():
         try:
             print(f"[AutoCleanup] ⏰ 開始自動清理（刪除超過 {DAIGO_AUTO_DELETE_DAYS} 天的商品）")
             result = await shopify.cleanup_old_daigo_products(days=DAIGO_AUTO_DELETE_DAYS)
-            print(f"[AutoCleanup] ✅ 完成：刪除 {result['deleted_count']} 件，跳過 {result['skipped_count']} 件")
+            # ★ 印出來的字一定要跟 result["completed"] 一致。
+            #   cleanup_old_daigo_products 的四條中止路徑全部是 **return 而不是 raise**
+            #   （COLLECTION_ID 未設定／訂單查詢 fail-closed／分頁重試用盡／cursor 重複），
+            #   底下的 except 一條都攔不到 —— 以前這裡無條件印「✅ 完成」，而內層才剛
+            #   印完「⚠️ 中止」，同一份 log 自相矛盾。
+            #   每天實際在跑的是這支、不是 /api/admin/cleanup，這裡印錯等於唯一的
+            #   觀測管道整個失效（2026-08-30 就是這樣少刪了 611 件而沒人發現）。
+            if result.get("completed", True):
+                print(f"[AutoCleanup] ✅ 完成：刪除 {result['deleted_count']} 件，"
+                      f"跳過 {result['skipped_count']} 件")
+            else:
+                print(f"[AutoCleanup] ⚠️ 中止：{result.get('incomplete_reason', '')}，"
+                      f"已刪除 {result['deleted_count']} 件，剩餘未處理")
         except Exception as e:
             print(f"[AutoCleanup] ❌ 發生錯誤: {type(e).__name__}: {e}")
         # 等 24 小時再執行下一次
