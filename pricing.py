@@ -1,5 +1,7 @@
 """定價模組"""
 import time
+from decimal import Decimal
+
 import httpx
 from config import PRICING_TIERS, MIN_SERVICE_FEE_JPY, DEFAULT_JPY_TO_TWD_RATE
 
@@ -11,7 +13,12 @@ def calculate_selling_price(original_price_jpy: int) -> dict:
             markup_rate = rate
             break
 
-    service_fee = int(original_price_jpy * (markup_rate - 1))
+    # ★ 用 Decimal 算加成，不可以直接乘 float。
+    #   markup_rate - 1 在浮點數是 0.21999999999999997（1.22 的情形），
+    #   int(10000 * 0.21999...) = 2199 而不是 2200 —— 每一筆都少收 1 圓，
+    #   而且「少收」不會有客人來反映。Decimal(str(1.22)) - 1 = Decimal('0.22') 才精確。
+    #   int() 的無條件捨去是刻意保留的（原本就是這樣，不足 1 圓算客人的）。
+    service_fee = int(Decimal(str(original_price_jpy)) * (Decimal(str(markup_rate)) - 1))
     if service_fee < MIN_SERVICE_FEE_JPY:
         service_fee = MIN_SERVICE_FEE_JPY
 

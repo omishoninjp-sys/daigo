@@ -75,6 +75,15 @@ Shopify 商店：`fd249b-ba.myshopify.com` / `goyoutati.com`
 
 ---
 
+## 售價運算
+
+一律呼叫 `pricing.py` 的 `calculate_selling_price()`。
+倍率表在 `config.py:PRICING_TIERS`，最低服務費在 `MIN_SERVICE_FEE_JPY`。
+**不要自行重算、不要 hardcode 倍率數字、不要在別處重複加價。**
+有變體時每個變體用自己的原價各跑一次，不是拿外層已加價的值再乘。
+
+---
+
 ## 🔴 商品會被自動刪除
 
 `main.py` 的 `_auto_cleanup_loop`：啟動後 60 秒跑第一次，之後每 24 小時一次，
