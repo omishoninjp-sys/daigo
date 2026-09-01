@@ -77,6 +77,25 @@ async def generate_seo_title(
     return _build_fallback_title(original_title, brand, platform_name)
 
 
+# ★ 不可以把 API 回應主體原樣印進 log。
+#   OpenAI 的 401 會在 error.message 裡回帶遮蔽過的金鑰（sk-proj-***…），
+#   那串會直接寫進 Zeabur Runtime Log；日後換 API 或對方改回應格式，
+#   印整個 body 還可能吐出更敏感的內容。
+#   所以只取 error.message，再把任何 sk- 開頭的字串遮掉，並限制長度。
+#   解析不出來就印固定字串，**不可以 fallback 回印 body**。
+_KEYISH = re.compile("sk-[A-Za-z0-9_*-]+")
+
+
+def _safe_api_error(resp) -> str:
+    try:
+        msg = ((resp.json() or {}).get("error") or {}).get("message") or ""
+    except Exception:
+        return "(回應非 JSON，內容不記錄)"
+    if not isinstance(msg, str) or not msg.strip():
+        return "(回應無 error.message，內容不記錄)"
+    return _KEYISH.sub("[已遮蔽]", msg.strip())[:200]
+
+
 async def _call_chatgpt(original_title: str, brand: str, platform_name: str) -> dict | None:
     prompt = f"""你是台灣電商 SEO 專家。分析以下日本商品標題，回傳 JSON（不要 markdown）。
 
@@ -116,7 +135,7 @@ async def _call_chatgpt(original_title: str, brand: str, platform_name: str) -> 
         )
 
         if resp.status_code != 200:
-            print(f"[SEO] OpenAI API {resp.status_code}: {resp.text[:200]}")
+            print(f"[SEO] OpenAI API {resp.status_code}: {_safe_api_error(resp)}")
             return None
 
         data = resp.json()
