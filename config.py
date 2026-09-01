@@ -1,5 +1,3 @@
-# 註：2026-09-01 修復 Big5 誤讀造成的編碼損毀，原註解不可還原，
-# 以下中文註解為依程式碼實際用途重寫，非原作者用詞。
 """
 GOYOUTATI 代購系統 (DAIGO) - 設定檔
 """
@@ -13,8 +11,9 @@ SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
 SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
 DAIGO_COLLECTION_ID = os.getenv("DAIGO_COLLECTION_ID", "")
 STORE_DOMAIN = os.getenv("STORE_DOMAIN", "goyoutati.com")
-# ZOZOTOWN 外部爬蟲服務網址（選填，留空代表不使用）
+# ZOZOTOWN 外部爬蟲（選填，備用）
 ZOZO_SCRAPER_URL = os.getenv("ZOZO_SCRAPER_URL", "")
+# API 安全
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # admin 端點（cleanup / cleanup preview / scrape-log）專用金鑰。
 # ★ 這把絕對不可以進前端。API_SECRET_KEY 是印在 storefront 頁面的
@@ -32,7 +31,7 @@ ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "")
 #    「[Auth] ⚠️ 仍有請求在用舊的公開金鑰」→ 當天就把 API_SECRET_KEY_OLD 刪除。
 #    這個機制只給公開金鑰用，**admin 金鑰永遠不吃舊值**。
 API_SECRET_KEY_OLD = os.getenv("API_SECRET_KEY_OLD", "")
-# 定價：(原價下限, 原價上限, 加成倍率)，由 pricing.calculate_selling_price() 套用。
+# 定價
 # ★ 最後一段的上限要大到實務上不可能超過。原本是 999999，原價一超過 ¥999,999
 #   就掉出整張表，改套 pricing.py 的預設 1.30，比應有的 1.15 多收一大截
 #   （¥1,000,000 會從 ¥1,150,000 變成 ¥1,300,000）。
@@ -45,21 +44,21 @@ PRICING_TIERS = [
     (30001,  999_999_999, 1.15),
 ]
 MIN_SERVICE_FEE_JPY = int(os.getenv("MIN_SERVICE_FEE_JPY", "300"))
-# 匯率：>0 表示用固定匯率；0 表示改打線上匯率 API（見 pricing.get_jpy_to_twd_rate）
+# 匯率
 DEFAULT_JPY_TO_TWD_RATE = float(os.getenv("DEFAULT_JPY_TO_TWD_RATE", "0"))
-# 爬取
+# 爬蟲
 SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-# 代理（ZOZOTOWN 等站在 Zeabur 機房 IP 會被 Akamai 擋，需住宅代理或辦公室 IP）
+# 代理（ZOZOTOWN 用，日本住宅 IP 繞過 Akamai IP 信譽檢查）
 PROXY_URL = os.getenv("PROXY_URL", "")
-# OpenAI（SEO 標題產生用）
+# OpenAI（SEO 標題翻譯用）
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-# 快取（秒，預設 30 分鐘，避免同一連結重複爬取）
+# 快取（秒）— 30 分鐘，減少重複爬取
 CACHE_TTL = int(os.getenv("CACHE_TTL", "1800"))
-# 併發
-MAX_CONCURRENT_SCRAPES = int(os.getenv("MAX_CONCURRENT_SCRAPES", "3"))
-SCRAPE_QUEUE_TIMEOUT = int(os.getenv("SCRAPE_QUEUE_TIMEOUT", "90"))
+# 併發限制
+MAX_CONCURRENT_SCRAPES = int(os.getenv("MAX_CONCURRENT_SCRAPES", "3"))  # 同時爬取上限
+SCRAPE_QUEUE_TIMEOUT = int(os.getenv("SCRAPE_QUEUE_TIMEOUT", "90"))     # 排隊等候超時（秒）
 # 商品自動刪除（天數，0 = 停用）
 DAIGO_AUTO_DELETE_DAYS = int(os.getenv("DAIGO_AUTO_DELETE_DAYS", "30"))
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")
