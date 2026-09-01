@@ -5,7 +5,7 @@
 """
 import re
 import json
-from collections import Counter
+import statistics
 from urllib.parse import urlparse
 
 import httpx
@@ -240,30 +240,189 @@ class GenericMixin:
         if not product.price_jpy:
             product.price_jpy = self._find_price_in_html(soup)
 
+    # ══════════════════════════════════════════════════════════════
+    # 取價：候選收集 → 脈絡排除 → 分級決策
+    # ══════════════════════════════════════════════════════════════
+    # ★ 2026-09-01 重寫。舊版是「『N円(税込)』命中就 return min(候選)」，
+    #   但日本電商頁面上帶「税込」的多半**不是商品價**：代引手数料、送料、
+    #   購物袋價、免運門檻；而商品本體常寫成 SALE5,500円 / ¥5,500 /
+    #   「¥ 756税込」（沒有「円」字），舊 regex 硬性要求 N円…税込，根本進不了候選。
+    #   於是 min() 等於「在一堆手續費裡挑最小的那個」。三個實例（都已實測重現）：
+    #     chikumeido      候選 [330, 990]        → 取 330（代引手数料），真價 SALE5,500円
+    #     okinawa-ichiba  候選 [330, 8800]       → 取 330（代引手数料），真價 ¥756
+    #     dior            候選 [330, 440, 14850] → 取 330（購物袋價）
+    #   後果是商品以錯價上架，靠人工驗算才發現，改價之後
+    #   metafield daigo.original_price_jpy 還是停在錯的值（沒有任何機制更新它）。
+    #
+    #   🔴 **不可以改成 max()。** 那會抓到免運門檻（¥8,800）與贈品門檻（¥14,850），
+    #      方向從少收變成多收 —— 少收有人工驗算擋著，多收會直接變成客訴。
+    #      正解是「先把非商品價排掉，再取最小」：排除後剩下的是同一件商品的
+    #      定価／SALE 群集，取最小＝取實際售價。
+    #
+    #   取不到可信價時**寧可回 None**。目前流程每筆都要人工驗算，錯價上架會白白
+    #   消耗一次人工檢查；明確失敗讓客人重貼一次，成本更低。
+
+    # 排除關鍵字分「數字之前」與「數字之後」，不可以混成一張表。
+    # ★ 位置很重要：「送料無料」常常就印在商品價旁邊，
+    #   若不分前後，`¥5,500 送料無料` 會把真正的商品價一起殺掉。
+    #   費用類的字幾乎都在數字**之前**（「代引手数料は、一律：330円」），
+    #   門檻類的字幾乎都在數字**之後**（「8,800円（税込）以上」）。
+    _PRICE_EXCLUDE_BEFORE = (
+        "手数料", "手数", "代引", "代金引換", "送料", "配送料", "配送手数",
+        "別途", "一律", "ショッピングバッグ", "ラッピング", "包装料", "ギフト包装",
+        "キャンセル料", "返品送料", "ポイント", "クーポン", "会費", "年会費",
+    )
+    _PRICE_EXCLUDE_AFTER = (
+        "以上", "未満", "以上で", "分のポイント", "ポイント進呈", "円引き",
+    )
+    _PRICE_CTX_BEFORE = 24      # 只看數字前這麼多字
+    _PRICE_CTX_AFTER = 12       # 只看數字後這麼多字
+    _PRICE_MIN = 100
+    _PRICE_MAX = 1_000_000
+    # 一致性檢查：**每一個分級都有**，但 R2 與其他級用不同的方法，因為失效模式不同。
+    #
+    #  · R3/R4/R5 是「整頁掃文字」，同頁的選配、加購、補充包會混進來 →
+    #    用 max/min 倍數把離散過大的整組否決。
+    #  · R2 是「DOM 價格元素」，一個商品頁常常合法地列出十幾個相關商品的價格，
+    #    用 max/min 會把正常頁面整批誤殺（實測 40 個網域裡誤殺 6 個，且準確率反而下降）。
+    #    R2 改用**文件順序第一個**（主商品的價格元素幾乎都排在相關商品之前，
+    #    這也是改寫前的行為），再加一道離群檢查：第一個若與其餘的中位數差超過
+    #    _PRICE_R2_OUTLIER 倍，視為抓錯，往下一級。
+    _PRICE_SPREAD_MAX = 20
+    _PRICE_R2_OUTLIER = 5
+    _PRICE_R5_MAX_DISTINCT = 6
+
+    # 金額樣式：千分位一定是「3 位一組」。
+    # ★ 不可以寫成 [0-9][0-9,]* —— 那會把「1966,1967,1971」這種逗號分隔的清單
+    #   當成單一數字吃掉，normalize_price 再把逗號拿掉就變成 1966196719711971。
+    #   這跟 Yahoo 巢狀價格 {990, 890} → 990890 是同一種病：湊巧落在價格範圍內
+    #   就會變成看起來正常的假價直接上架。
+    _NUM = r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+
+    # 前綴窗口要在句界截斷。★ 不截的話「送料は 500円 です。商品代金 3,300円」
+    #   裡的 3,300 會讀到前一句的「送料」而被誤殺 —— 排除規則反而變成新的錯價來源。
+    _PRICE_SENT_BREAK = ("。．.!！?？|｜/／,、" + chr(10) + chr(13) + chr(9))
+
+    def _price_reject(self, text: str, start: int, end: int) -> str | None:
+        """回傳命中的排除關鍵字；沒有命中回 None。只看數字前後的小窗口。"""
+        before = text[max(0, start - self._PRICE_CTX_BEFORE):start]
+        cut = max((before.rfind(ch) for ch in self._PRICE_SENT_BREAK), default=-1)
+        if cut >= 0:
+            before = before[cut + 1:]
+        after = text[end:end + self._PRICE_CTX_AFTER]
+        for kw in self._PRICE_EXCLUDE_BEFORE:
+            if kw in before:
+                return kw
+        for kw in self._PRICE_EXCLUDE_AFTER:
+            if kw in after:
+                return kw
+        return None
+
+    def _price_candidates(self, soup, text: str) -> dict:
+        """收集各級候選：{規則: [(值, 排除原因 or None), ...]}。這裡不做決策。"""
+        out = {k: [] for k in ("R1", "R2", "R3", "R4", "R5")}
+
+        # ── R1 結構化：itemprop="price" 的 content 屬性（最可信）
+        for el in soup.select('[itemprop="price"]'):
+            raw = el.get("content") or el.get_text(strip=True)
+            p = normalize_price(raw)
+            if p:
+                t = el.get_text(strip=True)
+                out["R1"].append((p, self._price_reject(t, 0, len(t))))
+
+        # ── R2 DOM：class/id 含 price 的元素文字
+        seen_el = set()
+        for sel in ('[itemprop="price"]', '[class*="price"]', '[class*="Price"]',
+                    '[id*="price"]', '[id*="Price"]'):
+            for el in soup.select(sel):
+                if id(el) in seen_el:
+                    continue
+                seen_el.add(id(el))
+                t = el.get_text(strip=True)
+                m = re.search(r'[¥￥]?\s*(' + self._NUM + r')', t)
+                if not m:
+                    continue
+                p = normalize_price(m.group(1))
+                if p:
+                    out["R2"].append((p, self._price_reject(t, m.start(1), m.end(1))))
+
+        # ── R3 文字：帶「税込」的金額。★「円」設為選擇性 —— okinawa-ichiba 寫成
+        #    「¥ 756税込」，舊 regex 要求 N円…税込 就整個漏掉了。
+        for m in re.finditer(r'[¥￥]?\s*(' + self._NUM + r')\s*(?:円)?\s*[（(]?\s*税込', text):
+            out["R3"].append((normalize_price(m.group(1)),
+                              self._price_reject(text, m.start(1), m.end(1))))
+
+        # ── R4 文字：価格類標籤後面接的金額（chikumeido 的 SALE5,500円 走這條）
+        for m in re.finditer(
+                r'(?:販売価格|本体価格|セール価格|価格|SALE|Sale|税込価格)'
+                r'\s*[：:]?\s*[¥￥]?\s*(' + self._NUM + r')', text):
+            out["R4"].append((normalize_price(m.group(1)),
+                              self._price_reject(text, m.start(1), m.end(1))))
+
+        # ── R5 泛用（最弱，只在前面全空時才會用到）
+        for pat in (r'[¥￥]\s*(' + self._NUM + r')',
+                    r'(' + self._NUM + r')\s*円'):
+            for m in re.finditer(pat, text):
+                out["R5"].append((normalize_price(m.group(1)),
+                                  self._price_reject(text, m.start(1), m.end(1))))
+        return out
+
     def _find_price_in_html(self, soup) -> int | None:
         # ── 先移除刪除線元素（原價），避免抓到劃掉的舊價
         for tag in soup.find_all(['del', 's', 'strike']):
             tag.decompose()
 
         text = soup.get_text()
-        tax_prices = re.findall(r'([0-9,]+)\s*円\s*[（\(]?\s*税込', text)
-        if tax_prices:
-            candidates = [normalize_price(p) for p in tax_prices]
-            candidates = [p for p in candidates if p and 100 <= p <= 1000000]
-            if candidates:
-                return min(candidates)
-        for sel in ['[class*="price"]', '[class*="Price"]', '[id*="price"]']:
-            for el in soup.select(sel):
-                m = re.search(r'[¥￥]?\s*([\d,]+)', el.get_text(strip=True))
-                if m:
-                    p = int(m.group(1).replace(',', ''))
-                    if 100 <= p <= 1000000:
-                        return p
-        prices = re.findall(r'[¥￥]\s*([0-9,]+)', text)
-        prices += re.findall(r'([0-9,]+)\s*円', text)
-        if prices:
-            normalized = [normalize_price(p) for p in prices]
-            normalized = [p for p in normalized if p and 100 <= p <= 1000000]
-            if normalized:
-                return Counter(normalized).most_common(1)[0][0]
+        cands = self._price_candidates(soup, text)
+
+        log = []
+        for rule in ("R1", "R2", "R3", "R4", "R5"):
+            raw = cands[rule]
+            if not raw:
+                log.append(f"{rule}=空")
+                continue
+
+            kept, dropped = [], []
+            for v, reject_kw in raw:
+                if v is None:
+                    continue
+                if not (self._PRICE_MIN <= v <= self._PRICE_MAX):
+                    dropped.append(f"{v}→範圍外")
+                    continue
+                if reject_kw:
+                    dropped.append(f"{v}→排除:{reject_kw}")
+                    continue
+                kept.append(v)
+
+            vals = sorted(set(kept))
+            detail = ",".join(dropped + [f"[{v}]" for v in vals]) or "無"
+            if not vals:
+                log.append(f"{rule}=({detail})→全數排除")
+                continue
+
+            if rule == "R2":
+                # 文件順序第一個 = 主商品；相關商品排在後面
+                chosen = kept[0]
+                if len(vals) >= 3:
+                    others = [v for v in vals if v != chosen] or vals
+                    med = statistics.median(others)
+                    if med and max(chosen / med, med / chosen) > self._PRICE_R2_OUTLIER:
+                        log.append(f"{rule}=({detail})→首個 {chosen} 離群"
+                                   f"（其餘中位數 {med:.0f}）")
+                        continue
+            else:
+                spread = max(vals) / min(vals)
+                if spread > self._PRICE_SPREAD_MAX:
+                    log.append(f"{rule}=({detail})→一致性不足 max/min={spread:.1f}")
+                    continue
+                if rule == "R5" and len(vals) > self._PRICE_R5_MAX_DISTINCT:
+                    log.append(f"{rule}=({detail})→泛用規則候選過多({len(vals)})")
+                    continue
+                # 排除後剩下的是同一件商品的定価／SALE 群集，取最小＝實際售價。
+                chosen = min(vals)
+            log.append(f"{rule}=({detail})✔取 {chosen}")
+            print(f"[Generic] 取價 ¥{chosen:,}（{rule}）｜" + " ".join(log))
+            return chosen
+
+        print("[Generic] ⚠️ 取價失敗（寧可失敗不猜價）｜" + " ".join(log))
         return None
