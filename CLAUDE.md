@@ -126,30 +126,8 @@ Runtime Logs 確認有 `[Cleanup] 完成：掃描 N 件，刪除 N 件…` 那�
 
 ## 抓取架構：Platform registry
 
-`scrapers/platform.py` 定義 Platform 抽象，一個 Platform 底下可有多個 Source
-依序嘗試（官方 API / SSR / Selenium / Playwright 退路）。
-`scrapers/__init__.py` 註冊，`LegacyPlatform` 是 catch-all，把 40+ 支舊 Mixin 原樣接住。
-
-已抽出的真 Platform：zozotown、amiami、bookoff、snidel、muji、yahoo_store。
-
-**不要以「把剩下的 Mixin 都抽成 Platform」為目標。** 2026-08 的營收分析顯示
-長尾 20+ 支各佔不到 0.5%，抽了沒有回報。抽 Platform 的標準是
-「這支能換到結構性覆蓋或穩定性」，不是「還沒抽」。
-
-### 各來源實際營收（2026-08，近 60 天）
-
-| 來源 | 營收佔比 |
-|---|---|
-| item.rakuten.co.jp | 18.5% |
-| jp.mercari.com | 12.6% |
-| amazon.co.jp | 10.6% |
-| generic（260 個網域的長尾） | 約 40% |
-| zozo.jp | 5.4% |
-| store.shopping.yahoo.co.jp | 2.9% |
-
-**generic 是長尾不是黑洞。** 260 個網域，最大的只佔 13%。
-那正是「一條連結送到你家」的產品定義，槓桿在通用抓取器的成功率，
-不在多寫幾支 Platform。
+**Platform registry 的架構與各來源營收佔比搬到**
+**[`.claude/rules/scraping-price.md`](.claude/rules/scraping-price.md) 的「架構」小節。**
 
 ---
 
