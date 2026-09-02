@@ -141,6 +141,12 @@ async def test_gu():
     check("G3 items 為空 error_brief 非空", bool(b), b[:70])
     check("G3 說得出是下架或 API 改版",
           "items" in b and ("下架" in b or "改版" in b), b[:70])
+    # ★ 2026-09-02：GU 的 API 對查無商品回 HTTP 200 + items:[]，
+    #   classify_failure 走到「http_status == 200 → parse_failed」那行，
+    #   把「商品下架」判成「我們的 parser 壞了」——兩者的處置完全相反。
+    #   實證：E360475-000 本機 838ms、線上 67ms 都是 200 + items=0。
+    check("★ G3 分類是 not_found 不是 parse_failed（商品下架不是解析失敗）",
+          e["failure_kind"] == "not_found", e["failure_kind"])
 
     # 三條的訊息要互不相同（分辨得出來才有意義）
     briefs = set()
@@ -149,6 +155,74 @@ async def test_gu():
                   (url, [FakeResp(200, "{}", url, payload={"result": {"items": []}})])]:
         briefs.add(brief_of(await run_scrape(eng._scrape_gu, u, rs)))
     check("★ 三條的 error_brief 互不相同", len(briefs) == 3, f"{len(briefs)} 種")
+
+    # ── items 正常時行為完全不變（gone 訊號不可以誤傷正常商品）──
+    ok_payload = {"result": {"items": [{
+        "name": "ブラフィールナローストラップキャミソール",
+        "prices": {"base": {"value": 1490}},
+        "colors": [{"displayCode": "01", "name": "OFF WHITE"}],
+        "sizes": [{"name": "M"}],
+        "images": {"main": {"01": {"image": "https://img.example/a.jpg"}}, "sub": []},
+    }]}}
+    e = await run_scrape(eng._scrape_gu, url,
+                         [FakeResp(200, "{}", url, payload=ok_payload)])
+    check("★ items 正常 → ok=True", e["ok"] is True, str(e["ok"]))
+    check("★ items 正常 → failure_kind 是空的（沒有被 gone 訊號誤傷）",
+          e["failure_kind"] == "", e["failure_kind"])
+    check("items 正常 → 價格照常抓到", e["price_jpy"] == 1490, str(e["price_jpy"]))
+
+    # ── G2（403）不可以被改成 not_found ──
+    e = await run_scrape(eng._scrape_gu, url, [FakeResp(403, "Forbidden", url)])
+    check("★ 403 仍是 blocked（gone 訊號沒有蓋掉狀態碼判定）",
+          e["failure_kind"] == "blocked", e["failure_kind"])
+
+
+async def test_gone_hint_scope():
+    """note_gone 只影響有呼叫它的那條路徑，其他 Platform 一律不受影響。"""
+    print()
+    print("【1b】note_gone 的作用範圍")
+
+    # 沒有人呼叫 note_gone 時，200 + 抽不到欄位 仍然是 parse_failed
+    sm.start("https://x.jp/p/1")
+    sm.note_http(200, "<html>正常頁面</html>")
+    state = sm._ctx.get() or {}
+    check("★ 沒呼叫 note_gone → 200 仍判 parse_failed（其他平台不受影響）",
+          sm.classify_failure(http_status=200,
+                              gone_hint=bool(state.get("gone_hint"))) == "parse_failed",
+          sm.classify_failure(http_status=200,
+                              gone_hint=bool(state.get("gone_hint"))))
+
+    # 呼叫之後才會變 not_found
+    sm.note_gone()
+    state = sm._ctx.get() or {}
+    check("★ 呼叫 note_gone → 200 變 not_found",
+          sm.classify_failure(http_status=200,
+                              gone_hint=bool(state.get("gone_hint"))) == "not_found",
+          sm.classify_failure(http_status=200,
+                              gone_hint=bool(state.get("gone_hint"))))
+
+    # 判斷順序：403 比 gone_hint 優先（狀態碼先於內容特徵）
+    check("403 + gone_hint 仍是 blocked（既有順序不變）",
+          sm.classify_failure(http_status=403, gone_hint=True) == "blocked",
+          sm.classify_failure(http_status=403, gone_hint=True))
+
+    # classify_failure 的參數沒有增加
+    import inspect
+    params = list(inspect.signature(sm.classify_failure).parameters)
+    check("★ classify_failure 參數沒有新增（沿用既有的 gone_hint）",
+          params == ["http_status", "error", "timed_out", "block_hint",
+                     "gone_hint", "got_page"], str(params))
+
+    # fail-safe：沒 start() 過也不可以炸
+    sm._ctx.set(None)
+    sm.note_gone()
+    check("沒有 ctx 時 note_gone 不 raise", True)
+
+    # 只有 gu 呼叫（掃全 repo，避免日後有人到處灑）
+    import pathlib
+    callers = sorted(f.name for f in pathlib.Path("scrapers").glob("*.py")
+                     if "_note_gone()" in f.read_text(encoding="utf-8"))
+    check("★ 目前只有 gu.py 埋 note_gone", callers == ["gu.py"], str(callers))
 
 
 async def test_amazon():
@@ -291,6 +365,7 @@ async def main():
     print(f"紀錄寫到暫存目錄：{_TMP}")
     print("=" * 74)
     await test_gu()
+    await test_gone_hint_scope()
     await test_amazon()
     await test_uniqlo()
     await test_pure_addition()

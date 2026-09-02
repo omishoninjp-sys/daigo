@@ -27,6 +27,7 @@ main.py 用法：
 Source 端（選填，能提供就提供，classification 會更準）：
     scrape_monitor.note_http(resp.status_code, resp.text)
     scrape_monitor.note_source("YahooStoreHttpxSource")
+    scrape_monitor.note_gone()        # 確定查無／下架（API 回 200 空清單也算）
 """
 import os
 import re
@@ -118,6 +119,33 @@ def note_http(status, body: str = "", final_url: str = "") -> None:
                 state["gone_hint"] = True
     except Exception as e:
         print(f"[ScrapeLog] note_http 失敗（略過）: {type(e).__name__}: {e}")
+
+
+def note_gone() -> None:
+    """
+    Source 確定「這件商品不存在／已下架」時呼叫。
+
+    ★ 為什麼需要這支（2026-09-02，GU）：
+      note_http() 的 gone 判定是掃**頁面內容**有沒有「販売終了」「商品が見つかりません」
+      那類字樣。但有些站的內部 API 對查無商品是回 **HTTP 200 + 空清單**，
+      JSON 裡一個字都沒有 —— GU 的 `result.items: []` 就是這樣。
+      於是 classify_failure 走到「got_page or http_status == 200」那行，
+      判成 parse_failed（＝我們的解析壞了，該去修 parser），
+      實際上是 not_found（＝商品下架，沒東西可修）。
+      這兩種的處置完全相反，混在一起摘要就會指錯方向。
+
+    ★ 不新增 classify_failure 的參數 —— gone_hint 本來就是為這件事存在的，
+      而且它在判斷順序上**排在 http_status == 200 之前**，設了就會贏。
+
+    只設旗標，不寫訊息；原因請 Source 自己另外呼叫 note_error()，
+    兩件事分開才看得出「分類」與「說明」各自從哪裡來。
+    """
+    try:
+        state = _ctx.get()
+        if state is not None:
+            state["gone_hint"] = True
+    except Exception as e:
+        print(f"[ScrapeLog] note_gone 失敗（略過）: {type(e).__name__}: {e}")
 
 
 def note_source(name: str) -> None:

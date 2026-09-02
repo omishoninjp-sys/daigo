@@ -54,6 +54,17 @@ def _note_error(error, where=""):
         pass
 
 
+def _note_gone():
+    """商品確定不存在 → failure_kind 應為 not_found 而不是 parse_failed。
+    GU 的內部 API 對查無商品回 HTTP 200 + result.items: []，
+    JSON 裡沒有任何「販売終了」字樣，note_http 的內容特徵判定抓不到。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_gone()
+    except Exception:
+        pass
+
+
 def _note_http(status, body="", final_url=""):
     """★ 少了這個，403/429 會被 classify_failure 分成 other 而不是 blocked ——
     blocked 這個分類存在的目的就是回答「要不要買住宅代理」。"""
@@ -102,6 +113,13 @@ class GUMixin:
         if not items:
             print(f"[GU] ❌ items 為空: {product_id}")
             _note_error(f"API 回 200 但 result.items 為空（{product_id} 下架或 API 改版）", "GU")
+            # ★ 沒有這行的話 classify_failure 看到 HTTP 200 會判 parse_failed，
+            #   但商品下架不是我們的 parser 壞掉，是沒東西可抓 → not_found。
+            #   2026-09-02 實證：E360475-000 本機 838ms、線上 67ms 都是
+            #   200 + items=0，確定是真的查無，不是間歇性失敗。
+            #   ⚠️ 判讀時看比例不是看單筆：若**每一件** GU 商品都變成 not_found，
+            #      那不是全部下架，是 API 改版（回應結構變了），要去改 parser。
+            _note_gone()
             return product
 
         item = items[0]
