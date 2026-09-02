@@ -16,6 +16,82 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
 
 
+# ══════════════════════════════════════════════════════════════════════
+# brand 抽取
+# ══════════════════════════════════════════════════════════════════════
+# ★ 2026-09-02 重寫。舊版是
+#     el = soup.select_one("#bylineInfo") or soup.select_one(".po-brand .po-break-word")
+#     b  = re.sub(r'^(ブランド[：:]|Brand[：:]|Visit the |のストアを表示)', '', b)
+#   兩個問題：
+#   1. **選擇器優先序反了。** `#bylineInfo` 是標題底下那一行，內容可能是品牌、
+#      賣家店鋪、或書籍作者＋格式；`.po-brand .po-break-word` 是商品規格表的
+#      品牌欄，本來就是乾淨的品牌名。應該優先拿乾淨的那個，不是去洗髒的那個。
+#   2. `のストアを表示` 是**後綴**，卻被放進前綴錨定 `^(...)` 的 alternation，
+#      永遠剝不掉。前後綴一定要分成兩個 regex。
+#
+#   實測 118 件 Amazon 商品，79 件（67%）的 brand 被污染，四種形態：
+#     京セラ(Kyocera)のストアを表示          38 件
+#     访问 コミネ(KOMINE) 品牌旗舰店          21 件   ← Amazon 會依 URL 語系回簡中
+#     品牌：Eye coffret                    13 件
+#     白浜鴎(著)形式:単行本                    7 件   ← 這種根本不是品牌
+#
+#   brand 錯了會同時進標題、tags 與 Shopify 的 vendor 欄位。
+
+# 這不是品牌，是作者／演出者／商品格式 —— 命中就讓 brand 留空。
+# ★ 剝掉後綴之後剩下的「白浜鴎」仍然不該當品牌；音樂那種多人串接
+#   （…(アーティスト),…(演奏),…(作曲)）根本不存在可取出的品牌。
+#   留空的話 vendor 會 fallback 成「代購商品」，標題也不會有奇怪前綴 ——
+#   比填一個錯的好：錯的 brand 會同時污染標題、tags、vendor 三個地方。
+_BRAND_NOT_A_BRAND = re.compile(
+    r"\(著\)|\(編\)|\(訳\)|\(作者\)|"
+    r"\((?:Artist|Composer|Conductor|Performer|アーティスト|演奏|作曲|指揮|"
+    r"艺术家|表演者|作曲家|指揮者)[^)]*\)|"
+    r"形式[:：]|Format[:：]|格式[:：]")
+
+# 前綴（錨定 ^）：日／英／簡中三種語系
+_BRAND_PREFIX = re.compile(
+    r"^(?:ブランド|品牌名|品牌|Brand)\s*[：:]\s*|"
+    r"^Visit\s+the\s+|^访问\s+|^訪問\s+")
+
+# 後綴（錨定 $）：★ 舊版把這些誤放進前綴 alternation，這就是那個 bug
+_BRAND_SUFFIX = re.compile(
+    r"\s*(?:のストアを表示|のストア|ブランドストア|"
+    r"品牌旗舰店|品牌旗艦店|品牌店|Store|ストア)\s*$")
+
+_BRAND_MAX_LEN = 40
+
+
+def _clean_brand(raw: str) -> str:
+    """把 byline / 規格表的原始文字洗成品牌名；洗不出來就回空字串。"""
+    b = (raw or "").strip()
+    if not b:
+        return ""
+    if _BRAND_NOT_A_BRAND.search(b):
+        return ""
+    b = _BRAND_PREFIX.sub("", b)
+    b = _BRAND_SUFFIX.sub("", b).strip()
+    # 最後一道保險：過長或含逗號代表多值串接，不是單一品牌
+    if not b or len(b) > _BRAND_MAX_LEN or "," in b or "，" in b:
+        return ""
+    return b
+
+
+def _extract_brand(soup) -> str:
+    """
+    ★ 先拿規格表的品牌欄（乾淨），沒有才退回 bylineInfo（要洗）。
+      順序不可以反過來 —— 那等於明明有乾淨來源卻去洗髒的。
+    """
+    el = soup.select_one(".po-brand .po-break-word")
+    if el:
+        b = _clean_brand(el.get_text(strip=True))
+        if b:
+            return b
+    el = soup.select_one("#bylineInfo")
+    if el:
+        return _clean_brand(el.get_text(strip=True))
+    return ""
+
+
 class AmazonMixin:
 
     async def _scrape_amazon(self, url: str) -> ProductInfo:
@@ -133,11 +209,7 @@ class AmazonMixin:
                     if "サインイン" not in txt and "Sign" not in txt:
                         product.title = txt
 
-            el = soup.select_one("#bylineInfo") or soup.select_one(".po-brand .po-break-word")
-            if el:
-                b = el.get_text(strip=True)
-                b = re.sub(r'^(ブランド[：:]\s*|Brand[：:]\s*|Visit the |のストアを表示)', '', b)
-                product.brand = re.sub(r'\s*(Store|ストア)$', '', b).strip()
+            product.brand = _extract_brand(soup)
 
             # ── 價格：只取「URL 這個 ASIN」的 Buy Box 價（單一規格，不跨規格展開）──
             for sel in [
