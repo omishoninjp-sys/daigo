@@ -66,7 +66,6 @@ class FakeResp:
 
 
 # ── A. OpenAI 401 的真實回應格式（error.message 內含遮蔽金鑰）────────
-# 這段是實際收到的形狀，星號數量照抄自真實回應的長度級距。
 _MASKED = "sk-proj-" + chr(42) * 140
 OPENAI_401 = FakeResp(401, {
     "error": {

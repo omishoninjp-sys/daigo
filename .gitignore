@@ -5,3 +5,9 @@ __pycache__/
 
 # 爬取監控紀錄（本機 fallback 目錄，不進版控）
 scrape_log/
+
+# 一次性分析腳本與其產出（不進版控：都是某次調查的快照，不是專案的一部分）
+analyze_*.py
+audit_markup.json
+source_analysis.csv
+generic_domains_*.csv
