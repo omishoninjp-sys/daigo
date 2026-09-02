@@ -43,6 +43,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 _TMP = tempfile.mkdtemp(prefix="digest_test_")
 os.environ["SCRAPE_LOG_DIR"] = _TMP
+# admin 端點用獨立金鑰；本機 .env 通常沒設，給測試一把（不覆蓋已存在的設定）
+os.environ.setdefault("ADMIN_SECRET_KEY", "test-admin-key-for-verify")
 
 import scrape_monitor as sm
 import scrape_digest as dg
@@ -370,6 +372,145 @@ def test_summary_unchanged():
     check("★ main.py 的端點確實改用這支", main._pick_samples is dg.pick_samples)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 手動觸發端點（規格第七節：先寄給自己看一次格式）
+# ═══════════════════════════════════════════════════════════════════
+def test_manual_endpoint():
+    print()
+    print("【10】手動觸發端點 /api/admin/scrape-log/digest")
+    from fastapi.testclient import TestClient
+    from config import ADMIN_SECRET_KEY, API_SECRET_KEY
+    import main
+
+    client = TestClient(main.app)      # 不用 with：不跑 lifespan，不啟動背景任務
+    HEAD = {"X-Admin-Key": ADMIN_SECRET_KEY}
+    PATH = "/api/admin/scrape-log/digest"
+
+    # ── 金鑰：公開金鑰打不開（CLAUDE.md：會吐資料的端點一律走 admin）──
+    r = client.post(PATH, headers={"X-API-Key": API_SECRET_KEY})
+    check("★ 公開金鑰 → 403（那把印在 storefront 頁面上）", r.status_code == 403,
+          str(r.status_code))
+    check("沒帶 key → 403", client.post(PATH).status_code == 403)
+    check("錯的 key → 403",
+          client.post(PATH, headers={"X-Admin-Key": "wrong"}).status_code == 403)
+
+    # 之後都用假 sender，避免本機真的有 RESEND_API_KEY 時寄出真信
+    spy = Spy()
+    orig_send = dg.send_email
+    dg.send_email = spy
+    try:
+        clear_marker()
+        write(D1, [entry(D1, "a.jp", True),
+                   entry(D1, "b.jp", False, "parse_failed", 200)])
+
+        # ── 指定日期 ──
+        r = client.post(f"{PATH}?day={D1}", headers=HEAD)
+        check("帶 admin key → 200", r.status_code == 200, str(r.status_code))
+        d = r.json()
+        check("回傳的 day 是指定的那天", d["day"] == D1, str(d.get("day")))
+        check("★ 回傳帶 body（Resend 沒設好也看得到格式）",
+              "每日爬取摘要" in (d.get("body") or ""), (d.get("body") or "")[:50])
+        check("sent=True（假 sender）", d["sent"] is True, str(d))
+
+        # ── 不寫標記檔 ──
+        check("★ marked=False（回傳裡講明白）", d["marked"] is False, str(d.get("marked")))
+        check("★ 沒有寫 .digest_sent —— 排程之後仍然會寄（心跳不會被手動觸發弄斷）",
+              dg.already_sent(D1) is False)
+        check("★ 也沒有寫進記憶體那層", D1 not in dg._SENT_DAYS, str(dg._SENT_DAYS))
+
+        # 排程照樣寄得出去
+        spy2 = Spy(); dg.send_email = spy2
+        r2 = run(dg.run_once(D1))
+        check("★ 手動觸發過之後，排程仍然照寄", r2["sent"] is True and spy2.n == 1,
+              f"{r2} n={spy2.n}")
+        check("排程那次有寫標記", dg.already_sent(D1) is True)
+
+        # ── 排程寄過之後，手動仍然觸發得了（不被 already_sent 擋）──
+        spy3 = Spy(); dg.send_email = spy3
+        r3 = client.post(f"{PATH}?day={D1}", headers=HEAD)
+        check("★ 排程今天寄過了，手動仍然能再看一次",
+              r3.status_code == 200 and r3.json()["sent"] is True and spy3.n == 1,
+              f"{r3.status_code} n={spy3.n}")
+
+        # ── 預設日期 = 前一個 UTC 日 ──
+        spy4 = Spy(); dg.send_email = spy4
+        r4 = client.post(PATH, headers=HEAD)
+        check("★ 省略 day → 前一個 UTC 日（與排程一致）",
+              r4.json()["day"] == dg.target_day(), r4.json().get("day"))
+
+        # ── DIGEST_ENABLED=false 也要能觸發 ──
+        check("前提：DIGEST_ENABLED 目前是關的", dg.DIGEST_ENABLED is False)
+        spy5 = Spy(); dg.send_email = spy5
+        r5 = client.post(f"{PATH}?day={D1}", headers=HEAD)
+        check("★ DIGEST_ENABLED=false 仍然觸發得了（不然要先開才能看格式，順序反了）",
+              r5.status_code == 200 and r5.json()["sent"] is True, str(r5.status_code))
+
+        # ── day 驗證：這是路徑注入的防線 ──
+        for bad, why in [("../../etc/passwd", "路徑注入"),
+                         ("2026-13-45", "不是有效日期"),
+                         ("2026-9-1", "格式不合"),
+                         ("abc", "不是日期"),
+                         ("2026-09-01;rm", "夾帶指令")]:
+            rb = client.post(PATH, params={"day": bad}, headers=HEAD)
+            check(f"★ day={bad!r} → 400（{why}）", rb.status_code == 400,
+                  str(rb.status_code))
+
+        # ── 寄不出去時要講得出原因，而且不 raise ──
+        dg.send_email = Spy(results=[False])
+        r6 = client.post(f"{PATH}?day={D1}", headers=HEAD)
+        check("寄不出去仍回 200 且 sent=False",
+              r6.status_code == 200 and r6.json()["sent"] is False, str(r6.status_code))
+        check("★ note 說得出可能的原因（沒設 RESEND_API_KEY）",
+              "RESEND_API_KEY" in r6.json()["note"], r6.json().get("note", "")[:60])
+        check("★ 寄不出去也照樣回 body（格式仍看得到）",
+              "每日爬取摘要" in r6.json()["body"])
+
+        # ── 手動觸發只試 1 次，不可以卡住 HTTP 請求 2 分鐘 ──
+        spy7 = Spy(results=[False])
+        dg.send_email = spy7
+        client.post(f"{PATH}?day={D1}", headers=HEAD)
+        check("★ 手動觸發只送 1 次（預設 3 次會讓請求卡 2 分鐘）", spy7.n == 1,
+              f"{spy7.n} 次")
+    finally:
+        dg.send_email = orig_send
+
+
+def test_run_once_flags():
+    print()
+    print("【11】run_once 的 mark / retries 旗標")
+    clear_marker(); write(D1, [entry(D1, "a.jp", True)])
+
+    spy = Spy()
+    r = run(dg.run_once(D1, sender=spy, mark=False))
+    check("mark=False → 有寄", r["sent"] is True and spy.n == 1)
+    check("mark=False → marked=False", r["marked"] is False)
+    check("★ mark=False → 不寫標記（兩層都沒寫）",
+          dg.already_sent(D1) is False and D1 not in dg._SENT_DAYS)
+
+    spy = Spy()
+    r = run(dg.run_once(D1, sender=spy, mark=True))
+    check("mark=True → marked=True 且有寫標記",
+          r["marked"] is True and dg.already_sent(D1) is True)
+
+    clear_marker()
+    spy = Spy(results=[False, False, False])
+    r = run(dg.run_once(D1, sender=spy, retries=1))
+    check("★ retries=1 只送 1 次", spy.n == 1 and r["attempts"] == 1, f"n={spy.n}")
+
+    clear_marker()
+    spy = Spy(results=[False, False, True])
+    r = run(dg.run_once(D1, sender=spy))
+    check("retries 省略 → 沿用預設 3 次", r["attempts"] == 3 and r["sent"] is True,
+          str(r["attempts"]))
+
+    # ★ 同一支函式兩條路徑：排版/重試/fail-safe 只有一份
+    clear_marker()
+    spy = Spy(boom=True)
+    r = run(dg.run_once(D1, sender=spy, mark=False))
+    check("★ mark=False 也一樣不 raise（fail-safe 沒有第二份實作）",
+          r["sent"] is False, str(r))
+
+
 def main_():
     print("=" * 74)
     print("每日爬取摘要信")
@@ -384,6 +525,8 @@ def main_():
     test_schedule()
     test_send_email_guard()
     test_summary_unchanged()
+    test_manual_endpoint()
+    test_run_once_flags()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

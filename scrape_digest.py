@@ -422,17 +422,29 @@ _SEND_RETRY = 3
 _SEND_RETRY_SLEEP = 60
 
 
-async def run_once(day: str, sender=None) -> dict:
+async def run_once(day: str, sender=None, mark: bool = True,
+                   retries: int = None) -> dict:
     """
-    寄出某一天的摘要。回 {sent, skipped, subject, attempts}。**永遠不 raise。**
+    寄出某一天的摘要。回 {sent, skipped, subject, body, attempts, marked}。
+    **永遠不 raise。**
 
     ★ 沒有任何 early return 是刻意的（規格第 105 行的心跳）：
       零失敗、零紀錄都只影響內文，不影響寄不寄。
       唯一會跳過的是「今天已經寄過」——那不是內容判斷，是重複防護。
+
+    mark=False 是**手動觸發**用的（/api/admin/scrape-log/digest）：
+      · 不查 already_sent —— 排程今天寄過了，手動仍然要能再看一次
+      · 不寫 .digest_sent —— 手動觸發不可以影響排程的判斷，
+        否則「我手動看一次格式」會讓當天的自動摘要不寄，心跳就斷了
+    ★ 用同一支函式加旗標，不另開 run_manual()：排版、重試、fail-safe
+      只有一份，日後改了不會只改到其中一條路徑。
+
+    retries 讓手動觸發只試 1 次 —— 預設的 3 次會讓 HTTP 請求卡上 2 分鐘。
     """
-    out = {"sent": False, "skipped": False, "subject": "", "attempts": 0}
+    out = {"sent": False, "skipped": False, "subject": "", "body": "",
+           "attempts": 0, "marked": False}
     try:
-        if already_sent(day):
+        if mark and already_sent(day):
             out["skipped"] = True
             return out
 
@@ -440,21 +452,26 @@ async def run_once(day: str, sender=None) -> dict:
         streaks = failure_streaks(scrape_monitor.recent_days(DIGEST_STREAK_DAYS))
         subject, body = render_digest(day, rows, streaks)
         out["subject"] = subject
+        out["body"] = body
 
+        n_try = _SEND_RETRY if retries is None else max(1, int(retries))
         send = sender or send_email
-        for attempt in range(1, _SEND_RETRY + 1):
+        for attempt in range(1, n_try + 1):
             out["attempts"] = attempt
             if await send(subject, body):
                 out["sent"] = True
                 break
-            if attempt < _SEND_RETRY:
+            if attempt < n_try:
                 await asyncio.sleep(_SEND_RETRY_SLEEP)
 
         # ★ 寄失敗也要標記。不標的話容器一重啟就整套重來，
         #   一次 Resend 故障會變成寄信轟炸。真正的訊號是「信沒來」。
-        mark_sent(day)
+        if mark:
+            mark_sent(day)
+            out["marked"] = True
         if not out["sent"]:
-            print(f"[Digest] ❌ {day} 的摘要 {_SEND_RETRY} 次都寄不出去，今天不再重試")
+            print(f"[Digest] ❌ {day} 的摘要 {n_try} 次都寄不出去"
+                  + ("，今天不再重試" if mark else "（手動觸發）"))
     except Exception as e:
         print(f"[Digest] ❌ 產生摘要失敗（略過，不影響其他任務）: {type(e).__name__}: {e}")
     return out

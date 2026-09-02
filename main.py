@@ -6,9 +6,11 @@ GOYOUTATI DAIGO 代購系統 API v3.4
 - SEO 最佳化標題（ChatGPT 翻譯）
 - 併發限制 + 排隊機制 + 超時保護
 """
+import re
 import time
 import asyncio
 import traceback
+from datetime import datetime
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -846,6 +848,61 @@ async def export_scrape_log(days: int = 2):
             "X-Log-Lines": str(len(lines)),
         },
     )
+
+
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_day(day: str) -> str:
+    """
+    驗證 YYYY-MM-DD。**這是路徑注入的防線**：scrape_monitor.read_day() 直接把
+    這個字串接進檔名（os.path.join(dir, f"{day}.jsonl")），沒擋的話
+    `../../etc/passwd` 會讓它去讀別的檔案。格式對還要真的是一個日期。
+    """
+    d = (day or "").strip()
+    if not _DAY_RE.match(d):
+        raise HTTPException(status_code=400, detail="day 格式須為 YYYY-MM-DD")
+    try:
+        datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="day 不是有效的日期")
+    return d
+
+
+@app.post("/api/admin/scrape-log/digest", dependencies=[Depends(verify_admin_key)])
+async def trigger_digest(day: str = ""):
+    """
+    手動寄一封摘要信（規格第七節：「摘要信先寄給自己看一次格式，再正式接上」）。
+
+    · day 省略 → 前一個 UTC 日（與排程一致）
+    · **不寫 .digest_sent** —— 手動觸發不可以影響排程的判斷，
+      否則「我手動看一次格式」會讓當天的自動摘要不寄，心跳就斷了
+    · **DIGEST_ENABLED=false 也能觸發** —— 要先看得到格式才決定要不要開，
+      反過來就本末倒置了
+    · 回傳裡帶 body，所以 Resend 還沒設好也看得到信會長什麼樣
+
+    走 verify_admin_key：這個端點會吐爬取紀錄的內容，公開金鑰印在 storefront
+    頁面上，擋不住任何人。
+
+    PowerShell 5.1：
+        Invoke-RestMethod -Method Post `
+          "https://<host>/api/admin/scrape-log/digest?day=2026-09-01" `
+          -Headers @{ "X-Admin-Key" = $env:ADMIN_SECRET_KEY }
+    """
+    target = _valid_day(day) if day else scrape_digest.target_day()
+    r = await scrape_digest.run_once(target, mark=False, retries=1)
+    return {
+        "day": target,
+        "sent": r["sent"],
+        "subject": r["subject"],
+        "body": r["body"],
+        # ★ 一定要回這個：手動觸發**故意**不寫標記，回傳裡講明白，
+        #   免得日後有人以為「我手動寄過了，今天就不會再自動寄」。
+        "marked": r["marked"],
+        "note": ("已寄出" if r["sent"] else
+                 "沒有寄出（多半是未設定 RESEND_API_KEY / DIGEST_FROM，"
+                 "看 body 仍可確認格式）"),
+    }
 
 
 @app.get("/api/admin/scrape-log/summary", dependencies=[Depends(verify_admin_key)])
