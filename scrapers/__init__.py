@@ -25,7 +25,6 @@ from scrapers.driver import DriverMixin
 from scrapers.generic import GenericMixin
 from scrapers.amazon import AmazonMixin
 from scrapers.uniqlo import UniqloMixin
-from scrapers.muji import MujiMixin
 from scrapers.beams import BeamsMixin
 from scrapers.nijisanji import NijisanjiMixin
 from scrapers.palcloset import PalClosetMixin
@@ -122,7 +121,6 @@ class Scraper(
     GenericMixin,
     AmazonMixin,
     UniqloMixin,
-    MujiMixin,
     BeamsMixin,
     NijisanjiMixin,
     PalClosetMixin,

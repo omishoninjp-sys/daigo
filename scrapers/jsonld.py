@@ -235,12 +235,83 @@ class JsonLdHttpxSource(Source):
             return None
 
 
+def _note_error(error, where=""):
+    """把被吞掉的失敗交給監控（fail-safe：監控壞掉不影響爬取）。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 選配：用瀏覽器把主圖抓成 base64
+# ─────────────────────────────────────────────────────────────────────
+# ★ 為什麼需要這個（2026-09-02，MUJI）：
+#   www.muji.com 走 Akamai（DNS → www.muji.com.edgekey.net），**依 TLS 指紋
+#   擋掉非瀏覽器的請求** —— httpx 與 curl 對整個網域（含首頁）都是 TCP+TLS
+#   握手成功、首位元組永遠不來，而同一台機器的 Chrome UC 正常。
+#   所以圖片 URL 原樣交給 Shopify 讓它伺服器端抓，一定失敗（線上 68% 的
+#   MUJI 商品無圖）。唯一可行的是**在已經通過 Akamai 的瀏覽器 session 裡**
+#   用 fetch() 把圖抓成 blob 再轉 base64，帶著同一組 cookie 與指紋。
+#
+# ★ 預設關閉。只有明確需要的平台才 image_b64=True —— 這是額外的瀏覽器
+#   往返，沒有被擋的站不該付這個成本。
+def _browser_image_b64(engine, image_url: str, tag: str):
+    """在 Selenium session 內把圖抓成 base64。取不到回 None，絕不 raise。"""
+    lock = getattr(engine, "_driver_lock", None)
+    if lock is None:
+        return None
+    try:
+        with lock:
+            driver = getattr(engine, "_driver", None)
+            if driver is None:
+                print(f"[{tag}] 圖片 base64：driver 已關閉，略過")
+                _note_error("圖片 base64 略過：driver 已關閉", tag)
+                return None
+            # ★ 必須同源。fetch() 之所以能過 Akamai 是因為帶著該網域的 cookie；
+            #   driver 若已被別的請求導到其他站，這就變成跨來源請求，
+            #   CORS 會擋掉讀取 blob。寧可放棄也不要抓到錯的東西。
+            try:
+                cur_host = (urlparse(driver.current_url).hostname or "").lower()
+            except Exception:
+                cur_host = ""
+            img_host = (urlparse(image_url).hostname or "").lower()
+            if not cur_host or cur_host != img_host:
+                print(f"[{tag}] 圖片 base64：driver 已離開該網域"
+                      f"（現在 {cur_host or '?'}，圖片 {img_host}），略過")
+                _note_error(f"圖片 base64 略過：driver 已離開該網域（{cur_host or '?'}）", tag)
+                return None
+            b64 = driver.execute_script("""
+                return await fetch(arguments[0])
+                    .then(r => r.blob())
+                    .then(b => new Promise((res, rej) => {
+                        const fr = new FileReader();
+                        fr.onload = () => res(fr.result.split(',')[1]);
+                        fr.onerror = rej;
+                        fr.readAsDataURL(b);
+                    }));
+            """, image_url)
+            if b64 and len(b64) > 100:
+                print(f"[{tag}] 主圖 base64 OK（瀏覽器，{len(b64) // 1024}KB）")
+                return b64
+            print(f"[{tag}] 圖片 base64：回傳空或過短")
+            _note_error("圖片 base64 回傳空或過短", tag)
+    except Exception as e:
+        print(f"[{tag}] 圖片 base64 失敗: {type(e).__name__}: {e}")
+        _note_error(e, f"{tag}/image_b64")
+    return None
+
+
 class JsonLdSeleniumSource(Source):
     kind = "scraper"
 
-    def __init__(self, parser=None, tag="JsonLd"):
+    def __init__(self, parser=None, tag="JsonLd", image_b64=False):
         self.parser = parser or parse_jsonld_product
         self.tag = tag
+        # ★ 預設關閉。只有被 Akamai 之類依 TLS 指紋擋掉、圖片只能走瀏覽器的
+        #   平台才打開（目前只有 MujiPlatform）。見上面 _browser_image_b64。
+        self.image_b64 = image_b64
 
     async def get(self, url, ref, engine):
         fetch = getattr(engine, "_fetch_with_selenium", None)
@@ -254,7 +325,13 @@ class JsonLdSeleniumSource(Source):
         if not html:
             return None
         product = self.parser(html, url)
-        return product if (product and product.price_jpy) else None
+        if not (product and product.price_jpy):
+            return None
+        if self.image_b64 and product.image_url and not getattr(product, "image_base64", ""):
+            b64 = _browser_image_b64(engine, product.image_url, self.tag)
+            if b64:
+                product.image_base64 = b64
+        return product
 
 
 # ─────────────────────────────────────────────────────────────────────
