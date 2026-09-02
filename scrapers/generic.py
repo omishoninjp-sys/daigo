@@ -35,6 +35,23 @@ _BLOCKED_WEAK = ("robot", "captcha", "recaptcha", "cloudflare", "attention requi
 _BLOCKED_WEAK_MAX_BYTES = 50_000
 
 
+def _has_block_markers(html: str) -> bool:
+    """
+    只看擋頁**特徵字**，不看「頁面小於 5000 就算被擋」那一條。
+
+    🔴 與 _looks_blocked 的差別就在這裡，不可以拿 _looks_blocked 代替：
+      它的第一條是 `len(html) < 5000 → True`，那是給「httpx 抓完之後值不值得
+      再花一次 Selenium」用的判斷 —— 放進 Selenium 的輪詢迴圈，等於
+      **第一次輪詢一律判定被擋**，會把慢載入的真頁面全部誤殺。
+    弱特徵仍然保留 50KB 上限（2026-08-30 的 captcha-bootstrap 教訓）。
+    """
+    html = html or ""
+    low = html.lower()
+    if any(kw in low for kw in _BLOCKED_STRONG):
+        return True
+    return len(html) < _BLOCKED_WEAK_MAX_BYTES and any(kw in low for kw in _BLOCKED_WEAK)
+
+
 def _looks_blocked(html: str) -> bool:
     """httpx 拿到的內容像不像擋頁 —— 像的話才值得再花一次 Selenium。"""
     html = html or ""
@@ -153,6 +170,7 @@ class GenericMixin:
                             self._create_driver()
                             continue
                     html = ""
+                    prev_len = -1
                     for i in range(6):
                         _time.sleep(2)
                         try:
@@ -161,6 +179,17 @@ class GenericMixin:
                             break
                         if len(html) > 5000:
                             return html
+                        # ★ 連兩次長度一樣 = 頁面已經載完，再等也不會變（2026-09-03）。
+                        #   本來唯一的提早跳出條件是 >5000，而 Akamai 的擋頁只有幾 KB，
+                        #   所以每次都跑滿 6 圈 = 12 秒，全程佔著 _driver_lock。
+                        #   實測 dior.com 被擋那幾筆固定 18.3~19.8 秒
+                        #   （6 秒 uc_open_with_reconnect + 12 秒輪詢），這一條把它砍到約 10.5 秒。
+                        #   ★ 不用字串比對判斷擋頁 —— 見 _has_block_markers 的說明。
+                        #     這裡只看「還在不在變」，慢慢渲染的真頁面長度每次都不同，行為不變。
+                        if len(html) == prev_len:
+                            self._note_selenium_settled(html)
+                            return html
+                        prev_len = len(html)
                     return html
                 except Exception as e:
                     if "InvalidSession" in type(e).__name__ and attempt == 0:
@@ -170,6 +199,26 @@ class GenericMixin:
                     print(f"[Generic] Selenium 失敗: {e}")
                     return ""
         return ""
+
+    @staticmethod
+    def _note_selenium_settled(html: str) -> None:
+        """
+        頁面載完但小於 5000 —— 只在**命中擋頁特徵**時留一句話。
+
+        ★ 這是訊號不是控制流：不論記不記，上面都照樣回傳 html。
+          它要回答的問題是「httpx 被擋但瀏覽器過得去」還是「兩條路都被擋」——
+          後者才需要花錢買住宅代理，前者不用。
+          dior.com 兩種都出現過（同一天有 4 筆 http=403 卻 ok=True，
+          也有 5 筆連 Selenium 都拿不到內容），分不出來就會買錯東西。
+        """
+        try:
+            if _has_block_markers(html):
+                print("[Generic] ⚠️ Selenium 取得的頁面命中擋頁特徵 —— "
+                      "httpx 與瀏覽器兩條路都不通")
+                _note_error("Selenium 也被擋（httpx 與瀏覽器兩條路都不通，"
+                            "需要住宅代理）", "Selenium")
+        except Exception:
+            pass          # 訊號壞掉不可以影響抓取結果
 
     # ============================================================
     # Extractors（通用解析器）
