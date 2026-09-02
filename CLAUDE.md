@@ -105,15 +105,27 @@ Shopify 商店：`fd249b-ba.myshopify.com` / `goyoutati.com`
 **Fail-closed**：訂單查詢失敗就整輪中止，一件都不刪。
 副作用是 token 若失去 `read_orders`，清理會靜默停擺，只能從 log 發現。
 
-**🔴 已知缺口：清理失敗會靜默 24 小時。**
-`_auto_cleanup_loop` 的 `except` 之後是 `await asyncio.sleep(24h)`，不是立即重試。
-清理每天刪一千多件，失敗時沒有任何對外訊號，只有 Zeabur log 看得出來。
-**待辦：等監控信件（`spec-scrape-monitoring.md` 第四節）上線後，把 cleanup 的例外
+**失敗要看兩種，不是只有例外。** `cleanup_old_daigo_products` 的四條中止路徑
+（`DAIGO_COLLECTION_ID` 未設定／訂單查詢 fail-closed／分頁重試用盡／cursor 重複）
+**全部是 `return` 不是 `raise`**，`_auto_cleanup_loop` 的 `except` 一條都攔不到。
+判斷中止一律看回傳值的 `completed` 欄位。2026-08-30 少刪 611 件正是這一類 ——
+它在程式碼裡「看起來像正常回傳」，最容易被日後重構漏掉。
+
+**失敗會退避重試，不再等一整天（2026-09-02 起）。**
+連續失敗 30分 → 1時 → 2時 → 4時 → 6時（上限），成功就重置回 24 小時節奏。
+A 類（例外）與 B 類（`completed=False`）**兩種都會觸發**。
+30 分鐘起跳不是保守：`ShopifyClient` 的節流退避是**全域共用**的，cleanup 一輪要打
+上千次 API，密集重試會把額度吃光，而同一個容器裡還跑著客人的建單流程 ——
+`create_daigo_product` 開始吃 429 才是真正會痛的地方。
+
+**🔴 但「沒有對外訊號」仍然成立。** 失敗只有 `print`，要看得去 Zeabur Runtime Logs
+搜 `[AutoCleanup]`（退避中會印「⏳ 連續失敗 N 次，M 分鐘後重試」，恢復會印「↩️ 已恢復」）。
+**待辦：等監控信件（`spec-scrape-monitoring.md` 第四節）上線後，把 cleanup 的失敗
 接進即時警報，成為那三個條件之外的第 4 條。** 在那之前，改完部署後要自己去
 Runtime Logs 確認有 `[Cleanup] 完成：掃描 N 件，刪除 N 件…` 那行。
 
 （中斷本身是安全的：沒有 checkpoint、沒有鎖檔，刪除與標籤都是永久且冪等的，
-容器重啟後 60 秒就重跑一輪，只是重複讀取。真正的問題只有「例外之後要等一天」。）
+容器重啟後 60 秒就重跑一輪，只是重複讀取 —— 這也是退避可以放心重跑的前提。）
 
 **刪任何商品之前一定要先查訂單，不可以只看 `已下單` 標籤。**
 標籤是 cleanup 執行時才補上去的 —— 沒跑過清理的期間，被下單過的商品身上不會有標籤。

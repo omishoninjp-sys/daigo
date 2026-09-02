@@ -272,6 +272,144 @@ async def test_auto_loop_log():
     check("跑完時不出現「中止」", "中止" not in out)
 
 
+
+# ─────────────────────────────────────────────────────────────────────
+async def _drive_loop_rounds(results, rounds):
+    """
+    連續驅動 _auto_cleanup_loop 幾輪，回傳每一輪之後實際睡了幾秒。
+
+    results：每一輪 cleanup_old_daigo_products 的回傳（dict）或要拋的例外。
+    rounds ：跑幾輪之後跳出。
+
+    ★ 跟 _drive_auto_loop 一樣，驅動的是**正式的那個迴圈**，不是抽出來的
+      helper —— 這樣「B 類不觸發退避」那種注入才驗得到。
+    """
+    import main as m
+
+    seq = list(results)
+    calls = {"n": 0}
+
+    async def fake_cleanup(days=30):
+        i = calls["n"]
+        calls["n"] += 1
+        r = seq[i] if i < len(seq) else seq[-1]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    slept = []
+
+    async def fake_sleep(sec):
+        # 第 1 次是啟動前的 60 秒，不算進退避時序
+        if not slept and sec == 60:
+            slept.append(None)
+            return
+        slept.append(sec)
+        if len([s for s in slept if s is not None]) >= rounds:
+            raise _StopLoop
+
+    orig_cleanup = m.shopify.cleanup_old_daigo_products
+    orig_sleep = asyncio.sleep
+    m.shopify.cleanup_old_daigo_products = fake_cleanup
+    asyncio.sleep = fake_sleep
+    buf = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                await m._auto_cleanup_loop()
+            except _StopLoop:
+                pass
+    finally:
+        m.shopify.cleanup_old_daigo_products = orig_cleanup
+        asyncio.sleep = orig_sleep
+    return [s for s in slept if s is not None], buf.getvalue()
+
+
+# 30分 -> 1時 -> 2時 -> 4時 -> 6時（上限），成功回 24 時
+_EXPECT = [30 * 60, 60 * 60, 2 * 60 * 60, 4 * 60 * 60, 6 * 60 * 60]
+_DAY = 24 * 60 * 60
+
+
+async def test_backoff_ladder():
+    """
+    🔴 失敗後不可以等一整天才重試。
+
+    退避階梯：30分 -> 1時 -> 2時 -> 4時 -> 6時上限。
+    30 分鐘起跳不是保守 —— **ShopifyClient 的節流退避是全域共用的**，
+    cleanup 一輪要打上千次 API，密集重試會把額度吃光，
+    而同一個容器裡還跑著客人的建單流程，create_daigo_product 開始吃 429
+    才是真正會痛的地方。
+    """
+    print(chr(10) + "【8】失敗後的退避階梯（A 類：例外）")
+    err = RuntimeError("Shopify 5xx")
+    slept, out = await _drive_loop_rounds([err] * 6, rounds=6)
+    for i, want in enumerate(_EXPECT, 1):
+        got = slept[i - 1] if i - 1 < len(slept) else None
+        check(f"第 {i} 次失敗 -> 等 {want // 60} 分鐘", got == want,
+              f"實際 {got}")
+    check("第 6 次仍是 6 小時（上限，不再倍增）",
+          len(slept) >= 6 and slept[5] == 6 * 60 * 60,
+          f"實際 {slept[5] if len(slept) > 5 else None}")
+    check("★ 一次都沒有等到 24 小時", _DAY not in slept, str(slept))
+    check("log 說得出連續失敗第幾次", "連續失敗 1 次" in out and "連續失敗 5 次" in out)
+
+
+async def test_backoff_on_abort():
+    """
+    🔴 B 類：completed=False。
+
+    cleanup_old_daigo_products 的四條中止路徑**全部是 return 不是 raise**
+    （COLLECTION_ID 未設定／訂單查詢 fail-closed／分頁重試用盡／cursor 重複），
+    迴圈的 except 一條都攔不到。2026-08-30 少刪 611 件正是這一類。
+
+    ★ 這是最可能被日後重構漏掉的 —— B 類在程式碼裡「看起來像正常回傳」。
+    """
+    print(chr(10) + "【9】★ B 類（completed=False）也要觸發退避，不是只有例外")
+    slept, out = await _drive_loop_rounds([ABORTED] * 3, rounds=3)
+    check("第 1 次中止 -> 等 30 分鐘（不是 24 小時）", slept[:1] == [30 * 60],
+          f"實際 {slept[:1]}")
+    check("第 2 次中止 -> 等 1 小時", slept[1:2] == [60 * 60], f"實際 {slept[1:2]}")
+    check("第 3 次中止 -> 等 2 小時", slept[2:3] == [2 * 60 * 60], f"實際 {slept[2:3]}")
+    check("★ 中止一次都沒有退回 24 小時（未修版本會在這裡紅燈）",
+          _DAY not in slept, str(slept))
+    check("仍然印「⚠️ 中止」（原本的行為不可以被退避蓋掉）",
+          "[AutoCleanup] ⚠️ 中止：" in out)
+
+
+async def test_backoff_reset_on_success():
+    print(chr(10) + "【10】成功之後要重置回 24 小時節奏")
+    err = RuntimeError("boom")
+    # 失敗 3 次 -> 成功 -> 再失敗 1 次
+    slept, out = await _drive_loop_rounds(
+        [err, err, err, FINISHED, err], rounds=5)
+    check("前三次是退避階梯", slept[:3] == _EXPECT[:3], f"實際 {slept[:3]}")
+    check("成功之後回到 24 小時", slept[3:4] == [_DAY], f"實際 {slept[3:4]}")
+    check("★ 重置之後再失敗要從 30 分鐘重新起算（不是接續 4 小時）",
+          slept[4:5] == [30 * 60], f"實際 {slept[4:5]}")
+    check("log 有「已恢復」訊息", "已恢復" in out,
+          next((l for l in out.splitlines() if "已恢復" in l), "")[:60])
+
+
+async def test_success_path_unchanged():
+    print(chr(10) + "【11】一路成功時行為不變（退避不可以影響正常節奏）")
+    slept, out = await _drive_loop_rounds([FINISHED] * 3, rounds=3)
+    check("每輪都等 24 小時", slept == [_DAY] * 3, str(slept))
+    check("沒有印退避訊息", "連續失敗" not in out)
+    check("沒有印「已恢復」（本來就沒失敗過）", "已恢復" not in out)
+
+
+async def test_delay_table():
+    print(chr(10) + "【12】_cleanup_next_delay 的對照表（期望值寫死）")
+    import main as m
+    table = [(0, _DAY), (1, 30 * 60), (2, 60 * 60), (3, 2 * 60 * 60),
+             (4, 4 * 60 * 60), (5, 6 * 60 * 60), (6, 6 * 60 * 60),
+             (99, 6 * 60 * 60)]
+    for streak, want in table:
+        got = m._cleanup_next_delay(streak)
+        check(f"連續失敗 {streak} 次 -> {want // 60} 分鐘", got == want, f"實際 {got}")
+    check("負數視同沒失敗", m._cleanup_next_delay(-1) == _DAY)
+
+
 # ─────────────────────────────────────────────────────────────────────
 async def main():
     print("=" * 74)
@@ -284,6 +422,11 @@ async def main():
     await test_non_retryable_status()
     await test_5xx_also_retried()
     await test_auto_loop_log()
+    await test_backoff_ladder()
+    await test_backoff_on_abort()
+    await test_backoff_reset_on_success()
+    await test_success_path_unchanged()
+    await test_delay_table()
 
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

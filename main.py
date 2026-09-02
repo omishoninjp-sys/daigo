@@ -51,10 +51,51 @@ def is_no_cache_url(url: str) -> bool:
         return False
 print(f"[Config] NO_CACHE_DOMAINS = {NO_CACHE_DOMAINS}")
 # === 背景自動清理任務 ===
+# 失敗後的退避階梯（秒）。第 1 次失敗等 30 分鐘，之後倍增，第 5 次起固定 6 小時。
+# 成功就重置回 24 小時的正常節奏。
+#
+# ★ 為什麼是 30 分鐘起跳，不是 1 分鐘：
+#   **`ShopifyClient` 的節流退避是全域共用的。** cleanup 一輪要打上千次 API
+#   （每天刪一千多件），失敗後密集重試會把節流額度吃光，而同一個容器裡還跑著
+#   客人的建單流程 —— `create_daigo_product` 開始吃 429 才是真正會痛的地方。
+#   而且 cleanup 的失敗成因幾乎都不是「馬上重試就會好」的：token 掉權限、
+#   Shopify 5xx、COLLECTION_ID 沒設，密集重試對這些完全沒幫助。
+#
+# ★ 為什麼有 6 小時上限：不設上限指數會爬過 24 小時，等於退回原狀。
+#   6 小時代表一天至少嘗試 4 次，要人介入的問題也不會拖過一天沒訊號。
+#
+# ★ 接受時刻漂移：失敗後在別的時刻才成功，之後的節奏就跟著移。
+#   cleanup 刪的是「超過 N 天」的商品，早幾小時晚幾小時沒有任何差別，
+#   為此加一套目標時刻計算是為不存在的問題增加複雜度。
+_CLEANUP_BACKOFF_SEC = [30 * 60, 60 * 60, 2 * 60 * 60, 4 * 60 * 60, 6 * 60 * 60]
+_CLEANUP_INTERVAL_SEC = 24 * 60 * 60
+
+
+def _cleanup_next_delay(fail_streak: int) -> int:
+    """連續失敗 fail_streak 次之後要等多久；0 代表沒失敗，走正常節奏。"""
+    if fail_streak <= 0:
+        return _CLEANUP_INTERVAL_SEC
+    idx = min(fail_streak, len(_CLEANUP_BACKOFF_SEC)) - 1
+    return _CLEANUP_BACKOFF_SEC[idx]
+
+
 async def _auto_cleanup_loop():
-    """每 24 小時執行一次自動清理。啟動後先等 60 秒再執行第一次，避免干擾冷啟動。"""
+    """
+    每 24 小時執行一次自動清理。啟動後先等 60 秒再執行第一次，避免干擾冷啟動。
+
+    ★ 失敗要退避重試，不可以等一整天。而「失敗」有**兩類**，兩類都要算：
+      A 類 例外            —— 底下的 except 接得到
+      B 類 completed=False —— cleanup_old_daigo_products 的四條中止路徑
+                              （COLLECTION_ID 未設定／訂單查詢 fail-closed／
+                                分頁重試用盡／cursor 重複）**全部是 return
+                              不是 raise**，except 一條都攔不到。
+      只處理 A 會漏掉更常見的 B —— 2026-08-30 少刪 611 件正是 B 類，
+      而且 B 類在程式碼裡「看起來像正常回傳」，最容易被日後重構漏掉。
+    """
     await asyncio.sleep(60)
+    fail_streak = 0
     while True:
+        failed = False
         try:
             print(f"[AutoCleanup] ⏰ 開始自動清理（刪除超過 {DAIGO_AUTO_DELETE_DAYS} 天的商品）")
             result = await shopify.cleanup_old_daigo_products(days=DAIGO_AUTO_DELETE_DAYS)
@@ -69,12 +110,25 @@ async def _auto_cleanup_loop():
                 print(f"[AutoCleanup] ✅ 完成：刪除 {result['deleted_count']} 件，"
                       f"跳過 {result['skipped_count']} 件")
             else:
+                failed = True          # ★ B 類：return 回來的中止，不是例外
                 print(f"[AutoCleanup] ⚠️ 中止：{result.get('incomplete_reason', '')}，"
                       f"已刪除 {result['deleted_count']} 件，剩餘未處理")
         except Exception as e:
+            failed = True              # ★ A 類：例外
             print(f"[AutoCleanup] ❌ 發生錯誤: {type(e).__name__}: {e}")
-        # 等 24 小時再執行下一次
-        await asyncio.sleep(24 * 60 * 60)
+
+        if failed:
+            fail_streak += 1
+            delay = _cleanup_next_delay(fail_streak)
+            print(f"[AutoCleanup] ⏳ 連續失敗 {fail_streak} 次，{delay // 60} 分鐘後重試"
+                  f"（不等 24 小時；cleanup 是冪等的，重跑安全）")
+        else:
+            if fail_streak:
+                print(f"[AutoCleanup] ↩️ 已恢復（先前連續失敗 {fail_streak} 次），"
+                      f"回到 24 小時節奏")
+            fail_streak = 0
+            delay = _CLEANUP_INTERVAL_SEC
+        await asyncio.sleep(delay)
 from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
