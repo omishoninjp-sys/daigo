@@ -28,6 +28,7 @@
    那比檢查文字內容更能擋住日後有人加 early return。
 """
 import os
+import json
 import asyncio
 from datetime import datetime, timezone, timedelta
 
@@ -335,6 +336,45 @@ def render_digest(day: str, rows: list, streaks: dict) -> tuple:
 # ─────────────────────────────────────────────────────────────────────
 _RESEND_URL = "https://api.resend.com/emails"
 
+# 🔴 這封信整封是中文，編碼錯了就等於沒有價值（2026-09-03）
+#   ★ 為什麼不用 httpx 的 json= 參數：
+#     httpx 0.28.1 的 encode_json 是 `json_dumps(..., ensure_ascii=False).encode("utf-8")`，
+#     送出去的 bytes 本來就對 —— **但那是它的內部實作**，而且它設的
+#     Content-Type 是 `application/json`（沒有 charset）。
+#     舊版 httpx 用 ensure_ascii=True（純 ASCII 跳脫，也安全），
+#     哪天再改一次、或有人手滑把 json= 換成 data=（表單編碼），
+#     就會變成客人看到一整封亂碼而我們毫無防備。
+#   ★ 所以自己 dumps、自己 encode("utf-8")、自己宣告 charset，
+#     三件事都不交給函式庫決定。測試釘住的也是這三件。
+_CONTENT_TYPE = "application/json; charset=utf-8"
+
+
+def encode_payload(subject: str, body: str, sender: str = None,
+                   to: str = None) -> bytes:
+    """
+    把 Resend 的 payload 編成 UTF-8 bytes。**明確編碼，不交給 httpx 決定。**
+
+    ensure_ascii=False：讓中文以原生 UTF-8 進 bytes（e3 80 90 …）而不是
+    跳脫成 \\uXXXX。兩者 Resend 都讀得懂，但原生的在抓包和 log 裡看得懂，
+    出事的時候差很多。
+    """
+    data = {"from": sender if sender is not None else DIGEST_FROM,
+            "to": [to if to is not None else DIGEST_TO],
+            "subject": subject, "text": body}
+    text = json.dumps(data, ensure_ascii=False)
+    # 🔴 **整支只有這一個編碼點**。原本退路裡還有第二份
+    #   `json.dumps(...).encode("utf-8")`，2026-09-03 的負向驗證抓到：
+    #   把主要路徑改成 cp950 時，退路照樣用 UTF-8 把它救回來，測試因此全綠 ——
+    #   那就是「修了一個路徑沒修到另一個」的形狀，兩份遲早會分岔。
+    #   現在退路只換 errors 參數，編碼目標寫死一次。
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as e:
+        # ★ 幾乎不會發生（要有落單的 surrogate），但**心跳比完美的文字重要**：
+        #   寧可寄出一封有幾個 ? 的信，也不要因為一個怪字元整封寄不出去。
+        print(f"[Digest] ⚠️ 內容含無法編碼的字元，已替換後寄出: {e}")
+        return text.encode("utf-8", "replace")
+
 
 async def send_email(subject: str, body: str) -> bool:
     """
@@ -351,9 +391,8 @@ async def send_email(subject: str, body: str) -> bool:
             r = await c.post(
                 _RESEND_URL,
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}",
-                         "Content-Type": "application/json"},
-                json={"from": DIGEST_FROM, "to": [DIGEST_TO],
-                      "subject": subject, "text": body},
+                         "Content-Type": _CONTENT_TYPE},
+                content=encode_payload(subject, body),   # ★ 不用 json=，見上面
             )
         if r.status_code in (200, 201, 202):
             print(f"[Digest] ✅ 已寄出：{subject}")

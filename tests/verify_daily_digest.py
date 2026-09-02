@@ -511,6 +511,163 @@ def test_run_once_flags():
           r["sent"] is False, str(r))
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 編碼：整封信都是中文，編錯就等於沒有價值
+# ═══════════════════════════════════════════════════════════════════
+class CapturedResp:
+    status_code = 200
+
+
+class CapturingClient:
+    """假的 httpx.AsyncClient：記下 send_email 實際送出去的 header 與 bytes。"""
+    last = {}
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, **kw):
+        CapturingClient.last = {"url": url, "kwargs": kw}
+        return CapturedResp()
+
+
+class FakeHttpxMod:
+    def __init__(self, real):
+        self._real = real
+
+    def AsyncClient(self, *a, **kw):
+        return CapturingClient()
+
+    def __getattr__(self, k):
+        return getattr(self._real, k)
+
+
+CJK_BODY = ("【daigo 每日爬取摘要】2026-09-01（UTC）" + chr(10)
+            + "成功 61 / 失敗 17（成功率 78.2%）" + chr(10)
+            + "    japan.us.mercari.com  0/12  ← 完全不能用・連續 3 天失敗")
+CJK_SUBJ = "【daigo 每日爬取摘要】2026-09-01"
+
+
+def _send_and_capture(subject, body):
+    """真的跑 send_email，攔下它送出去的東西。"""
+    import httpx as real_httpx
+    orig_httpx = dg.httpx
+    orig = (dg.RESEND_API_KEY, dg.DIGEST_FROM, dg.DIGEST_TO)
+    dg.httpx = FakeHttpxMod(real_httpx)
+    dg.RESEND_API_KEY, dg.DIGEST_FROM, dg.DIGEST_TO = ("re_test", "a@goyoutati.com",
+                                                       "b@example.com")
+    try:
+        ok = run(dg.send_email(subject, body))
+    finally:
+        dg.httpx = orig_httpx
+        dg.RESEND_API_KEY, dg.DIGEST_FROM, dg.DIGEST_TO = orig
+    return ok, CapturingClient.last
+
+
+def test_utf8_wire():
+    print()
+    print("【12】★ 寄出去的 payload 編碼（中文信變亂碼這封信就沒價值）")
+    ok, cap = _send_and_capture(CJK_SUBJ, CJK_BODY)
+    kw = cap["kwargs"]
+    check("send_email 回 True", ok is True)
+    check("打的是 Resend 的端點", cap["url"].endswith("/emails"), cap["url"])
+
+    # ① Content-Type 必須含 charset=utf-8
+    ct = {k.lower(): v for k, v in (kw.get("headers") or {}).items()}.get("content-type", "")
+    check("★ Content-Type 含 charset=utf-8", "charset=utf-8" in ct.lower(), repr(ct))
+    check("Content-Type 仍是 application/json", ct.lower().startswith("application/json"),
+          repr(ct))
+
+    # ② body 必須是我們自己編好的 bytes，不是交給 httpx 的 json=
+    body_bytes = kw.get("content")
+    check("★ 用 content= 送 bytes（不是 json=，那會由函式庫決定編碼）",
+          isinstance(body_bytes, bytes), type(body_bytes).__name__)
+    check("★ 沒有用 json= 參數", "json" not in kw, str(sorted(kw)))
+    check("沒有用 data=（那是表單編碼，會壞掉）", "data" not in kw, str(sorted(kw)))
+
+    # ③ bytes 必須是合法 UTF-8 且無損往返
+    decoded = None
+    try:
+        decoded = body_bytes.decode("utf-8")
+        okdec = True
+    except Exception:
+        okdec = False
+    check("★ bytes 是合法 UTF-8", okdec)
+    if okdec:
+        payload = json.loads(decoded)
+        check("★ text 無損往返（一個字都沒變）", payload["text"] == CJK_BODY,
+              repr(payload["text"][:30]))
+        check("★ subject 無損往返", payload["subject"] == CJK_SUBJ,
+              repr(payload["subject"]))
+
+    # ④ 中文是原生 UTF-8，不是 Latin-1 也不是 cp950
+    check("★ 「【」編成 UTF-8 的 e3 80 90", bytes([0xE3, 0x80, 0x90]) in body_bytes,
+          repr(body_bytes[:40]))
+    check("★ 不是 cp950/Big5（「【」在 Big5 是 a1 61）",
+          bytes([0xA1, 0x61]) not in body_bytes)
+    check("★ 不是 Latin-1 誤編（那樣根本編不出非 ASCII 的中文）",
+          any(b > 0x7F for b in body_bytes))
+
+    # ⑤ 反面：拿 Latin-1 去讀會壞掉 —— 證明我們送的確實是 UTF-8 而不是別的
+    # 「【」的 UTF-8 是 e3 80 90；用 Latin-1 讀就變成 ã + 兩個控制字元 ——
+    # 那正是主控台亂碼的長相。這條證明我們送的是 UTF-8 而不是別的編碼。
+    mis = body_bytes.decode("latin-1")
+    mojibake = bytes([0xE3, 0x80, 0x90]).decode("latin-1")
+    check("★ 用 Latin-1 誤讀會變成典型亂碼（證明送的確實是 UTF-8）",
+          mojibake in mis and CJK_BODY not in mis, repr(mojibake))
+
+
+def _can_cp950(ch):
+    try:
+        ch.encode("cp950")
+        return True
+    except Exception:
+        return False
+
+
+def test_utf8_encode_payload():
+    print()
+    print("【13】encode_payload 本身")
+    raw = dg.encode_payload(CJK_SUBJ, CJK_BODY, sender="a@b.c", to="d@e.f")
+    check("回傳是 bytes", isinstance(raw, bytes), type(raw).__name__)
+    d = json.loads(raw.decode("utf-8"))
+    check("欄位齊全", set(d) == {"from", "to", "subject", "text"}, str(sorted(d)))
+    check("to 是 list（Resend 要陣列）", d["to"] == ["d@e.f"], str(d["to"]))
+    check("★ 中文沒有被跳脫成 \\uXXXX（原生 UTF-8，抓包看得懂）",
+          ("\\u" + "3010") not in raw.decode("utf-8"), raw[:30].decode("utf-8", "replace"))
+
+    # ★ 上面的樣本含「・」（U+30FB），cp950 編不出來 —— 萬一有人把編碼改成 cp950，
+    #   會觸發退路、被 UTF-8 救回來，測試就抓不到。2026-09-03 的負向驗證正是
+    #   這樣被瞞過去的（注入 cp950 全綠）。
+    #   所以另外用一個**每個字 Big5 都編得出來**的樣本，讓退路不會啟動。
+    big5_ok = "摘要 完全不能用 連續 3 天失敗"
+    assert all(_can_cp950(ch) for ch in big5_ok), "樣本必須整串 cp950 編得出來"
+    raw3 = dg.encode_payload("摘要", big5_ok, sender="a@b.c", to="d@e.f")
+    check("★ 用 Big5 編得出來的樣本反證：送的是 UTF-8 不是 cp950",
+          "摘".encode("utf-8") in raw3 and "摘".encode("cp950") not in raw3,
+          f'utf8={"摘".encode("utf-8")!r} big5={"摘".encode("cp950")!r}')
+    check("退路沒有被觸發（這串沒有 cp950 編不出的字）",
+          json.loads(raw3.decode("utf-8"))["text"] == big5_ok)
+
+    # 落單的 surrogate：不可以整封寄不出去（心跳比完美的文字重要）
+    bad = "摘要" + chr(0xD800) + "尾巴"
+    try:
+        raw2 = dg.encode_payload(CJK_SUBJ, bad, sender="a@b.c", to="d@e.f")
+        threw = False
+    except Exception:
+        raw2, threw = None, True
+    check("★ 內容含落單 surrogate 也不 raise（信照樣寄得出去）", threw is False)
+    if raw2 is not None:
+        check("替換後仍是合法 UTF-8", isinstance(raw2.decode("utf-8"), str))
+        check("其餘中文沒有被波及",
+              "摘要" in json.loads(raw2.decode("utf-8"))["text"])
+
+
 def main_():
     print("=" * 74)
     print("每日爬取摘要信")
@@ -527,6 +684,8 @@ def main_():
     test_summary_unchanged()
     test_manual_endpoint()
     test_run_once_flags()
+    test_utf8_wire()
+    test_utf8_encode_payload()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")
