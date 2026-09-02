@@ -148,6 +148,30 @@ _SEARCH_SHORTLINK_HOSTS = (
     "pse.is", "tinyurl.com",
 )
 
+# 明顯不是商店的網域：社群／通訊／協作／影音（2026-09-03）
+#
+# 客人偶爾會貼這些進來，爬蟲照樣跑一輪，然後在每日摘要的「需要處理」區
+# 佔一行 —— 但沒有人該去修 facebook.com 的解析器。
+# 實測 7 天 535 筆裡有 2 筆：
+#   facebook.com/share/r/...            → parse_failed（title 有、price 無）
+#   evolutivelabs.slack.com/archives/…  → blocked
+# 擋在爬取之前的另一個好處：這類網址的 path 會被寫進爬取紀錄，
+# 那筆 slack 的 path 是 /archives/D0A9323B718/…，D 開頭是 **DM 頻道 ID**。
+#
+# 🔴 一律走 _host_matches（完整網域或其子網域），絕不可以用 `in` ——
+#    `evolutivelabs.slack.com` 靠 endswith(".slack.com") 命中就夠了。
+# 🔴 刻意不放進來的：
+#    line.me   —— LINE GIFT／LINE ショッピング 是真的商店，擋了會誤傷
+#    note.com  —— 日本的 note 有賣數位商品，不是純社群
+#    google.com / t.co / bit.ly —— 已經在 _SEARCH_SHORTLINK_HOSTS 裡
+# 加新網域之前先問：它有沒有可能是某個人真的要代購的商品頁？
+_NON_SHOP_HOSTS = (
+    "facebook.com", "instagram.com", "threads.net", "twitter.com", "x.com",
+    "slack.com", "discord.com", "notion.so", "github.com",
+    "youtube.com", "youtu.be", "tiktok.com", "pinterest.com",
+    "reddit.com", "linkedin.com",
+)
+
 # 本站自己
 _OWN_HOSTS = ("goyoutati.com", "myshopify.com")
 
@@ -158,6 +182,11 @@ _MSG_IMAGE = (
 _MSG_SEARCH = (
     "您貼的是搜尋結果或短網址，不是商品頁面。"
     "請點進您要購買的那一件商品，進入商品頁後再複製網址列上的連結給我們。"
+)
+_MSG_NON_SHOP = (
+    "您貼的是社群、通訊或影音平台的連結，不是購物網站的商品頁面。"
+    "請到商品所在的日本購物網站（Amazon JP、樂天、ZOZOTOWN、Yahoo 商店街等），"
+    "點進您要購買的那一件商品，再複製網址列上的連結給我們。"
 )
 _MSG_OWN = (
     "您貼的是本站自己的商品頁連結。"
@@ -251,6 +280,11 @@ def detect_invalid_link(url: str) -> str | None:
     for domain in _SEARCH_SHORTLINK_HOSTS:
         if _host_matches(host, domain):
             return _MSG_SEARCH
+
+    # ── 2b. 明顯不是商店（社群／通訊／協作／影音）──
+    for domain in _NON_SHOP_HOSTS:
+        if _host_matches(host, domain):
+            return _MSG_NON_SHOP
 
     # ── 1. 圖片直連 ──
     for domain in _IMAGE_HOSTS:
