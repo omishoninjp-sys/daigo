@@ -194,7 +194,7 @@ class ShopifyClient:
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
                                     seo_title="", seo_tags=None, in_stock=True, platform_id="",
-                                    created_via=""):
+                                    created_via="", seo_source=""):
         print(f"[Shopify] ▶ create_daigo_product build=GRAPHQL-PRODUCTSET-v2 | variants_in={len(variants) if variants else 0}")
         # ══════════════════════════════════════════════════════════════
         # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
@@ -392,6 +392,12 @@ class ShopifyClient:
             {"namespace": "daigo", "key": "source_url", "value": source_url, "type": "url"} if source_url else None,
             {"namespace": "daigo", "key": "created_via", "value": created_via,
              "type": "single_line_text_field"} if created_via else None,
+            # ★ seo_source："gpt" = 經 ChatGPT 產生，"fallback" = 降級（OpenAI 失敗或無金鑰）。
+            #   兩種都明講，不可以靠「沒有標記就是 gpt」推論 —— 這個欄位之前的舊商品
+            #   本來就沒有，那樣推論會把 1,300 多件舊資料全部誤判成 gpt。
+            #   同 created_via，用 metafield 不用 tag（tag 會出現在前台）。
+            {"namespace": "daigo", "key": "seo_source", "value": seo_source,
+             "type": "single_line_text_field"} if seo_source else None,
             {"namespace": "daigo", "key": "original_price_jpy", "value": str(original_price_jpy), "type": "number_integer"},
             {"namespace": "custom", "key": "link", "value": source_url, "type": "url"} if source_url else None,
             {"namespace": "daigo", "key": "platform", "value": src_id, "type": "single_line_text_field"} if src_id else None,

@@ -491,6 +491,7 @@ async def create_order(req: CreateOrderRequest):
         )
         seo_title = seo.get("title", "")
         seo_tags = seo.get("tags", [])
+        seo_source = seo.get("seo_source", "")
         result = await shopify.create_daigo_product(
             title=title, price_jpy=pricing["selling_price_jpy"],
             image_url=product.image_url, description=product.description,
@@ -498,7 +499,7 @@ async def create_order(req: CreateOrderRequest):
             brand=product.brand, extra_images=product.extra_images,
             variants=product.variants, image_base64=product.image_base64,
             extra_tags=["18+", "adult"] if product.is_adult else None,
-            seo_title=seo_title, seo_tags=seo_tags,
+            seo_title=seo_title, seo_tags=seo_tags, seo_source=seo_source,
             in_stock=product.in_stock,
             platform_id=getattr(product, "platform_id", ""),
             created_via="auto",
@@ -553,11 +554,12 @@ async def create_manual_order(req: ManualOrderRequest):
         )
         seo_title = seo.get("title", "")
         seo_tags = seo.get("tags", [])
+        seo_source = seo.get("seo_source", "")
         result = await shopify.create_daigo_product(
             title=req.title, price_jpy=manual_pricing["selling_price_jpy"],
             image_url=req.image_url, source_url=req.source_url,
             original_price_jpy=original_jpy,
-            seo_title=seo_title, seo_tags=seo_tags,
+            seo_title=seo_title, seo_tags=seo_tags, seo_source=seo_source,
             # ★ 手動填寫的商品 source_url 常常是首頁或不完整，但商品是真的。
             #   任何「用 source_url 判斷商品品質」的掃描都要先看這個欄位排除掉。
             created_via="manual",

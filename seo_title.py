@@ -11,6 +11,14 @@ from urllib.parse import urlparse
 
 from config import OPENAI_API_KEY, OPENAI_MODEL
 
+# ── SEO 標題的產生來源。寫進 metafield daigo.seo_source ────────────────
+# ★ 用 metafield 不用 tag：tag 會出現在前台。
+# ★ 兩種都明確標記。2026-08-28 16:52 UTC OPENAI_API_KEY 失效後，
+#   有 166 件商品是降級標題（保留日文原名、沒有繁中語意 tag），
+#   當時完全沒有痕跡可查，只能靠「核心 tag 數 <= 2」的統計特徵反推。
+SEO_SOURCE_GPT = "gpt"
+SEO_SOURCE_FALLBACK = "fallback"
+
 
 # 平台名稱對照表（給標題用）
 PLATFORM_DISPLAY_NAMES = {
@@ -212,7 +220,10 @@ def _build_title_from_gpt(gpt: dict, original_title: str, platform_name: str) ->
     print(f"[SEO] 最終標題: {title}")
     print(f"[SEO] Tags: {unique_tags}")
 
-    return {"title": title, "tags": unique_tags}
+    # ★ seo_source 兩條路徑都要明講，不可以只標降級那條。
+    #   「沒有標記就是 GPT 版」的推論會把這個欄位之前的舊商品全部誤判 ——
+    #   跟 daigo.created_via 是同一個道理（CLAUDE.md 已記載）。
+    return {"title": title, "tags": unique_tags, "seo_source": SEO_SOURCE_GPT}
 
 
 def _build_fallback_title(original_title: str, brand: str, platform_name: str) -> dict:
@@ -238,4 +249,5 @@ def _build_fallback_title(original_title: str, brand: str, platform_name: str) -
     if platform_name and platform_name not in tags:
         tags.append(platform_name)
 
-    return {"title": title, "tags": tags}
+    print(f"[SEO] ⚠️ 降級標題（未經 GPT）: {title}")
+    return {"title": title, "tags": tags, "seo_source": SEO_SOURCE_FALLBACK}
