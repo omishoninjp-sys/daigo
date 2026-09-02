@@ -25,6 +25,7 @@ from pricing import calculate_selling_price, get_jpy_to_twd_rate
 from shopify_client import ShopifyClient
 from seo_title import generate_seo_title
 import scrape_monitor
+import scrape_digest
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
@@ -135,13 +136,18 @@ async def lifespan(app: FastAPI):
     # 啟動時建立背景清理任務
     task = asyncio.create_task(_auto_cleanup_loop())
     print("[Startup] ✅ 自動清理背景任務已啟動")
+    # ★ 另開一支，不動 _auto_cleanup_loop（它裡面有退避邏輯）。
+    #   DIGEST_ENABLED=false 時 daily_digest_loop 自己會立刻 return。
+    digest_task = asyncio.create_task(scrape_digest.daily_digest_loop())
     yield
     # 關閉時取消任務
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    for t_ in (task, digest_task):
+        t_.cancel()
+    for t_ in (task, digest_task):
+        try:
+            await t_
+        except asyncio.CancelledError:
+            pass
 app = FastAPI(title="GOYOUTATI DAIGO API", version="3.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
@@ -798,41 +804,16 @@ SCRAPE_LOG_MAX_DAYS = 30       # 一天一檔，往回撈太多天沒意義也�
 
 # 樣本要給的欄位。error_brief 已經在寫入時截到 200 字、不含 traceback，
 # url_path 也已經去掉 query string，所以整筆直接給沒有外洩問題。
-_SAMPLE_FIELDS = ("ts", "domain", "platform_id", "source",
-                  "http_status", "elapsed_ms", "error_brief", "url_path")
+# ★ 樣本欄位與抽法搬到 scrape_digest（摘要信要用同一套）。
+#   這裡留別名而不是直接刪：外面可能還有一次性腳本 import 它們。
+_SAMPLE_FIELDS = scrape_digest._SAMPLE_FIELDS
+_pick_samples = scrape_digest.pick_samples
 
 
 def _scrape_log_days(days: int) -> list[str]:
     if days < 1:
         raise HTTPException(status_code=400, detail="days 至少為 1")
     return scrape_monitor.recent_days(min(days, SCRAPE_LOG_MAX_DAYS))
-
-
-def _pick_samples(rows: list, limit: int = 3) -> list:
-    """
-    每種 failure_kind 抽幾筆看細節。
-
-    優先抽不同網域：同一個壞掉的網域連刷 3 筆，看起來像 3 個證據，其實只有 1 個，
-    判斷不出分類準不準。網域不夠才拿同網域的補滿。
-    """
-    picked, seen_domain, seen_id = [], set(), set()
-    for r in rows:
-        d = r.get("domain")
-        if d in seen_domain:
-            continue
-        seen_domain.add(d)
-        seen_id.add(id(r))
-        picked.append(r)
-        if len(picked) >= limit:
-            break
-    if len(picked) < limit:
-        for r in rows:
-            if id(r) in seen_id:
-                continue
-            picked.append(r)
-            if len(picked) >= limit:
-                break
-    return [{k: r.get(k) for k in _SAMPLE_FIELDS} for r in picked]
 
 
 @app.get("/api/admin/scrape-log", dependencies=[Depends(verify_admin_key)])
@@ -875,54 +856,10 @@ async def summarize_scrape_log(days: int = 2):
     給的東西：總筆數、成功率、各 failure_kind 筆數、各網域失敗次數排序，
     以及每種 failure_kind 抽 3 筆樣本（優先不同網域）。
     """
-    day_list = _scrape_log_days(days)
-
-    by_day: dict[str, dict] = {}
-    entries: list[dict] = []
-    for day in day_list:
-        rows = scrape_monitor.read_day(day)
-        ok_n = sum(1 for r in rows if r.get("ok"))
-        by_day[day] = {"total": len(rows), "ok": ok_n, "failed": len(rows) - ok_n}
-        entries.extend(rows)
-
-    total = len(entries)
-    ok_count = sum(1 for r in entries if r.get("ok"))
-    failed = total - ok_count
-
-    kinds: dict[str, int] = {}
-    by_domain: dict[str, dict] = {}
-    failures_by_kind: dict[str, list] = {}
-    for r in entries:
-        dom = r.get("domain") or "(unknown)"
-        slot = by_domain.setdefault(dom, {"domain": dom, "total": 0, "failed": 0, "kinds": {}})
-        slot["total"] += 1
-        if r.get("ok"):
-            continue
-        kind = r.get("failure_kind") or "other"
-        kinds[kind] = kinds.get(kind, 0) + 1
-        slot["failed"] += 1
-        slot["kinds"][kind] = slot["kinds"].get(kind, 0) + 1
-        failures_by_kind.setdefault(kind, []).append(r)
-
-    # 只列有失敗的網域（沒失敗的網域不需要決定任何事），失敗次數多的排前面
-    domains = sorted(
-        (d for d in by_domain.values() if d["failed"] > 0),
-        key=lambda d: (-d["failed"], -d["total"], d["domain"]),
-    )
-
-    return {
-        "days": day_list,
-        "log_dir": scrape_monitor.log_dir(),
-        "by_day": by_day,
-        "total": total,
-        "ok": ok_count,
-        "failed": failed,
-        "success_rate_pct": round(ok_count / total * 100, 1) if total else None,
-        "failure_kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
-        "domains_by_failure": domains,
-        "samples": {k: _pick_samples(v) for k, v in
-                    sorted(failures_by_kind.items(), key=lambda kv: -len(kv[1]))},
-    }
+    # ★ 計算搬到 scrape_digest.build_summary（每日摘要信要重用同一份聚合）。
+    #   回傳值一字不改 —— verify_scrape_log_api.py 的 48 項全部斷言在這個 dict 上。
+    #   _scrape_log_days 留在這裡：它 raise HTTPException，那是 HTTP 層的事。
+    return scrape_digest.build_summary(_scrape_log_days(days))
 
 
 if __name__ == "__main__":

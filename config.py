@@ -62,3 +62,13 @@ SCRAPE_QUEUE_TIMEOUT = int(os.getenv("SCRAPE_QUEUE_TIMEOUT", "90"))     # 排隊
 # 商品自動刪除（天數，0 = 停用）
 DAIGO_AUTO_DELETE_DAYS = int(os.getenv("DAIGO_AUTO_DELETE_DAYS", "30"))
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://goyoutati.com,https://goyoutati.myshopify.com").split(",")
+# 每日爬取摘要信（spec-scrape-monitoring.md 第四、五節）
+# ★ DIGEST_ENABLED 預設 false —— 程式部署了不會突然開始寄信，
+#   確認過信件格式再到 Zeabur 打開。
+DIGEST_ENABLED = os.getenv("DIGEST_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+DIGEST_TO = os.getenv("DIGEST_TO", "omishoninjp@gmail.com")
+DIGEST_FROM = os.getenv("DIGEST_FROM", "")      # Resend 要求寄件網域已驗證
+DIGEST_HOUR_UTC = int(os.getenv("DIGEST_HOUR_UTC", "1"))   # 1 UTC = 台灣早上 9 點
+DIGEST_STREAK_DAYS = int(os.getenv("DIGEST_STREAK_DAYS", "7"))  # 連續失敗往回看幾天
+# 寄信用 Resend，不用 Gmail SMTP（規格第五節：要應用程式密碼、容易被判垃圾信）
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
