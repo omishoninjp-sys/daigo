@@ -38,6 +38,32 @@ def _extract_product_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+# ── 爬取監控埋點（fail-safe：監控壞掉絕不影響爬取）──────────────────
+# ★ 2026-09-02 補。原本三條失敗路徑只 print 就 return，record() 收到的是
+#   一個空的 ProductInfo（error=None），於是 JSONL 只留下
+#   failure_kind='other'、error_brief='' 的空紀錄 —— 三條分辨不出來，
+#   而它們的處置完全不同：
+#     403        → 機房 IP 被擋，要住宅代理
+#     items 為空  → 商品下架或 API 改版
+#     番號解析失敗 → 客人貼的 URL 格式不對
+def _note_error(error, where=""):
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
+    except Exception:
+        pass
+
+
+def _note_http(status, body="", final_url=""):
+    """★ 少了這個，403/429 會被 classify_failure 分成 other 而不是 blocked ——
+    blocked 這個分類存在的目的就是回答「要不要買住宅代理」。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body, final_url)
+    except Exception:
+        pass
+
+
 class GUMixin:
 
     async def _scrape_gu(self, url: str) -> ProductInfo:
@@ -46,6 +72,7 @@ class GUMixin:
         product_id = _extract_product_id(url)
         if not product_id:
             print(f"[GU] ❌ 無法解析商品番號: {url}")
+            _note_error("商品番號解析失敗（URL 不含 /products/XXXXXX-000）", "GU")
             return product
 
         # URL 中的 colorDisplayCode（決定主圖顏色）
@@ -64,14 +91,17 @@ class GUMixin:
         ) as client:
             resp = await client.get(api_url)
 
+        _note_http(resp.status_code, resp.text[:500], str(resp.url))
         if resp.status_code != 200:
             print(f"[GU] ❌ API 失敗 ({resp.status_code}): {api_url}")
+            _note_error(f"內部 API HTTP {resp.status_code}", "GU")
             return product
 
         data = resp.json()
         items = data.get("result", {}).get("items", [])
         if not items:
             print(f"[GU] ❌ items 為空: {product_id}")
+            _note_error(f"API 回 200 但 result.items 為空（{product_id} 下架或 API 改版）", "GU")
             return product
 
         item = items[0]

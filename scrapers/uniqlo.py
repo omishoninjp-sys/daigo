@@ -11,6 +11,28 @@ from bs4 import BeautifulSoup
 from scrapers.base import ProductInfo, normalize_price
 
 
+# ── 爬取監控埋點（fail-safe：監控壞掉絕不影響爬取）──────────────────
+# ★ 2026-09-02 補。九條失敗路徑一條都沒有交給監控，record() 只會留下
+#   error_brief='' 的空紀錄。403（機房 IP 被擋）與 404（商品下架）
+#   的處置完全不同，分不出來等於沒記。
+def _note_error(error, where=""):
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
+    except Exception:
+        pass
+
+
+def _note_http(status, body="", final_url=""):
+    """★ 少了這個，403/429 會被 classify_failure 分成 other 而不是 blocked ——
+    blocked 這個分類存在的目的就是回答「要不要買住宅代理」。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body, final_url)
+    except Exception:
+        pass
+
+
 class UniqloMixin:
 
     async def _scrape_uniqlo(self, url: str) -> ProductInfo:
@@ -19,6 +41,7 @@ class UniqloMixin:
         m = re.search(r'/products/(E?\d[\w-]+)', url)
         if not m:
             print(f"[Uniqlo] ❌ 無法從 URL 提取商品代碼: {url}")
+            _note_error("商品代碼解析失敗（URL 格式不符）", "Uniqlo")
             return product
 
         product_code = m.group(1)
@@ -57,6 +80,7 @@ class UniqloMixin:
                 self._parse_uniqlo_html(html_text, product_id, product)
             except Exception as e:
                 print(f"[Uniqlo] HTML 抓取錯誤: {type(e).__name__}: {e}")
+                _note_error(e, "Uniqlo/HTML")
 
             embedded_found = False
             if html_text:
@@ -90,6 +114,7 @@ class UniqloMixin:
                     print(f"[Uniqlo] Step 3: API {api_url[:90]}...")
                     resp = await client.get(api_url, headers=api_headers, cookies=cookies)
                     print(f"[Uniqlo] API response: {resp.status_code}, {len(resp.text)} bytes")
+                    _note_http(resp.status_code, resp.text[:500], str(resp.url))
 
                     if resp.status_code == 200:
                         api_data = resp.json()
@@ -100,19 +125,28 @@ class UniqloMixin:
                             return product
                         elif product.price_jpy:
                             print(f"[Uniqlo] API 取得價格 ¥{product.price_jpy:,} 但無 variants，繼續 fallback")
+                            # ★ 降級繼續（不是失敗）：後面用 HTML 湊變體，
+                            #   即使最後成功，也要留下「變體不是 API 給的」這件事。
+                            _note_error("API 有價格但無 variants，改用 HTML 建構變體",
+                                        "Uniqlo")
 
                             break
                         else:
                             print(f"[Uniqlo] API 回傳但未找到價格")
+                            _note_error("API 回 200 但解析不出價格（疑似 API 結構改版）",
+                                        "Uniqlo")
                     elif resp.status_code == 403:
                         print(f"[Uniqlo] API 403 Forbidden")
+                        _note_error("API 403 Forbidden（疑似機房 IP 被擋）", "Uniqlo")
                     elif resp.status_code == 404:
                         print(f"[Uniqlo] API 404")
+                        _note_error("API 404（商品下架或代碼錯誤）", "Uniqlo")
                     else:
                         print(f"[Uniqlo] API {resp.status_code}: {resp.text[:200]}")
 
                 except Exception as e:
                     print(f"[Uniqlo] API 錯誤: {type(e).__name__}: {e}")
+                    _note_error(e, "Uniqlo/API")
 
             if product.title and not product.variants:
                 print(f"[Uniqlo] Step 4: 用 HTML 資料建構基本 variants")
@@ -122,6 +156,7 @@ class UniqloMixin:
             print(f"[Uniqlo] 最終結果: {product.title[:40]} / ¥{product.price_jpy or '?'} / {len(product.variants)} variants")
         else:
             print(f"[Uniqlo] ⚠️ 未取得資料")
+            _note_error("四個步驟（內嵌 JSON / API / HTML fallback）全部落空", "Uniqlo")
 
         return product
 

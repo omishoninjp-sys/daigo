@@ -16,6 +16,28 @@ from config import SCRAPE_TIMEOUT, USER_AGENT
 from scrapers.base import ProductInfo
 
 
+# ── 爬取監控埋點（fail-safe：監控壞掉絕不影響爬取）──────────────────
+# ★ 2026-09-02 補。Amazon 佔營收 10.6%，但七條失敗路徑一條都沒有交給監控，
+#   其中 A2（URL 不含 ASIN）與 A5（被導向登入頁）**連 print 都沒有**，
+#   連 Zeabur log 都查不到。record() 只會留下 error_brief='' 的空紀錄。
+def _note_error(error, where=""):
+    try:
+        import scrape_monitor
+        scrape_monitor.note_error(error, where)
+    except Exception:
+        pass
+
+
+def _note_http(status, body="", final_url=""):
+    """★ 少了這個，403/429 會被 classify_failure 分成 other 而不是 blocked ——
+    blocked 這個分類存在的目的就是回答「要不要買住宅代理」。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_http(status, body, final_url)
+    except Exception:
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════════
 # brand 抽取
 # ══════════════════════════════════════════════════════════════════════
@@ -118,10 +140,20 @@ class AmazonMixin:
                 else:
                     url = str(resp.url)
                     print(f"[Amazon] 短連結展開 (無法提取 ASIN): {url}")
+                    # ★ 這裡不是失敗，是**降級繼續**：拿轉址後的 url 硬跑下去。
+                    #   後面所有結果都建立在這個猜測上，所以即使最後成功，
+                    #   紀錄裡也要留下「這筆的 url 是猜的」。
+                    _note_error(f"短連結展開後抽不到 ASIN，改用轉址後網址繼續: {url[:80]}",
+                                "Amazon")
                 product.source_url = url
 
             am = re.search(r'/(?:dp|gp/product|gp/aw/d|ASIN)/([A-Z0-9]{10})', url)
             if not am:
+                # ★ 原本完全靜默（連 print 都沒有）——
+                #   客人貼搜尋頁或分類頁時就走這裡，而 log 上一片空白。
+                print(f"[Amazon] ❌ URL 不含 ASIN: {url[:90]}")
+                _note_error("URL 不含 ASIN（/dp/、/gp/product/、/gp/aw/d/、/ASIN/ 都沒有），"
+                            "可能是搜尋頁或分類頁", "Amazon")
                 return product
 
             headers = {
@@ -186,17 +218,26 @@ class AmazonMixin:
                                     pass
                                 break
                     resp = await client.get(location, headers=headers)
+                _note_http(resp.status_code, resp.text[:500], str(resp.url))
                 if resp.status_code != 200:
                     print(f"[Amazon] HTTP {resp.status_code}")
+                    _note_error(f"HTTP {resp.status_code}", "Amazon")
                     return product
                 if "captcha" in str(resp.url).lower():
+                    # ★ 這裡看的是**最終網址**含不含 captcha，不是頁面內容 ——
+                    #   CLAUDE.md 記載 "captcha" in html 會命中每一家 Shopify 商店。
                     print(f"[Amazon] CAPTCHA 偵測到")
+                    _note_error(f"被導向 CAPTCHA 頁: {str(resp.url)[:80]}", "Amazon")
                     return product
                 html = resp.text
 
             soup = BeautifulSoup(html, "html.parser")
 
             if soup.find("form", {"name": "signIn"}) or soup.select_one("#ap_email"):
+                # ★ 原本完全靜默。成人商品或地區限制會被導到登入頁。
+                print(f"[Amazon] ❌ 被導向登入頁")
+                _note_error("被導向登入頁（signIn 表單或 #ap_email）—— "
+                            "成人商品或地區限制", "Amazon")
                 return product
 
             el = soup.select_one("#productTitle")
@@ -277,9 +318,17 @@ class AmazonMixin:
             #   方法列出所有規格，但只有單一價可用，導致非預設規格被標成預設規格的價。
             #   代購本來就是貼一個網址＝要那一個 ASIN，故移除整段多規格抓取。）
 
-            print(f"[Amazon] ✅ {product.title[:40]} / ¥{product.price_jpy:,}" if product.price_jpy else f"[Amazon] ⚠️ 價格未找到")
+            if product.price_jpy:
+                print(f"[Amazon] ✅ {product.title[:40]} / ¥{product.price_jpy:,}")
+            else:
+                print(f"[Amazon] ⚠️ 價格未找到")
+                # ★ 數字本身就是診斷資訊：全部落空代表 Amazon 改版，
+                #   而不是某一個選擇器失效。
+                _note_error("價格未找到（13 個 CSS 選擇器 + 3 個 regex 全落空，"
+                            "疑似頁面改版）", "Amazon")
 
         except Exception as e:
             print(f"[Amazon] ❌ 錯誤: {e}")
+            _note_error(e, "Amazon")
 
         return product
