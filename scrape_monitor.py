@@ -297,6 +297,40 @@ def _failure_brief(error, product, state) -> str:
             f"price={'有' if price else '無'}, image={'有' if img else '無'}）")[:200]
 
 
+def _safe_price(product):
+    """
+    取 product.price_jpy 轉 int；取不到或不合理一律回 None。
+
+    ★ 取值**連同 getattr 一起**包在 try 裡。`getattr(o, k, default)` 的預設值
+      只吃 AttributeError —— 屬性是 property 且內部拋別的例外時會直接穿透，
+      被 record() 的外層 except 接住，**整筆紀錄就沒了**。
+      而 timeout／例外路徑正是最需要紀錄的時候，不可以為了兩個內容欄位
+      把整筆賠掉。
+    ★ 不寫 0：0 與「沒有」意義不同，混在一起之後
+      「同網域商品價格全部相同」那類掃描會被一堆 0 污染。
+    """
+    try:
+        v = getattr(product, "price_jpy", None)
+        if v is None or isinstance(v, bool):
+            return None
+        n = int(v)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _safe_brand(product):
+    """取 product.brand 轉字串；空值回 None。限長避免異常長的值撐大 JSONL。"""
+    try:
+        v = getattr(product, "brand", None)
+        if not v or not isinstance(v, str):
+            return None
+        s = v.replace(chr(10), " ").replace(chr(13), " ").strip()
+        return s[:80] or None
+    except Exception:
+        return None
+
+
 def record(url: str, product=None, error=None, elapsed_ms=None,
            timed_out: bool = False, platform_id: str = "") -> None:
     """
@@ -332,6 +366,17 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
                 gone_hint=bool(state.get("gone_hint")),
                 got_page=got_page,
             ),
+            # ── 抓到的內容本身（規格第一節只記「爬取過程」，記不到「值對不對」）
+            # ★ 2026-09-02 加。今天三個實際損失（brand 污染 67% 持續三個月、
+            #   取價抓到代引手数料、metafield 原價是垃圾值）全部是 ok=True 的
+            #   成功爬取，五個 failure_kind 一個都涵蓋不到，而這份 log 當時
+            #   連價格都沒記 —— 所有調查只能繞道 Shopify Admin API。
+            #   有了這兩欄，「同一網域的商品價格全部相同」這類掃描才做得起來
+            #   （suqqu 9 件全 ¥550 就是這樣挖出來的）。
+            # ★ timeout 與例外路徑沒有 product，這時兩欄寫 null ——
+            #   **不可以因為取不到就整筆不寫**，那正是最需要紀錄的時候。
+            "price_jpy": _safe_price(product),
+            "brand": _safe_brand(product),
             "http_status": http_status,
             "elapsed_ms": int(elapsed_ms) if elapsed_ms is not None else None,
             "error_brief": "" if ok else _failure_brief(error, product, state),

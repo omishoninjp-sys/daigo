@@ -140,9 +140,11 @@ def test_write_and_fields():
           "?" not in r["url_path"] and "SECRET123" not in json.dumps(r), r["url_path"])
     check("沒有記 IP/session/身分欄位",
           not any(k in r for k in ("ip", "session", "user", "customer")))
-    check("欄位齊全（規格第一節）",
+    check("欄位齊全（規格第一節 + 內容欄位）",
           set(r) == {"ts", "domain", "platform_id", "source", "ok", "failure_kind",
-                     "http_status", "elapsed_ms", "error_brief", "url_path"},
+                     "http_status", "elapsed_ms", "error_brief", "url_path",
+                     # 2026-09-02 加：規格第一節只記「爬取過程」，記不到「值對不對」
+                     "price_jpy", "brand"},
           str(sorted(r)))
 
     # 失敗筆：error_brief 不可含 traceback
@@ -159,6 +161,122 @@ def test_write_and_fields():
     check("error_brief 截到 200 字", len(brief) <= 200, f"{len(brief)} 字")
     check("error_brief 不含換行（不是整份 traceback）", "\n" not in brief)
     check("error_brief 不含堆疊框", 'File "' not in brief, brief[:60])
+
+
+# ─────────────────────────────────────────────────────────────────────
+def test_content_fields():
+    """
+    price_jpy / brand 兩個內容欄位（2026-09-02 加）。
+
+    ★ 為什麼要記內容：2026-09-02 查到的三個實際損失（Amazon brand 污染 67%
+      持續三個月、generic 取價抓到代引手数料、metafield 原價是垃圾值）
+      **全部是 ok=True 的成功爬取**，五個 failure_kind 一個都涵蓋不到；
+      而這份 log 當時連價格都沒記，所有調查只能繞道 Shopify Admin API。
+      有了這兩欄，「同一網域的商品價格全部相同」這類掃描才做得起來
+      （suqqu 9 件全 ¥550 就是這樣挖出來的）。
+
+    🔴 最容易被日後重構改掉的是「product=None 時整筆仍要寫」。
+      timeout 與例外路徑沒有 product，那正是最需要紀錄的時候 ——
+      若因為取不到值就 return，逾時與例外會從 log 裡整批消失，
+      失敗率統計反而憑空變好看。下面第 1 組就是釘這件事。
+    """
+    print("\n【5】內容欄位 price_jpy / brand")
+    url = "https://item.rakuten.co.jp/shop/code/"
+
+    # ── 1. product=None（timeout / 例外路徑）：兩欄 null，整筆仍要完整寫出
+    before = len(sm.read_day())
+    sm.start(url)
+    sm.note_platform("rakuten")
+    sm.record(url, error=TimeoutError("driver timeout after 60s"),
+              elapsed_ms=60000, timed_out=True)
+    rows = sm.read_day()
+    check("★ product=None 仍然寫出一整筆（不可以因為取不到值就略過）",
+          len(rows) == before + 1, f"{before} -> {len(rows)}")
+    if len(rows) > before:
+        r = rows[-1]
+        check("product=None 時 price_jpy 是 null", r["price_jpy"] is None,
+              repr(r["price_jpy"]))
+        check("product=None 時 brand 是 null", r["brand"] is None, repr(r["brand"]))
+        check("其餘欄位照常（failure_kind 仍分類得出來）",
+              r["failure_kind"] == "timeout", r["failure_kind"])
+        check("其餘欄位照常（platform_id 靠 note_platform 拿得到）",
+              r["platform_id"] == "rakuten", r["platform_id"])
+        check("欄位數與成功筆一致（不是缺欄位）", len(r) == 12, str(len(r)))
+
+    # ── 2. 正常路徑：兩欄有值
+    p = _FakeProduct(True)
+    p.price_jpy = 18800
+    p.brand = "京セラ(Kyocera)"
+    sm.start(url)
+    sm.record(url, product=p, elapsed_ms=100)
+    r = sm.read_day()[-1]
+    check("正常路徑 price_jpy 有值", r["price_jpy"] == 18800, repr(r["price_jpy"]))
+    check("正常路徑 brand 有值", r["brand"] == "京セラ(Kyocera)", repr(r["brand"]))
+
+    # ── 3. price_jpy <= 0 一律 null
+    #    0 與「沒有」意義不同，寫成 0 會讓「同網域同價」那類掃描被一堆 0 污染
+    for bad_price, label in ((0, "0"), (-1, "負數"), (None, "None"),
+                             ("abc", "非數字"), (True, "布林 True")):
+        p = _FakeProduct(True)
+        p.price_jpy = bad_price
+        sm.start(url)
+        sm.record(url, product=p, elapsed_ms=1)
+        got = sm.read_day()[-1]["price_jpy"]
+        check(f"price_jpy = {label} -> null（不寫 0）", got is None, repr(got))
+
+    p = _FakeProduct(True)
+    p.price_jpy = 1
+    sm.start(url)
+    sm.record(url, product=p, elapsed_ms=1)
+    check("price_jpy = 1 要保留（合法價格，不是假值）",
+          sm.read_day()[-1]["price_jpy"] == 1)
+
+    # ── 4. brand 的各種異常輸入
+    cases = [
+        ("", None, "空字串"),
+        ("   ", None, "只有空白"),
+        (None, None, "None"),
+        (123, None, "非字串"),
+        ("  Panasonic  ", "Panasonic", "前後空白要 strip"),
+        ("京セラ" + chr(10) + "(Kyocera)", "京セラ (Kyocera)", "換行壓成空白"),
+        ("Brother" + chr(13) + "Japan", "Brother Japan", "CR 壓成空白"),
+    ]
+    for raw, expect, label in cases:
+        p = _FakeProduct(True)
+        p.brand = raw
+        sm.start(url)
+        sm.record(url, product=p, elapsed_ms=1)
+        got = sm.read_day()[-1]["brand"]
+        check(f"brand {label} -> {expect!r}", got == expect, repr(got))
+
+    p = _FakeProduct(True)
+    p.brand = "A" * 200
+    sm.start(url)
+    sm.record(url, product=p, elapsed_ms=1)
+    got = sm.read_day()[-1]["brand"]
+    check("brand 超長要截斷（避免撐大 JSONL）",
+          got is not None and len(got) == 80, f"{len(got) if got else 0} 字")
+
+    # ── 5. 取值時炸掉也不可以害整筆寫不出來（fail-safe）
+    class Exploding:
+        is_valid = True
+        title = "x"
+        platform_id = ""
+
+        @property
+        def price_jpy(self):
+            raise RuntimeError("boom")
+
+        @property
+        def brand(self):
+            raise RuntimeError("boom")
+
+    before = len(sm.read_day())
+    sm.start(url)
+    sm.record(url, product=Exploding(), elapsed_ms=1)
+    check("product 屬性會炸時仍寫得出紀錄（fail-safe）",
+          len(sm.read_day()) == before + 1,
+          f"{before} -> {len(sm.read_day())}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -219,6 +337,7 @@ async def main():
     test_classify_table()
     await test_real_urls()
     test_write_and_fields()
+    test_content_fields()
     await test_failsafe()
 
     print("\n" + "=" * 74)
