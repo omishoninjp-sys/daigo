@@ -144,7 +144,10 @@ def test_write_and_fields():
           set(r) == {"ts", "domain", "platform_id", "source", "ok", "failure_kind",
                      "http_status", "elapsed_ms", "error_brief", "url_path",
                      # 2026-09-02 加：規格第一節只記「爬取過程」，記不到「值對不對」
-                     "price_jpy", "brand"},
+                     "price_jpy", "brand",
+                     # 2026-09-02 加：error_brief 在 ok=True 時被清空，
+                     # 成功路徑上的 note_error（退路／降級）全被丟掉
+                     "warnings"},
           str(sorted(r)))
 
     # 失敗筆：error_brief 不可含 traceback
@@ -201,7 +204,7 @@ def test_content_fields():
               r["failure_kind"] == "timeout", r["failure_kind"])
         check("其餘欄位照常（platform_id 靠 note_platform 拿得到）",
               r["platform_id"] == "rakuten", r["platform_id"])
-        check("欄位數與成功筆一致（不是缺欄位）", len(r) == 12, str(len(r)))
+        check("欄位數與成功筆一致（不是缺欄位）", len(r) == 13, str(len(r)))
 
     # ── 2. 正常路徑：兩欄有值
     p = _FakeProduct(True)

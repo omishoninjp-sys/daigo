@@ -297,6 +297,15 @@ def _failure_brief(error, product, state) -> str:
             f"price={'有' if price else '無'}, image={'有' if img else '無'}）")[:200]
 
 
+def _warnings_brief(state) -> str:
+    """成功筆的警告摘要：Source 退路、降級、圖片沒抓到之類。取不到回空字串。"""
+    try:
+        noted = " | ".join(state.get("errors") or [])
+        return noted.replace(chr(10), " ").strip()[:200]
+    except Exception:
+        return ""
+
+
 def _safe_price(product):
     """
     取 product.price_jpy 轉 int；取不到或不合理一律回 None。
@@ -380,6 +389,25 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
             "http_status": http_status,
             "elapsed_ms": int(elapsed_ms) if elapsed_ms is not None else None,
             "error_brief": "" if ok else _failure_brief(error, product, state),
+            # ── 成功但走得很勉強：退路、降級、圖片沒抓到之類 ──────────────
+            # ★ 2026-09-02 加。error_brief 在 ok=True 時被強制清空，於是
+            #   **成功路徑上的 note_error 全部被丟掉** —— 掃過 24 個呼叫點，
+            #   有 14 個命中後最終仍可能成功：
+            #     platform.py:91   每個 Source 失敗都 note_error，只要後面
+            #                      任一個成功，前面全部消失
+            #     uniqlo.py        四層 fallback，前三層的原因（含 API 403
+            #                      機房 IP 被擋）只要第四層成功就查不到
+            #     amazon.py:146    短連結抽不到 ASIN，改用轉址後網址繼續跑
+            #     jsonld.py:270-302 圖片 base64 沒抓到，但商品本身有效
+            #   MUJI 那件事（圖片機制靜默消失六週）就是這一類。
+            #
+            # ★ 只在 ok=True 時寫，與 error_brief **互斥** ——
+            #   兩者同一份 state["errors"]，都寫會讓同一句話出現兩次。
+            #   警告只在成功筆有意義：失敗筆該看的是 error_brief。
+            # ★ 限長 200 字，比照 error_brief。note_error 的 del errs[:-3]
+            #   已經有天然上限（最多 3 條），限長是第二道。
+            #   這是給人看的診斷摘要，不是完整紀錄。
+            "warnings": _warnings_brief(state) if ok else "",
             "url_path": _url_path(url),
         }
 
