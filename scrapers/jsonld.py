@@ -23,7 +23,8 @@ from urllib.parse import urlparse
 import httpx
 
 from scrapers.base import ProductInfo
-from scrapers.platform import Platform, Source
+from scrapers.platform import (Platform, Source, net_error_brief,
+                              http_fail_brief, missing_method_brief)
 
 try:
     from config import PROXY_URL
@@ -229,9 +230,13 @@ class JsonLdHttpxSource(Source):
                     return resp.text
                 if resp.status_code in (401, 403):
                     print(f"[{self.tag}] ⚠️ 被擋（可能機房 IP）；有設 PROXY_URL 會自動走 proxy")
+                # ★ return None 上層的 except 攔不到，不自己 note 就永遠沒人知道。
+                _note_error(http_fail_brief(resp.status_code, resp.text), self.tag)
                 return None
         except Exception as e:
             print(f"[{self.tag}] httpx 錯誤: {type(e).__name__}: {e}")
+            # ★ MUJI 走的就是這條：Akamai 依 TLS 指紋擋，httpx 看到的是 ReadTimeout。
+            _note_error(net_error_brief(e), f"{self.tag}/httpx")
             return None
 
 
@@ -316,11 +321,15 @@ class JsonLdSeleniumSource(Source):
     async def get(self, url, ref, engine):
         fetch = getattr(engine, "_fetch_with_selenium", None)
         if fetch is None:
+            # ★ 這一類最危險：整支 Source 靜默跳過，一句話都沒有。
+            _note_error(missing_method_brief("_fetch_with_selenium",
+                                             "Selenium 退路"), self.tag)
             return None
         try:
             html = fetch(url)  # 同步；引擎內有 _driver_lock，配合請求佇列序列化
         except Exception as e:
             print(f"[{self.tag}] Selenium 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), f"{self.tag}/Selenium")
             return None
         if not html:
             return None

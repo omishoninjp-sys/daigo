@@ -20,7 +20,8 @@ import re
 from urllib.parse import urlparse
 
 from scrapers.base import ProductInfo
-from scrapers.platform import Platform, Source
+from scrapers.platform import (Platform, Source, _note_error,
+                              net_error_brief, missing_method_brief)
 from scrapers.rakuten_api import find_by_code, search_items
 
 
@@ -70,6 +71,11 @@ class AmiamiUcSource(Source):
     async def get(self, url, ref, engine):
         fn = getattr(engine, "_amiami_scrape_jp", None)
         if fn is None:
+            # ★ AmiamiMixin 是**刻意保留在引擎裡**專門給這條退路用的
+            #   （見 scrapers/__init__.py 的註解）。哪天有人「清理死碼」把它拿掉，
+            #   樂天 API 查無的商品就會全部靜默失敗 —— 這行是唯一的警報。
+            _note_error(missing_method_brief("_amiami_scrape_jp",
+                                             "amiami.jp 直爬退路"), "Amiami")
             return None
         clean = _amiami_clean_url(url)
         print(f"[Amiami] ↩️ 樂天查無，改用 amiami.jp 直爬 fallback")
@@ -78,6 +84,7 @@ class AmiamiUcSource(Source):
             await fn(clean, product)
         except Exception as e:
             print(f"[Amiami] UC fallback 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "Amiami/UC")
             return None
         if product.is_valid:
             return product

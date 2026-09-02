@@ -51,7 +51,9 @@ from bs4 import BeautifulSoup
 from config import PROXY_URL
 from scrapers.base import ProductInfo
 from scrapers.jsonld import parse_jsonld_product
-from scrapers.platform import Platform, Source
+from scrapers.platform import (Platform, Source, _note_error,
+                              net_error_brief, http_fail_brief,
+                              missing_method_brief)
 from scrapers.yahoo_api import search_items as _api_search, has_credentials as _api_ready
 
 
@@ -505,9 +507,11 @@ class YahooStoreHttpxSource(Source):
                     return resp.text
                 if resp.status_code in (401, 403, 429):
                     print("[YahooStore] ⚠️ 被擋（可能機房 IP）；有設 PROXY_URL 會自動走 proxy")
+                _note_error(http_fail_brief(resp.status_code, resp.text), "YahooStore")
                 return None
         except Exception as e:
             print(f"[YahooStore] httpx 錯誤: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "YahooStore/httpx")
             return None
 
 
@@ -523,12 +527,16 @@ class YahooStoreApiSource(Source):
             return None
         if not _api_ready():
             print("[YahooStore] ⏭️ 未設 YAHOO_APP_ID，跳過官方 API")
+            # ★ 設定缺失會讓這支 Source 永久空轉，而它是 httpx 被擋時的救援。
+            #   只有 print 的話，log 裡看起來就像「API 試過了但沒中」。
+            _note_error("未設 YAHOO_APP_ID，官方 API 救援整支跳過", "YahooStore")
             return None
         print(f"[YahooStore] ↩️ 改用官方 API 搜尋（seller={seller!r}, code={code!r}）")
         try:
             hits = await _api_search(code, seller_id=seller or None, hits=30)
         except Exception as e:
             print(f"[YahooStore] API 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "YahooStore/API")
             return None
         for p in hits:
             hit_ref = parse_store_ref(p.source_url)
@@ -537,6 +545,8 @@ class YahooStoreApiSource(Source):
                 print(f"[YahooStore] ✅ API 命中 {p.title[:40]!r} | ¥{p.price_jpy:,}")
                 return p
         print(f"[YahooStore] API 搜尋 {len(hits)} 筆，無網址相符的商品")
+        _note_error(f"官方 API 搜尋 {len(hits)} 筆但無網址相符的商品"
+                    "（商品代碼比對不上，可能是店家改了 code）", "YahooStore")
         return None
 
 
@@ -549,6 +559,8 @@ class YahooStoreSeleniumSource(Source):
     async def get(self, url, ref, engine):
         fetch = getattr(engine, "_fetch_with_selenium", None)
         if fetch is None:
+            _note_error(missing_method_brief("_fetch_with_selenium",
+                                             "Selenium 退路"), "YahooStore")
             return None
         seller, code = ref if ref else (parse_store_ref(url) or ("", ""))
         target = canonical_url(seller, code) or (url or "").split("#")[0]
@@ -556,6 +568,7 @@ class YahooStoreSeleniumSource(Source):
             html_text = fetch(target)   # 同步；引擎內有 _driver_lock，配合請求佇列序列化
         except Exception as e:
             print(f"[YahooStore] Selenium 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "YahooStore/Selenium")
             return None
         if not html_text:
             return None
@@ -572,12 +585,15 @@ class YahooStoreGenericSource(Source):
     async def get(self, url, ref, engine):
         fn = getattr(engine, "_scrape_with_playwright", None)
         if fn is None:
+            _note_error(missing_method_brief("_scrape_with_playwright",
+                                             "generic 最後退路"), "YahooStore")
             return None
         print("[YahooStore] ↩️ 全部失敗，退回 generic Playwright")
         try:
             return await fn(url)
         except Exception as e:
             print(f"[YahooStore] generic fallback 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "YahooStore/generic")
             return None
 
 

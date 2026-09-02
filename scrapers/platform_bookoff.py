@@ -30,7 +30,9 @@ from urllib.parse import urlparse
 import httpx
 
 from scrapers.base import ProductInfo
-from scrapers.platform import Platform, Source
+from scrapers.platform import (Platform, Source, _note_error, _note_http,
+                              net_error_brief, http_fail_brief,
+                              missing_method_brief)
 
 try:
     from config import PROXY_URL
@@ -222,14 +224,19 @@ class BookoffJsonLdSource(Source):
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
                 resp = await client.get(url.strip(), headers=headers)
+                # ★ 這支本來完全沒有 note_http —— 被 403 擋時 classify_failure
+                #   看不到狀態碼，failure_kind 只會是 other，不會是 blocked。
+                _note_http(resp.status_code, resp.text, str(resp.url))
                 print(f"[BookOff] {url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code == 200 and resp.text:
                     return resp.text
                 if resp.status_code in (401, 403):
                     print("[BookOff] ⚠️ 被擋（可能機房 IP）；已設 PROXY_URL 會自動走 proxy")
+                _note_error(http_fail_brief(resp.status_code, resp.text), "BookOff")
                 return None
         except Exception as e:
             print(f"[BookOff] httpx 錯誤: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "BookOff/httpx")
             return None
 
 
@@ -242,6 +249,10 @@ class BookoffSeleniumSource(Source):
     async def get(self, url, ref, engine):
         fetch = getattr(engine, "_fetch_with_selenium", None)
         if fetch is None:
+            # ★ 純解析測試沒有引擎是正常的；但線上跑到這裡就代表退路整支消失了，
+            #   而以前它一句話都不會說。訊息要寫出是哪個方法不見了。
+            _note_error(missing_method_brief("_fetch_with_selenium",
+                                             "Selenium 退路"), "BookOff")
             return None  # 沒有引擎（例如純解析測試）→ 交回上層
         try:
             # 比照 generic._scrape_with_playwright：_fetch_with_selenium 為同步、
@@ -249,6 +260,7 @@ class BookoffSeleniumSource(Source):
             html = fetch(url)
         except Exception as e:
             print(f"[BookOff] Selenium 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "BookOff/Selenium")
             return None
         if not html:
             return None

@@ -26,7 +26,9 @@ from bs4 import BeautifulSoup
 
 from config import PROXY_URL
 from scrapers.base import ProductInfo
-from scrapers.platform import Platform, Source
+from scrapers.platform import (Platform, Source, _note_error, _note_http,
+                              net_error_brief, http_fail_brief,
+                              missing_method_brief)
 
 
 _MIN_PRICE = 50
@@ -83,12 +85,18 @@ class ZozoYahooSource(Source):
         try:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True, proxy=proxy_arg) as client:
                 resp = await client.get(yahoo_url, headers=headers)
+                # ★ 這支本來完全沒有 note_http —— 被擋時 failure_kind 分不到 blocked。
+                _note_http(resp.status_code, resp.text, str(resp.url))
                 print(f"[ZOZO] 雅虎店 {yahoo_url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code != 200 or not resp.text:
+                    # ★ 這裡 return 的是 False 不是 None，但形狀一樣：
+                    #   上層拿到的只是「沒成功」，原因照樣在地上。
+                    _note_error(http_fail_brief(resp.status_code, resp.text), "ZOZO/雅虎店")
                     return False
                 self._parse_yahoo(resp.text, zozo_url, yahoo_url, gid, product)
         except Exception as e:
             print(f"[ZOZO] httpx 錯誤: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "ZOZO/httpx")
             return False
 
         return bool(product.price_jpy)
@@ -339,11 +347,14 @@ class ZozoLegacySource(Source):
     async def get(self, url, ref, engine):
         fn = getattr(engine, "_scrape_zozotown_legacy", None)
         if fn is None:
+            _note_error(missing_method_brief("_scrape_zozotown_legacy",
+                                             "ZOZO legacy 退路"), "zozotown")
             return None
         try:
             return await fn(url)
         except Exception as e:
             print(f"[zozotown] legacy 失敗: {type(e).__name__}: {e}")
+            _note_error(net_error_brief(e), "zozotown/legacy")
             return None
 
 

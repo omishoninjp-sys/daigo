@@ -16,6 +16,37 @@ paths:
 
 已抽出的真 Platform：zozotown、amiami、bookoff、snidel、muji、yahoo_store。
 
+### 🔴 Source 用 `return None` 表示失敗，所以 `Platform.fetch` 的 except 攔不到
+
+`platform.py` 的 `_note_error` 只在 Source **拋例外**時觸發。
+而每一支 Source 都自己 `except → print → return None`，
+`_fetch` / `_via_yahoo` / `find_by_code` / `_fetch_with_selenium` 全部包在裡面 ——
+**網路層失敗（被擋、逾時、非 200）一件都進不了紀錄**。
+2026-09-02 實測：MUJI 每筆都走 httpx 被 Akamai 擋的退路（Selenium 才成功、31 秒），
+正式環境那筆 JSONL 的 `warnings` 卻是空字串。
+
+**寫任何 `return None` 的失敗分支，同一行要自己呼叫 `_note_error(原因, tag)`。**
+分類用 `platform.py` 的三個 helper，不要自己拼字串：
+
+- `http_fail_brief(status, body)` —— 被擋 / 頁面不存在 / 非 200 分開講。
+  **三種的處置完全不同**：被擋要花錢買住宅代理、非 200 是我們自己要改解析。
+  分不出來就會像 2026-08 那次，把每一家 Shopify 商店的失敗都當成 blocked。
+- `net_error_brief(e)` —— 逾時 / 連線失敗 / 其他。
+  Akamai 依 TLS 指紋擋的時候，httpx 端看到的**只是 ReadTimeout**（握手都成功、
+  首位元組不來），所以逾時不要直接斷定成被擋，但一定要記下來讓人看得到頻率。
+- `missing_method_brief(method, what)` —— `if fn is None: return None` 專用。
+  **這一類最危險**：方法被改名、Mixin 被拿掉、Platform 註冊到 Mixin 前面，
+  整支 Source 就永遠回 None 且一句話都沒有（MUJI 圖片消失六週、GU 抓不到，
+  都是這個形狀）。訊息一定要寫出**是哪個方法不見了**。
+
+**有 httpx 回應就一定要 `_note_http(status, body, final_url)`** ——
+`classify_failure` 靠狀態碼才分得出 `blocked`，沒有它 403 只會被歸成 `other`。
+bookoff 與 zozotown 原本整支都沒有，2026-09-02 才補。
+
+C（URL 抽不出識別碼）與 D（抓到頁面但解析不出價）**刻意不埋**：
+C 多半是客人貼錯連結、每天都會響；D 在最終失敗時 `error_brief` 本來就會說。
+
+
 **不要以「把剩下的 Mixin 都抽成 Platform」為目標。** 2026-08 的營收分析顯示
 長尾 20+ 支各佔不到 0.5%，抽了沒有回報。抽 Platform 的標準是
 「這支能換到結構性覆蓋或穩定性」，不是「還沒抽」。
