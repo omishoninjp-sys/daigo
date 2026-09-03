@@ -308,7 +308,11 @@ def test_module_boundary():
     mon = _io.open("scrape_monitor.py", encoding="utf-8").read()
     check("scrape_monitor 才是做判斷的地方", "兩條路都不通" in mon)
     check("★ 判準用狀態碼常數，不是字串比對",
-          "_BLOCKED_HTTP_STATUS" in mon and "_SETTLED_SMALL_BYTES" in mon)
+          "_PROXY_NEEDED_HTTP_STATUS" in mon and "_SETTLED_SMALL_BYTES" in mon)
+    # ★ 2026-09-03：「被擋」與「要買代理」拆成兩份清單，各自回答不同的問題。
+    #   這裡用的必須是代理那份 —— 429 是節流，重試就會過，買代理沒有用。
+    check("★ 用的是代理那份清單（429 不在裡面）",
+          "if status not in _PROXY_NEEDED_HTTP_STATUS" in mon)
 
 
 def test_settled_failsafe():

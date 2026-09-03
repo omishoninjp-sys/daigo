@@ -89,7 +89,25 @@ def net_error_brief(error) -> str:
         return "網路層例外（分類失敗）"
 
 
-def http_fail_brief(status, body: str = "", blocked=(401, 403, 429)) -> str:
+# 🔴 「這個回應代表被擋」的唯一一份清單（爬取端）。2026-09-03 收攏。
+#   在此之前同一件事散在六個地方、三種內容：
+#     scrape_monitor.classify_failure   (403, 429)        ← 少了 401
+#     scrape_monitor 的代理判準          (401, 403)
+#     http_fail_brief 的預設值           (401, 403, 429)
+#     jsonld / bookoff 的警告            (401, 403)
+#     yahoo_store 的警告                 (401, 403, 429)
+#   401 少在 classify_failure 那份，害「被擋」被判成 parse_failed
+#   （＝我們的解析壞了），查的人會往完全錯的方向去。
+#   **三處對同一件事有兩種認定，那是 bug 不是設計。**
+#
+# ★ 429 在這裡算被擋（這次失敗確實是被擋造成的），但在
+#   scrape_monitor 的「要不要買住宅代理」判準裡**不算** ——
+#   那是節流，重試就會過，買代理沒有用。兩個問題不一樣，所以是兩份清單，
+#   各自寫明它回答哪個問題；有一支測試釘住「代理那份是這份的子集」。
+BLOCKED_HTTP_STATUS = (401, 403, 429)
+
+
+def http_fail_brief(status, body: str = "", blocked=BLOCKED_HTTP_STATUS) -> str:
     """非 200（或 200 但空回應）→ 帶分類的一句話。永遠不 raise。"""
     try:
         s = int(status)

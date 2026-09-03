@@ -32,7 +32,7 @@ import httpx
 from scrapers.base import ProductInfo
 from scrapers.platform import (Platform, Source, _note_error, _note_http,
                               net_error_brief, http_fail_brief,
-                              missing_method_brief)
+                              missing_method_brief, BLOCKED_HTTP_STATUS)
 
 try:
     from config import PROXY_URL
@@ -230,7 +230,7 @@ class BookoffJsonLdSource(Source):
                 print(f"[BookOff] {url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code == 200 and resp.text:
                     return resp.text
-                if resp.status_code in (401, 403):
+                if resp.status_code in BLOCKED_HTTP_STATUS:
                     print("[BookOff] ⚠️ 被擋（可能機房 IP）；已設 PROXY_URL 會自動走 proxy")
                 _note_error(http_fail_brief(resp.status_code, resp.text), "BookOff")
                 return None

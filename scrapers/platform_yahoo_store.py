@@ -53,7 +53,7 @@ from scrapers.base import ProductInfo
 from scrapers.jsonld import parse_jsonld_product
 from scrapers.platform import (Platform, Source, _note_error,
                               net_error_brief, http_fail_brief,
-                              missing_method_brief)
+                              missing_method_brief, BLOCKED_HTTP_STATUS)
 from scrapers.yahoo_api import search_items as _api_search, has_credentials as _api_ready
 
 
@@ -505,7 +505,7 @@ class YahooStoreHttpxSource(Source):
                 print(f"[YahooStore] {url} → {resp.status_code}, {len(resp.text)} bytes")
                 if resp.status_code == 200 and resp.text:
                     return resp.text
-                if resp.status_code in (401, 403, 429):
+                if resp.status_code in BLOCKED_HTTP_STATUS:
                     print("[YahooStore] ⚠️ 被擋（可能機房 IP）；有設 PROXY_URL 會自動走 proxy")
                 _note_error(http_fail_brief(resp.status_code, resp.text), "YahooStore")
                 return None

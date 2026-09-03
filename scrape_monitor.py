@@ -150,8 +150,18 @@ def note_gone() -> None:
         print(f"[ScrapeLog] note_gone 失敗（略過）: {type(e).__name__}: {e}")
 
 
-# 「兩條路都不通」的判準：httpx 被擋的狀態碼 + 瀏覽器載完仍然很小
-_BLOCKED_HTTP_STATUS = (401, 403)
+# 🔴 兩份清單，各自回答不同的問題（2026-09-03）。爬取端的那一份在
+#   scrapers/platform.BLOCKED_HTTP_STATUS —— **刻意不 import**：
+#   監控壞掉不可以影響爬取（同 _BLOCKED_STRONG 那組的理由）。
+#   改成用一支測試釘住兩邊一致，分岔就會紅。
+#
+# A「這次失敗是被擋造成的嗎」→ failure_kind 用這份
+_BLOCKED_HTTP_STATUS = (401, 403, 429)
+
+# B「要不要買住宅代理」→ note_page_settled 用這份
+#   ★ 429 刻意不在裡面：那是節流，重試就會過，買代理沒有用。
+#     這份必須是 A 的子集 —— 測試有釘。
+_PROXY_NEEDED_HTTP_STATUS = (401, 403)
 _SETTLED_SMALL_BYTES = 5000
 
 
@@ -188,7 +198,7 @@ def note_page_settled(size) -> None:
         if n >= _SETTLED_SMALL_BYTES:
             return                      # 瀏覽器拿得到內容 → 不是兩邊都不通
         status = state.get("http_status")
-        if status not in _BLOCKED_HTTP_STATUS:
+        if status not in _PROXY_NEEDED_HTTP_STATUS:
             return                      # 沒有被擋的狀態碼 → 頁面小只是頁面小
         note_error(f"兩條路都不通：httpx HTTP {status}，瀏覽器載完仍只有 "
                    f"{n / 1024:.1f}KB —— 這個網域要住宅代理才抓得到", "Blocked")
@@ -334,7 +344,11 @@ def classify_failure(http_status=None, error=None, timed_out: bool = False,
     if "timeout" in err_text or "timedout" in err_text:
         return "timeout"
 
-    if http_status in (403, 429):
+    # ★ 2026-09-03：401 本來不在這裡，於是「被擋」會落到下面的 got_page
+    #   變成 parse_failed（＝我們的解析壞了），查的人會往完全錯的方向去。
+    #   http_fail_brief 與 note_page_settled 兩邊本來就把 401 當被擋，
+    #   只有這裡沒有 —— 三處對同一件事有兩種認定，那是 bug 不是設計。
+    if http_status in _BLOCKED_HTTP_STATUS:
         return "blocked"
     if http_status in (404, 410):
         return "not_found"

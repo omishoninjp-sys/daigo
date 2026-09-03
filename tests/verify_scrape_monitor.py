@@ -348,15 +348,21 @@ _U = "https://example.jp/item/1"
 
 
 def _old_classify(http_status=None, error=None, timed_out=False,
-                  block_hint=False, gone_hint=False, got_page=False):
-    """★ 改動前的 classify_failure 原樣抄過來，當作等價性比對的基準。"""
+                  block_hint=False, gone_hint=False, got_page=False,
+                  blocked=(401, 403, 429)):
+    """
+    ★ 改動前的 classify_failure 原樣抄過來，當作等價性比對的基準。
+
+    blocked 可以換成 (403, 429) —— 那是 2026-09-03 把 401 補進去**之前**的
+    清單，用來精確列出「加了 401 之後，哪些組合的分類改變了」。
+    """
     if timed_out:
         return "timeout"
     err_name = type(error).__name__ if error is not None else ""
     err_text = f"{err_name}: {error}".lower() if error is not None else ""
     if "timeout" in err_text or "timedout" in err_text:
         return "timeout"
-    if http_status in (403, 429):
+    if http_status in blocked:
         return "blocked"
     if http_status in (404, 410):
         return "not_found"
@@ -406,6 +412,95 @@ def test_gate_equivalence():
             diff.append((st, type(err).__name__, to, bh, gh, gp))
     check("★ 不傳 noted_kinds 時等同改動前（預設值不改變行為）", not diff,
           f"{len(diff)} 組不同")
+
+
+def test_401_now_blocked():
+    print("\n【8b】★ 401 補進 blocked 清單：只有 401 的組合改變")
+    import itertools
+    STATUS = [None, 200, 401, 403, 404, 410, 429, 500]
+    ERRORS = [None, TimeoutError("t"), ValueError("x")]
+    changed = []
+    for st, err, to, bh, gh, gp in itertools.product(
+            STATUS, ERRORS, (False, True), (False, True), (False, True), (False, True)):
+        before = _old_classify(st, err, to, bh, gh, gp, blocked=(403, 429))
+        after = sm.classify_failure(http_status=st, error=err, timed_out=to,
+                                    block_hint=bh, gone_hint=gh, got_page=gp)
+        if before != after:
+            changed.append((st, before, after))
+    check("★ 有組合改變（這是刻意的行為變更，不是 gate）", bool(changed),
+          f"{len(changed)} 組")
+    check("★ 改變的**全部**是 401，沒有波及其他狀態碼",
+          all(c[0] == 401 for c in changed),
+          str(sorted({c[0] for c in changed})))
+    transitions = sorted({(b, a) for _, b, a in changed})
+    # ★ 三種轉換都是「往 blocked」，方向一致，沒有任何組合被改成別的東西：
+    #   parse_failed→blocked  401 + 拿到頁面。這正是要修的：被擋卻報成
+    #                         「我們的解析壞了」，會讓人去查錯的方向
+    #   other→blocked         401 但沒有其他線索
+    #   not_found→blocked     401 + gone_hint。既有的判斷順序本來就是
+    #                         **狀態碼優先於內容特徵**（現有測試已有一條
+    #                         「403 + gone_hint → blocked（狀態碼優先）」），
+    #                         401 只是跟著同一條規則，不是新的例外
+    check("★ 三種轉換全部是「往 blocked」，沒有組合被改成別的分類",
+          all(a == "blocked" for _, a in transitions), str(transitions))
+    check("轉換方向就是這三種",
+          transitions == [("not_found", "blocked"), ("other", "blocked"),
+                          ("parse_failed", "blocked")], str(transitions))
+    check("★ 401 + gone_hint → blocked（與既有的 403 + gone_hint 同一條規則）",
+          sm.classify_failure(http_status=401, gone_hint=True) == "blocked"
+          and sm.classify_failure(http_status=403, gone_hint=True) == "blocked")
+    check("401 本身 → blocked",
+          sm.classify_failure(http_status=401) == "blocked",
+          sm.classify_failure(http_status=401))
+    check("★ 401 + 拿到頁面 → 仍是 blocked（本來會被誤判成 parse_failed）",
+          sm.classify_failure(http_status=401, got_page=True) == "blocked",
+          sm.classify_failure(http_status=401, got_page=True))
+    check("403 / 429 不受影響",
+          sm.classify_failure(http_status=403) == "blocked"
+          and sm.classify_failure(http_status=429) == "blocked")
+    check("404 / 410 不受影響",
+          sm.classify_failure(http_status=404) == "not_found"
+          and sm.classify_failure(http_status=410) == "not_found")
+    check("200 不受影響", sm.classify_failure(http_status=200) == "parse_failed")
+
+
+def test_status_lists_consistent():
+    print("\n【8c】★ 兩份狀態碼清單：各自回答哪個問題，以及不可以分岔")
+    from scrapers.platform import BLOCKED_HTTP_STATUS
+    check("★ 爬取端與監控端的「被擋」清單一致（分岔就是今天這個 bug）",
+          tuple(sorted(sm._BLOCKED_HTTP_STATUS)) == tuple(sorted(BLOCKED_HTTP_STATUS)),
+          f"monitor={sm._BLOCKED_HTTP_STATUS} platform={BLOCKED_HTTP_STATUS}")
+    check("被擋清單就是 401/403/429",
+          tuple(sorted(sm._BLOCKED_HTTP_STATUS)) == (401, 403, 429),
+          str(sm._BLOCKED_HTTP_STATUS))
+    check("★ 代理判準是被擋清單的子集（不可能出現「要代理但不算被擋」）",
+          set(sm._PROXY_NEEDED_HTTP_STATUS) <= set(sm._BLOCKED_HTTP_STATUS),
+          f"{sm._PROXY_NEEDED_HTTP_STATUS} vs {sm._BLOCKED_HTTP_STATUS}")
+    check("★ 429 算被擋、但不算「要買代理」（節流重試就會過）",
+          429 in sm._BLOCKED_HTTP_STATUS
+          and 429 not in sm._PROXY_NEEDED_HTTP_STATUS,
+          str(sm._PROXY_NEEDED_HTTP_STATUS))
+    check("401 兩份都算", 401 in sm._BLOCKED_HTTP_STATUS
+          and 401 in sm._PROXY_NEEDED_HTTP_STATUS)
+
+    # http_fail_brief 的預設值也要是同一份
+    from scrapers.platform import http_fail_brief
+    for s in BLOCKED_HTTP_STATUS:
+        check(f"http_fail_brief({s}) 說「被擋」", "被擋" in http_fail_brief(s),
+              http_fail_brief(s)[:30])
+    check("500 不說被擋", "被擋" not in http_fail_brief(500))
+
+    # 爬取端不可以再有裸的清單（重試邏輯那兩處不算，它們不是被擋判定）
+    import io as _io
+    import re as _re
+    bare = []
+    for f in ("scrapers/jsonld.py", "scrapers/platform_bookoff.py",
+              "scrapers/platform_yahoo_store.py"):
+        src = _io.open(f, encoding="utf-8").read()
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        if _re.search(r"status_code in \(4\d\d", code):
+            bare.append(f)
+    check("★ 三個警告印出點都改用常數，沒有留裸清單", not bare, str(bare))
 
 
 def test_gate_severity():
@@ -544,6 +639,8 @@ async def main():
     test_content_fields()
     await test_failsafe()
     test_gate_equivalence()
+    test_401_now_blocked()
+    test_status_lists_consistent()
     test_gate_severity()
     test_note_kind_binding()
     test_end_to_end_kind()
