@@ -170,9 +170,12 @@ def test_diagnostic_signal():
     sm.start("https://www.dior.com/x")
     html, drv, reads = fetch([blocked] * 6)
     errs = " | ".join((sm._ctx.get() or {}).get("errors") or [])
-    check("★ 有留下訊號", "Selenium 也被擋" in errs, errs[:80])
-    check("訊息說得出兩條路都不通", "兩條路都不通" in errs and "住宅代理" in errs,
-          errs[:90])
+    check("★ 有留下訊號", "challenge 特徵" in errs, errs[:80])
+    # ★ 訊息只能講它驗證得到的事。2026-09-03 dior 的軟性擋頁
+    #   （3KB 的 "Page unavailable"）一個特徵字都沒有，卻確實是被擋 ——
+    #   說「被擋」是誇大，會讓看 log 的人做出錯的採購決定。
+    check("★ 訊息不宣稱「被擋」（它只驗證了有沒有 challenge 特徵）",
+          "也被擋" not in errs, errs[:90])
     check("★ 訊號不影響回傳（html 照樣拿到）", html == blocked)
 
     # 正常的小頁面不可以誤觸
@@ -219,6 +222,121 @@ def test_failsafe():
         g._has_block_markers = orig
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 「兩條路都不通」的結構判準（2026-09-03）
+# ═══════════════════════════════════════════════════════════════════
+def _signal(status, page_bytes, body=""):
+    """跑一次完整流程：httpx 記狀態碼 → Selenium 載完 → 看留下什麼訊號。"""
+    sm.start("https://www.dior.com/ja_jp/fashion/products/X")
+    if status is not None:
+        sm.note_http(status)
+    pages = [page(page_bytes, body)] * 6
+    fetch(pages)
+    return " | ".join((sm._ctx.get() or {}).get("errors") or [])
+
+
+def test_both_paths_blocked():
+    print()
+    print("【8】★ 結構判準：httpx 狀態碼 + 瀏覽器載完的大小")
+    # ① 兩條路都不通
+    s = _signal(403, 3000)
+    check("★ httpx 403 + 頁面穩定 3KB → 判定兩條路都不通",
+          "兩條路都不通" in s, s[:90])
+    check("訊息帶得出狀態碼與實際大小",
+          "403" in s and "KB" in s, s[:90])
+    check("★ 訊息直接回答「要不要買住宅代理」", "住宅代理" in s, s[:90])
+
+    # ② 瀏覽器過得去 → 不判定（買了代理也沒有多賺）
+    s = _signal(403, 20000)
+    check("★ httpx 403 + 頁面 20KB → 不判定（Selenium 過得去）",
+          "兩條路都不通" not in s, s[:90])
+
+    # ③ 沒有被擋的狀態碼 → 不判定（頁面小只是頁面小）
+    s = _signal(200, 3000)
+    check("★ httpx 200 + 頁面穩定 3KB → 不判定（不是被擋）",
+          "兩條路都不通" not in s, s[:90])
+
+    # ④ 邊界
+    check("401 也算被擋", "兩條路都不通" in _signal(401, 3000))
+    check("★ 404 不算（那是 not_found 不是 blocked）",
+          "兩條路都不通" not in _signal(404, 3000))
+    check("429 不算（那是節流，重試就好，不用買代理）",
+          "兩條路都不通" not in _signal(429, 3000))
+    check("完全沒有狀態碼時不判定（httpx 連回應都沒拿到，資訊不足）",
+          "兩條路都不通" not in _signal(None, 3000))
+    check("剛好 5000 bytes 不算小", "兩條路都不通" not in _signal(403, 5000))
+    check("4999 bytes 算小", "兩條路都不通" in _signal(403, 4999))
+
+
+def test_signal_layering():
+    print()
+    print("【9】兩個訊號各自獨立：特徵字與結構判準互不依賴")
+    # 有特徵字但 httpx 是 200 → 只有 challenge 那條，沒有「兩條路都不通」
+    s = _signal(200, 3000, "Access Denied")
+    check("★ 有特徵字但 httpx 200 → 只報 challenge，不報兩條路都不通",
+          "challenge 特徵" in s and "兩條路都不通" not in s, s[:100])
+    # 沒有特徵字但 httpx 403 + 頁面小 → 只有結構判準（dior 的實際情況）
+    s = _signal(403, 3000, "Page unavailable")
+    check("★ dior 的實際情況：沒有特徵字，仍然判定兩條路都不通",
+          "兩條路都不通" in s and "challenge 特徵" not in s, s[:100])
+    # 兩個都成立 → 兩句都在
+    s = _signal(403, 3000, "Access Denied")
+    check("兩個都成立時兩句都留",
+          "兩條路都不通" in s and "challenge 特徵" in s, s[:110])
+
+
+def test_module_boundary():
+    print()
+    print("【10】★ 爬取路徑不可以讀監控的狀態（判斷留在 scrape_monitor）")
+    import io as _io
+    import re as _re
+    src = _io.open("scrapers/generic.py", encoding="utf-8").read()
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    # 只准呼叫 note_*，不准讀狀態
+    bad = _re.findall(r"scrape_monitor\.(?!note_)(\w+)", code)
+    check("★ generic.py 只呼叫 note_*，沒有讀 scrape_monitor 的任何狀態",
+          not bad, str(sorted(set(bad))))
+    check("★ 沒有碰 _ctx（那是監控的內部狀態）", "_ctx" not in code)
+    # ★ 這裡要驗的是「判斷邏輯不在爬取路徑」，不是「那個詞不能出現在說明裡」——
+    #   docstring 講清楚為什麼判斷不放這裡，是好事不是違規。
+    #   真正的界線是：generic.py 完全不碰 httpx 的狀態碼。
+    check("★ generic.py 從頭到尾沒有碰 http_status（判斷的另一半在監控那邊）",
+          "http_status" not in code, "generic.py 不該知道狀態碼")
+    check("回報的是大小這個事實，不是判斷結果",
+          "note_page_settled(len(" in code, "")
+
+    mon = _io.open("scrape_monitor.py", encoding="utf-8").read()
+    check("scrape_monitor 才是做判斷的地方", "兩條路都不通" in mon)
+    check("★ 判準用狀態碼常數，不是字串比對",
+          "_BLOCKED_HTTP_STATUS" in mon and "_SETTLED_SMALL_BYTES" in mon)
+
+
+def test_settled_failsafe():
+    print()
+    print("【11】fail-safe：note_page_settled 壞掉不可以影響抓取")
+    sm._ctx.set(None)
+    sm.note_page_settled(3000)          # 沒有 ctx
+    check("沒有 ctx 時不 raise", True)
+    sm.start("https://x.jp/p")
+    sm.note_http(403)
+    sm.note_page_settled("不是數字")
+    errs = " | ".join((sm._ctx.get() or {}).get("errors") or [])
+    check("★ 大小不是數字時安靜略過（不可以誤判成被擋）",
+          "兩條路都不通" not in errs, errs[:80])
+
+    # 監控整支爆掉，抓取仍要正常
+    import scrapers.generic as g
+    orig = g._note_page_settled
+    g._note_page_settled = lambda n: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        blocked = page(3000, "x")
+        html, drv, reads = fetch([blocked] * 6)
+        check("★ 回報函式爆掉時 html 照樣回得來", html == blocked, f"{len(html)} 字元")
+        check("仍然提早跳出", reads == 2, f"{reads} 次")
+    finally:
+        g._note_page_settled = orig
+
+
 def main_():
     print("=" * 74)
     print("Selenium 輪詢：頁面大小穩定就停")
@@ -230,6 +348,10 @@ def main_():
     test_diagnostic_signal()
     test_marker_helpers()
     test_failsafe()
+    test_both_paths_blocked()
+    test_signal_layering()
+    test_module_boundary()
+    test_settled_failsafe()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

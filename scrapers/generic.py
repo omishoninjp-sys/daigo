@@ -72,6 +72,17 @@ def _note_error(error, where=""):
         pass
 
 
+def _note_page_settled(size):
+    """回報「瀏覽器把頁面載完了，多大」。**只有事實，沒有判斷。**
+    要不要因此判定『兩條路都不通』由 scrape_monitor 決定 ——
+    那需要 httpx 的狀態碼，而狀態碼是監控自己記的，爬取這邊不需要知道。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_page_settled(size)
+    except Exception:
+        pass
+
+
 def _note_source(name):
     try:
         import scrape_monitor
@@ -203,22 +214,31 @@ class GenericMixin:
     @staticmethod
     def _note_selenium_settled(html: str) -> None:
         """
-        頁面載完但小於 5000 —— 只在**命中擋頁特徵**時留一句話。
+        頁面載完但小於 5000 —— 回報**事實**給監控，判斷不在這裡做。
 
-        ★ 這是訊號不是控制流：不論記不記，上面都照樣回傳 html。
-          它要回答的問題是「httpx 被擋但瀏覽器過得去」還是「兩條路都被擋」——
-          後者才需要花錢買住宅代理，前者不用。
-          dior.com 兩種都出現過（同一天有 4 筆 http=403 卻 ok=True，
-          也有 5 筆連 Selenium 都拿不到內容），分不出來就會買錯東西。
+        ★ 大小交給 scrape_monitor.note_page_settled()：「是不是兩條路都不通」
+          要配合 httpx 的狀態碼才判斷得出來，而那個狀態碼是監控自己記的。
+          爬取路徑不需要知道監控的存在，判斷就留在監控那邊。
+
+        ★ challenge 特徵仍然回報，但**訊息只講它真正驗證到的事**。
+          原本這裡寫「Selenium 也被擋」是誇大的 —— 它只驗證了「有沒有
+          access denied / captcha 這類字樣」。2026-09-03 實測 dior：
+          Selenium 拿到的是 3KB 的 "Page unavailable"，一個特徵字都沒有，
+          但同一個網址在住宅 IP 拿得到完整商品頁 —— **確實被擋，只是不自報**。
+          訊息與證據不符的話，看 log 的人會做出錯的採購決定。
         """
         try:
-            if _has_block_markers(html):
-                print("[Generic] ⚠️ Selenium 取得的頁面命中擋頁特徵 —— "
-                      "httpx 與瀏覽器兩條路都不通")
-                _note_error("Selenium 也被擋（httpx 與瀏覽器兩條路都不通，"
-                            "需要住宅代理）", "Selenium")
+            _note_page_settled(len(html or ""))
         except Exception:
             pass          # 訊號壞掉不可以影響抓取結果
+        try:
+            if _has_block_markers(html):
+                print("[Generic] ⚠️ Selenium 取得的頁面命中 challenge 特徵")
+                _note_error("Selenium 取得的頁面命中 challenge 特徵"
+                            "（access denied / captcha / cloudflare 之類）",
+                            "Selenium")
+        except Exception:
+            pass
 
     # ============================================================
     # Extractors（通用解析器）

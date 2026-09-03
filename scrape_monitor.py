@@ -28,6 +28,7 @@ Source 端（選填，能提供就提供，classification 會更準）：
     scrape_monitor.note_http(resp.status_code, resp.text)
     scrape_monitor.note_source("YahooStoreHttpxSource")
     scrape_monitor.note_gone()        # 確定查無／下架（API 回 200 空清單也算）
+    scrape_monitor.note_page_settled(len(html))   # 瀏覽器把頁面載完了，多大
 """
 import os
 import re
@@ -146,6 +147,54 @@ def note_gone() -> None:
             state["gone_hint"] = True
     except Exception as e:
         print(f"[ScrapeLog] note_gone 失敗（略過）: {type(e).__name__}: {e}")
+
+
+# 「兩條路都不通」的判準：httpx 被擋的狀態碼 + 瀏覽器載完仍然很小
+_BLOCKED_HTTP_STATUS = (401, 403)
+_SETTLED_SMALL_BYTES = 5000
+
+
+def note_page_settled(size) -> None:
+    """
+    瀏覽器那條路把頁面載完了，內容有多大。**呼叫端只回報事實，判斷在這裡做。**
+
+    ★ 為什麼判斷放這裡：爬取路徑（scrapers/generic.py）不需要知道 httpx
+      拿到什麼狀態碼 —— 那是監控自己用 note_http 記下來的。兩個訊號在這裡
+      合流，爬取那邊仍然不知道監控的存在，監控壞掉也影響不到抓取。
+
+    🔴 判準是**結構**不是字串（2026-09-03）：
+      httpx 拿 401/403 **且** 瀏覽器載完仍不到 5KB → 兩條路都不通。
+
+      實測 dior.com：Zeabur 上 httpx 403、Selenium 拿到約 3KB 的
+      "Page unavailable"；同一個網址在住宅 IP 拿得到 1.1MB 的完整商品頁
+      （JSON-LD 有 ¥540,000）。**那確實是被擋，但擋頁不自報身分** ——
+      access denied / captcha / cloudflare 一個字樣都沒有。
+      所以不能靠特徵字：枚舉軟性擋頁的說法救得了 dior，救不了下一家。
+      （同一個病早上才踩過：generic 取價用 min() 挑候選，換一家就崩。）
+
+    ★ 這是訊號不是控制流：failure_kind 本來就會因為 403 判成 blocked，
+      這裡只是把「值不值得買住宅代理」這個問題回答清楚 ——
+      httpx 被擋但瀏覽器過得去的網域，買了代理也沒有多賺。
+    """
+    try:
+        state = _ctx.get()
+        if state is None:
+            return
+        try:
+            n = int(size)
+        except (TypeError, ValueError):
+            return
+        if n >= _SETTLED_SMALL_BYTES:
+            return                      # 瀏覽器拿得到內容 → 不是兩邊都不通
+        status = state.get("http_status")
+        if status not in _BLOCKED_HTTP_STATUS:
+            return                      # 沒有被擋的狀態碼 → 頁面小只是頁面小
+        note_error(f"兩條路都不通：httpx HTTP {status}，瀏覽器載完仍只有 "
+                   f"{n / 1024:.1f}KB —— 這個網域要住宅代理才抓得到", "Blocked")
+        print(f"[ScrapeLog] 🔴 兩條路都不通（httpx {status} + 瀏覽器 {n} bytes）"
+              f"—— 這個網域需要住宅代理")
+    except Exception as e:
+        print(f"[ScrapeLog] note_page_settled 失敗（略過）: {type(e).__name__}: {e}")
 
 
 def note_source(name: str) -> None:
