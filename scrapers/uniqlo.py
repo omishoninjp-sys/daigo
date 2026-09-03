@@ -9,6 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from scrapers.base import ProductInfo, normalize_price
+from scrapers.platform import http_fail_brief
 
 
 # ── 爬取監控埋點（fail-safe：監控壞掉絕不影響爬取）──────────────────
@@ -135,14 +136,26 @@ class UniqloMixin:
                             print(f"[Uniqlo] API 回傳但未找到價格")
                             _note_error("API 回 200 但解析不出價格（疑似 API 結構改版）",
                                         "Uniqlo")
-                    elif resp.status_code == 403:
-                        print(f"[Uniqlo] API 403 Forbidden")
-                        _note_error("API 403 Forbidden（疑似機房 IP 被擋）", "Uniqlo")
-                    elif resp.status_code == 404:
-                        print(f"[Uniqlo] API 404")
-                        _note_error("API 404（商品下架或代碼錯誤）", "Uniqlo")
                     else:
-                        print(f"[Uniqlo] API {resp.status_code}: {resp.text[:200]}")
+                        # 🔴 這裡本來是 403 / 404 各一個分支，其餘落進**只有 print
+                        #    的 else** —— 於是 401 既沒有被當成被擋（它不在
+                        #    classify_failure 的清單裡），也沒有留下任何訊息；
+                        #    429 / 5xx 同樣靜默。2026-09-03 掃「return None 的
+                        #    失敗路徑」時漏掉了這條，因為它是 if/elif 的漏接分支，
+                        #    形狀不同。
+                        # ★ 狀態碼的判斷整個交給 http_fail_brief（被擋 / 頁面不存在 /
+                        #   非 200 三類），這裡一個狀態碼都不自己判 ——
+                        #   同一件事有多個判斷點，就是下一個 bug 的來源。
+                        # ★ 401 與 403 不分開講：處置一樣（機房 IP 被擋），
+                        #   而狀態碼本來就在訊息裡，要分辨隨時分得出來。
+                        # ★ 控制流不變：這幾種本來就沒有 break 也沒有 return，
+                        #   合併後仍然是「記一句、跑下一個 api_url」，
+                        #   四層 fallback 一步都沒少。
+                        # ★ 不印 resp.text —— 那會把回應主體送進 Runtime Logs
+                        #   （比照 seo_title.py 的教訓）。
+                        print(f"[Uniqlo] API {resp.status_code}")
+                        _note_error(http_fail_brief(resp.status_code, resp.text),
+                                    "Uniqlo/API")
 
                 except Exception as e:
                     print(f"[Uniqlo] API 錯誤: {type(e).__name__}: {e}")

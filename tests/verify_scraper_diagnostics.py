@@ -58,6 +58,10 @@ class FakeResp:
         self.url = url
         self.headers = {}
         self.history = []
+        # ★ uniqlo 的 Step 1 會 dict(resp.cookies)；沒有這個屬性會噴
+        #   AttributeError，那個**與待驗行為無關**的錯誤會被 note 進
+        #   error_brief，把真正要驗的訊息稀釋掉，斷言就變得很鬆。
+        self.cookies = {}
         self._payload = payload
 
     def json(self):
@@ -308,6 +312,80 @@ async def test_uniqlo():
     b = brief_of(e)
     check("U1 商品代碼解析失敗 error_brief 非空", bool(b), b[:70])
     check("U1 說得出是 URL 格式", "代碼" in b or "URL" in b, b[:70])
+
+    # ── U2 非 200 的 API 回應（2026-09-04）──────────────────────────────
+    # 🔴 這裡本來是 403 / 404 各一個分支，其餘落進**只有 print 的 else**：
+    #    401 既沒有被當成被擋，也沒有留下任何訊息；429 / 5xx 同樣靜默。
+    #    2026-09-03 掃「return None 的失敗路徑」時漏掉了它 ——
+    #    那是 if/elif 的漏接分支，形狀不同。
+    import contextlib
+    import io as _io
+    from scrapers.platform import http_fail_brief
+
+    URL_U = "https://www.uniqlo.com/jp/ja/products/E483767-000/00"
+    SENTINEL = "UNIQLO_BODY_SHOULD_NOT_BE_PRINTED_98765"
+
+    async def uniqlo_status(status):
+        """HTML 一個回應 + 4 個 API 回應（uniqlo 依序試 4 個端點）。"""
+        resps = ([FakeResp(200, "", URL_U)]
+                 + [FakeResp(status, SENTINEL, URL_U)] * 4)
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            entry = await run_scrape(eng._scrape_uniqlo, URL_U, resps)
+        return entry, buf.getvalue()
+
+    WANT_KIND = {401: "blocked", 403: "blocked", 429: "blocked",
+                 404: "not_found", 500: "parse_failed"}
+    for status, want in WANT_KIND.items():
+        e, out = await uniqlo_status(status)
+        b = brief_of(e)
+        check(f"U2 API {status} error_brief 非空", bool(b), b[:70])
+        # ★ 期望值由 http_fail_brief 現算，措辭一改就紅（比照分類的綁定測試）
+        #   而且要求**整則**就是它 —— 用 in 會被其他雜訊矇混過去
+        # ★ 第一則必須完全等於 http_fail_brief 產的（用 in 會被雜訊矇混）。
+        #   第二則「四個步驟全部落空」是這個 fixture 本來就該有的
+        #   —— HTML 空 + 四個 API 全掛，那是真的四步都落空。
+        check(f"★ U2 API {status} 第一則就是 http_fail_brief 產的",
+              b.startswith("Uniqlo/API: " + http_fail_brief(status, SENTINEL)),
+              b[:80])
+        check(f"U2 API {status} 沒有混進無關的錯誤",
+              "AttributeError" not in b and "Uniqlo/HTML" not in b, b[:70])
+        check(f"★ U2 API {status} 分類是 {want}", e["failure_kind"] == want,
+              e["failure_kind"])
+
+    # 401 是這次修的重點，單獨再釘一次
+    e, out = await uniqlo_status(401)
+    check("★ U2 401 說得出是被擋（本來這條完全靜默）", "被擋" in brief_of(e),
+          brief_of(e)[:70])
+    check("★ U2 401 分類是 blocked 不是 parse_failed",
+          e["failure_kind"] == "blocked", e["failure_kind"])
+
+    # ── 控制流：四個 API URL 都要跑完，不可以提早中斷 ──
+    resps = [FakeResp(200, "", URL_U)] + [FakeResp(403, SENTINEL, URL_U)] * 4
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        await run_scrape(eng._scrape_uniqlo, URL_U, resps)
+    out = buf.getvalue()
+    check("★ 四個 API 端點全部跑完（回應清單被吃光，沒有提早 break）",
+          not FakeClient.responses, f"還剩 {len(FakeClient.responses)} 個")
+    check("★ 仍然走到 Step 4 之後的收尾（四層 fallback 沒有被砍掉）",
+          "未取得資料" in out or "最終結果" in out, out[-90:])
+
+    # ── 不可以把回應主體印進 log ──
+    leaked = [l for l in out.splitlines() if SENTINEL in l]
+    check("★ 沒有把 resp.text 印出來（Runtime Logs 不該收到回應主體）",
+          not leaked, f"洩漏在：{leaked[:1]}")
+
+    # ── 今天早上補的既有埋點一個都不能少 ──
+    src = _io.open("scrapers/uniqlo.py", encoding="utf-8").read()
+    for msg in ("商品代碼解析失敗", "API 有價格但無 variants",
+                "API 回 200 但解析不出價格", "四個步驟"):
+        check(f"既有埋點還在：{msg}", msg in src, "")
+    import re as _re
+    code_only = chr(10).join(l for l in src.splitlines()
+                             if not l.lstrip().startswith("#"))
+    bare = _re.findall(r"status_code\s*(?:==|in)\s*\(?4\d\d", code_only)
+    check("★ uniqlo.py 不再自己判斷任何狀態碼", not bare, str(bare))
 
 
 async def test_pure_addition():

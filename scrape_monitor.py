@@ -98,6 +98,21 @@ def note_http(status, body: str = "", final_url: str = "") -> None:
     我們根本沒抓到商品頁 —— order.mandarake.co.jp 的每個路徑都 302 到
     www.mandarake.co.jp 首頁，抓回來的是 200 的公司首頁，看起來像「解析失敗」，
     其實是被轉走。這件事不記下來，光看紀錄永遠判斷不出來。
+
+    🔴 已知行為：狀態碼是**後蓋前**，一次爬取多個請求時留下的是最後一個。
+      一支 Source 對同一個商品打好幾個端點時（uniqlo 依序試 4 個 API URL，
+      generic 先 httpx 再 Selenium），每個回應都會呼叫這支，
+      **state["http_status"] 最後留的是最後那一個**。
+      後果：URL1 回 403、URL4 回 404 → 最終 failure_kind 是 not_found，
+      「被擋」那件事只會留在 error_brief 裡，不會反映在分類上。
+      （反過來也一樣：URL1 404、URL4 403 → 分類成 blocked。）
+
+      這是**已知且刻意不修**的（2026-09-04）：要改得決定「多個回應時哪一個
+      算數」——最嚴重的？第一個？最後一個？每一種都有反例，而且會動到
+      既有全部紀錄的解讀。真的要處理的時候，比較像是改成記一串狀態碼、
+      讓 classify_failure 自己挑，那是另一個題目。
+      在那之前：**看 failure_kind 判斷「這個網域是不是被擋」時，
+      多端點的 Source（uniqlo / generic）要配合 error_brief 一起看。**
     """
     try:
         state = _ctx.get()
