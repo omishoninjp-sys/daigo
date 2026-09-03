@@ -498,6 +498,31 @@ def recent_days(days: int = 2) -> list:
     return [(today - timedelta(days=i)).isoformat() for i in range(n)]
 
 
+def days_back_from(day: str, days: int = 2) -> list:
+    """
+    從**指定的某一天**往回數 N 天（新到舊，含 day 本身）。
+
+    ★ 與 recent_days() 的差別只有錨點，但那個差別會讓統計整個歸零：
+      recent_days() 一律錨在「現在」。每日摘要報告的是**前一個 UTC 日**，
+      拿 recent_days 去算「連續 N 天失敗」就是錨錯 ——
+      排程在 01:00 UTC 跑，那時「今天」才過了一小時、通常一筆失敗都還沒有，
+      failure_streaks 的第一個集合就是空集合，迴圈立刻 break，
+      **整份 streaks 是空的，一個標記都不會出現**（2026-09-03 實測）。
+    day 解析不出來時回空清單（沒有標記），不要退回 recent_days ——
+    那等於把剛修好的錯又放回去。
+    """
+    try:
+        n = max(1, int(days))
+    except Exception:
+        n = 1
+    try:
+        base = datetime.strptime((day or "").strip(), "%Y-%m-%d").date()
+    except Exception:
+        print(f"[ScrapeLog] days_back_from: day 解析失敗（回空清單）: {day!r}")
+        return []
+    return [(base - timedelta(days=i)).isoformat() for i in range(n)]
+
+
 def read_raw(day: str = "") -> str:
     """
     讀某天的原始 JSONL 文字（匯出用）。

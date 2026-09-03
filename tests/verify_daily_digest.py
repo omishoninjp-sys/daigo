@@ -668,6 +668,90 @@ def test_utf8_encode_payload():
               "摘要" in json.loads(raw2.decode("utf-8"))["text"])
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 連續失敗天數的錨點（2026-09-03）
+# ═══════════════════════════════════════════════════════════════════
+def _clear_days(days):
+    for d in days:
+        try:
+            os.remove(os.path.join(_TMP, f"{d}.jsonl"))
+        except Exception:
+            pass
+
+
+def test_streak_anchor():
+    print()
+    print("【14】★ 連續天數要錨在「報告的那一天」，不是「今天」")
+    D4 = (_TODAY - timedelta(days=4)).isoformat()
+    _clear_days([D0, D1, D2, D3, D4])
+
+    # ★ 關鍵佈局：**今天完全沒有失敗**（排程 01:00 UTC 跑的時候就是這樣），
+    #   而報告日 D1 往回連續 4 天都有 suruga-ya 的失敗。
+    write(D0, [entry(D0, "other.jp", True)])
+    for d in (D1, D2, D3, D4):
+        write(d, [entry(d, "suruga-ya.jp", False, "blocked", 403),
+                  entry(d, "ok.jp", True)])
+
+    # 先把「錯的錨點」會發生什麼事釘下來 —— 那是這個 bug 的證據
+    wrong = dg.failure_streaks(sm.recent_days(7))
+    check("★（bug 重現）錨在今天 → streaks 整個是空的",
+          wrong == {}, str(wrong))
+    check("★（bug 重現）所以 suruga-ya 的連續天數是 0",
+          wrong.get("suruga-ya.jp", 0) == 0, str(wrong.get("suruga-ya.jp", 0)))
+
+    right = dg.failure_streaks(sm.days_back_from(D1, 7))
+    check("★ 錨在報告日 → suruga-ya 連續 4 天", right.get("suruga-ya.jp") == 4,
+          str(right))
+
+    # 走完整的 run_once，看信裡到底有沒有那一段
+    clear_marker()
+    spy = Spy()
+    r = run(dg.run_once(D1, sender=spy))
+    body = spy.body
+    line = [l for l in body.splitlines() if "suruga-ya" in l]
+    check("有寄出", r["sent"] is True)
+    check("★ 信裡那一行帶「連續 4 天失敗」（本來整段不見）",
+          any("連續 4 天失敗" in l for l in line), str(line[:1]))
+    check("★ 兩個標記都在，中間用 ・ 隔開（不是只剩一個）",
+          any(("連續 4 天失敗" in l and chr(0x30FB) in l) for l in line),
+          str(line[:1]))
+
+    # 今天有沒有跑爬取，不可以影響報告日的統計
+    write(D0, [])
+    right2 = dg.failure_streaks(sm.days_back_from(D1, 7))
+    check("★ 今天連一筆紀錄都沒有，報告日的連續天數照樣算得出來",
+          right2.get("suruga-ya.jp") == 4, str(right2))
+
+    write(D0, [entry(D0, "suruga-ya.jp", False, "blocked", 403)])
+    right3 = dg.failure_streaks(sm.days_back_from(D1, 7))
+    check("★ 今天多了一筆失敗，也不會讓報告日的天數變多（錨點沒有飄）",
+          right3.get("suruga-ya.jp") == 4, str(right3))
+
+
+def test_days_back_from():
+    print()
+    print("【15】days_back_from 本身")
+    check("新到舊、含當天",
+          sm.days_back_from("2026-09-02", 3)
+          == ["2026-09-02", "2026-09-01", "2026-08-31"],
+          str(sm.days_back_from("2026-09-02", 3)))
+    check("跨月正確",
+          sm.days_back_from("2026-09-01", 3)
+          == ["2026-09-01", "2026-08-31", "2026-08-30"],
+          str(sm.days_back_from("2026-09-01", 3)))
+    check("n<1 當成 1", sm.days_back_from("2026-09-02", 0) == ["2026-09-02"],
+          str(sm.days_back_from("2026-09-02", 0)))
+    check("★ day 壞掉回空清單（不可以退回 recent_days，那等於把錯放回去）",
+          sm.days_back_from("not-a-day", 3) == [], str(sm.days_back_from("x", 3)))
+    check("空字串也回空清單", sm.days_back_from("", 3) == [])
+    check("★ 空清單餵給 failure_streaks 回空 dict（沒有假的連續天數）",
+          dg.failure_streaks([]) == {}, str(dg.failure_streaks([])))
+    # 與 recent_days 的錨點確實不同
+    check("★ 錨點與 recent_days 不同（同樣是 7 天，起點不一樣）",
+          sm.days_back_from(D1, 7)[0] != sm.recent_days(7)[0],
+          f"{sm.days_back_from(D1, 7)[0]} vs {sm.recent_days(7)[0]}")
+
+
 def main_():
     print("=" * 74)
     print("每日爬取摘要信")
@@ -686,6 +770,8 @@ def main_():
     test_run_once_flags()
     test_utf8_wire()
     test_utf8_encode_payload()
+    test_streak_anchor()
+    test_days_back_from()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

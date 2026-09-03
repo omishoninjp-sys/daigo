@@ -137,6 +137,9 @@ def failure_streaks(days: list) -> dict:
     """
     每個網域「連續幾天有失敗」（從 days[0] 往回數，days 必須是新到舊）。
 
+    ★ days[0] **必須是報告的那一天**，不是今天。呼叫端用
+      scrape_monitor.days_back_from(報告日, N) 產生，不要用 recent_days()。
+
     ★ 定義用寬鬆版：**當天該網域有失敗就算失敗日**，即使同一天也有成功。
       嚴格版（當天完全沒成功才算）會把最該抓的案例漏掉 ——
       gu-global.com 2026-09-02 有 3 次失敗、1 次成功，嚴格版連續天數會斷在這裡，
@@ -149,12 +152,15 @@ def failure_streaks(days: list) -> dict:
     first = True
     for day in days:
         rows = scrape_monitor.read_day(day)
-        failed_today = {r.get("domain") for r in rows if not r.get("ok") and r.get("domain")}
+        # ★ 變數名一定要是「那一天」不是「今天」—— 2026-09-03 錨錯的那個 bug，
+        #   在程式碼裡看起來就是這個名字讓人以為它一定從今天開始。
+        failed_that_day = {r.get("domain") for r in rows
+                           if not r.get("ok") and r.get("domain")}
         if first:
-            still_counting = set(failed_today)
+            still_counting = set(failed_that_day)
             first = False
         else:
-            still_counting &= failed_today
+            still_counting &= failed_that_day
         for dom in still_counting:
             streak[dom] = streak.get(dom, 0) + 1
         if not still_counting:
@@ -488,7 +494,13 @@ async def run_once(day: str, sender=None, mark: bool = True,
             return out
 
         rows = scrape_monitor.read_day(day)
-        streaks = failure_streaks(scrape_monitor.recent_days(DIGEST_STREAK_DAYS))
+        # 🔴 錨點必須是**報告的那一天**，不是「今天」（2026-09-03 修）。
+        #   本來是 recent_days(...)，錨在現在 —— 排程 01:00 UTC 跑的時候
+        #   「今天」幾乎是空的，failure_streaks 第一個集合就是空集合、
+        #   立刻 break，於是「連續 N 天失敗」在排程那條路徑上從來沒生效過。
+        #   手動觸發看得到，只是因為當天打、錨點剛好對。
+        streaks = failure_streaks(
+            scrape_monitor.days_back_from(day, DIGEST_STREAK_DAYS))
         subject, body = render_digest(day, rows, streaks)
         out["subject"] = subject
         out["body"] = body
