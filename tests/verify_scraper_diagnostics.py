@@ -206,12 +206,19 @@ async def test_gone_hint_scope():
           sm.classify_failure(http_status=403, gone_hint=True) == "blocked",
           sm.classify_failure(http_status=403, gone_hint=True))
 
-    # classify_failure 的參數沒有增加
+    # ★ 這一條原本是釘「不可以為了下架判定新增參數」。
+    #   2026-09-03 classify_failure 確實多了一個 noted_kinds，但那是**另一件事**
+    #   （Source 用 return None 吞掉的失敗原因要能決定 failure_kind），
+    #   與下架判定無關 —— 下架仍然走既有的 gone_hint。
+    #   斷言分成兩段：原意保留，簽章整個釘住，日後再有人想為某個分類
+    #   新增參數會在這裡紅，必須有意識地改這行。
     import inspect
     params = list(inspect.signature(sm.classify_failure).parameters)
-    check("★ classify_failure 參數沒有新增（沿用既有的 gone_hint）",
+    check("★ 下架判定沿用既有的 gone_hint，沒有為它新增參數",
+          "gone_hint" in params, str(params))
+    check("★ 簽章就是這 7 個（新增參數要有意識地改這裡）",
           params == ["http_status", "error", "timed_out", "block_hint",
-                     "gone_hint", "got_page"], str(params))
+                     "gone_hint", "got_page", "noted_kinds"], str(params))
 
     # fail-safe：沒 start() 過也不可以炸
     sm._ctx.set(None)

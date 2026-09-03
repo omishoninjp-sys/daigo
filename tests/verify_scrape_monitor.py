@@ -332,6 +332,207 @@ async def test_failsafe():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# Source 吞掉的失敗原因要能決定 failure_kind（2026-09-03）
+# ═══════════════════════════════════════════════════════════════════
+# Source 一律用 return None 表示失敗，網路層的原因只能靠 note_error 補回來，
+# 而 classify_failure 只看 record() 傳進來的 error 參數（那是 None）。
+# 於是「httpx 逾時但最後整條失敗」的紀錄 error_brief 寫「逾時」、
+# failure_kind 卻是 other —— 而摘要與警報看的是 failure_kind。
+#
+# ★ 這一組要證明兩件事：
+#   1. 對所有**原本不是 other** 的輸入，行為一個字都沒變（窮舉比對）
+#   2. 分類與 scrapers/platform.py 那三個 helper 的措辭綁在一起，
+#      措辭一改就會紅（不然分類會靜默失效）
+_U = "https://example.jp/item/1"
+
+
+def _old_classify(http_status=None, error=None, timed_out=False,
+                  block_hint=False, gone_hint=False, got_page=False):
+    """★ 改動前的 classify_failure 原樣抄過來，當作等價性比對的基準。"""
+    if timed_out:
+        return "timeout"
+    err_name = type(error).__name__ if error is not None else ""
+    err_text = f"{err_name}: {error}".lower() if error is not None else ""
+    if "timeout" in err_text or "timedout" in err_text:
+        return "timeout"
+    if http_status in (403, 429):
+        return "blocked"
+    if http_status in (404, 410):
+        return "not_found"
+    if block_hint:
+        return "blocked"
+    if gone_hint:
+        return "not_found"
+    if got_page or http_status == 200:
+        return "parse_failed"
+    return "other"
+
+
+def test_gate_equivalence():
+    print("\n【8】★ 窮舉證明：原本不是 other 的輸入，結果完全沒變")
+    import itertools
+    STATUS = [None, 200, 401, 403, 404, 410, 429, 500]
+    ERRORS = [None, TimeoutError("t"), ValueError("x")]
+    KINDSETS = [(), ("blocked",), ("not_found",), ("timeout",),
+                ("blocked", "timeout"), ("not_found", "timeout"),
+                ("blocked", "not_found"), ("blocked", "not_found", "timeout"),
+                ("something-else",)]
+    changed, gated, total = [], 0, 0
+    for st, err, to, bh, gh, gp in itertools.product(
+            STATUS, ERRORS, (False, True), (False, True), (False, True), (False, True)):
+        base = _old_classify(st, err, to, bh, gh, gp)
+        for kinds in KINDSETS:
+            total += 1
+            got = sm.classify_failure(http_status=st, error=err, timed_out=to,
+                                      block_hint=bh, gone_hint=gh, got_page=gp,
+                                      noted_kinds=kinds)
+            if base != "other":
+                if got != base:
+                    changed.append((st, type(err).__name__, to, bh, gh, gp,
+                                    kinds, base, got))
+            elif got != "other":
+                gated += 1
+    check(f"★ 原本不是 other 的組合完全沒變（跑了 {total} 組）",
+          not changed, f"變了 {len(changed)} 組：{changed[:2]}")
+    check("★ 只有原本會回 other 的才被接管", gated > 0, f"{gated} 組被接管")
+
+    diff = []
+    for st, err, to, bh, gh, gp in itertools.product(
+            STATUS, ERRORS, (False, True), (False, True), (False, True), (False, True)):
+        if (sm.classify_failure(http_status=st, error=err, timed_out=to,
+                                block_hint=bh, gone_hint=gh, got_page=gp)
+                != _old_classify(st, err, to, bh, gh, gp)):
+            diff.append((st, type(err).__name__, to, bh, gh, gp))
+    check("★ 不傳 noted_kinds 時等同改動前（預設值不改變行為）", not diff,
+          f"{len(diff)} 組不同")
+
+
+def test_gate_severity():
+    print("\n【9】接管時取最嚴重的，不取最後一個")
+
+    def k(kinds):
+        return sm.classify_failure(noted_kinds=kinds)
+
+    check("只有 timeout → timeout", k(("timeout",)) == "timeout")
+    # 🔴 順序**必須反過來也測**：note_error 是照發生順序 append 的，
+    #   ("timeout","blocked") 這種「最後一個剛好就是最嚴重的」根本分不出
+    #   「取最嚴重」與「取最後一個」。2026-09-03 的負向驗證就是這樣被瞞過去的
+    #   （注入「取最後一個」全綠）。下面每一對都刻意讓最後一個是**比較輕**的那個。
+    for pair, want in ((("blocked", "timeout"), "blocked"),
+                       (("blocked", "not_found"), "blocked"),
+                       (("not_found", "timeout"), "not_found")):
+        check(f"★ {pair} → {want}（最後一個是比較輕的那個，取最嚴重才會對）",
+              k(pair) == want, k(pair))
+    check("blocked + timeout（反序）也一樣",
+          k(("timeout", "blocked")) == "blocked", k(("timeout", "blocked")))
+    check("★ 順序與本函式自己的一致：blocked 先於 not_found",
+          k(("not_found", "blocked")) == "blocked", k(("not_found", "blocked")))
+    check("not_found 先於 timeout（反序）",
+          k(("timeout", "not_found")) == "not_found", k(("timeout", "not_found")))
+    check("三個都在 → blocked", k(("timeout", "not_found", "blocked")) == "blocked")
+    check("認不得的分類不影響", k(("whatever",)) == "other", k(("whatever",)))
+    check("空的照舊回 other", k(()) == "other" and k(None) == "other")
+
+
+def test_note_kind_binding():
+    print("\n【10】★ 分類與 helper 措辭綁死（措辭一改就要紅）")
+    import httpx as _httpx
+    from scrapers.platform import (http_fail_brief, net_error_brief,
+                                   missing_method_brief)
+
+    def kinds_of(brief_or_exc):
+        sm.start(_U)
+        sm.note_error(brief_or_exc, "Src")
+        return list((sm._ctx.get() or {}).get("error_kinds") or [])
+
+    # ★ 期望值由 helper 現算出來，不是抄一份字串在測試裡
+    check("★ http_fail_brief(403) → blocked",
+          kinds_of(http_fail_brief(403)) == ["blocked"], http_fail_brief(403)[:40])
+    check("http_fail_brief(401) → blocked", kinds_of(http_fail_brief(401)) == ["blocked"])
+    check("http_fail_brief(429) → blocked", kinds_of(http_fail_brief(429)) == ["blocked"])
+    check("★ http_fail_brief(404) → not_found",
+          kinds_of(http_fail_brief(404)) == ["not_found"], http_fail_brief(404)[:40])
+    check("★ net_error_brief(ReadTimeout) → timeout",
+          kinds_of(net_error_brief(_httpx.ReadTimeout("t"))) == ["timeout"],
+          net_error_brief(_httpx.ReadTimeout("t"))[:40])
+
+    # ★ 刻意不映射的幾類
+    check("★ http_fail_brief(500) 不映射（非 200 映到哪類都不對）",
+          kinds_of(http_fail_brief(500)) == [], http_fail_brief(500)[:40])
+    check("★ net_error_brief(ConnectError) 不映射（連線失敗多半是網址錯）",
+          kinds_of(net_error_brief(_httpx.ConnectError("x"))) == [])
+    check("★ missing_method_brief 不映射（能力警告不是失敗原因）",
+          kinds_of(missing_method_brief("_fetch_with_selenium", "Selenium 退路")) == [])
+    check("★ 未設 YAHOO_APP_ID 那句不映射",
+          kinds_of("未設 YAHOO_APP_ID，官方 API 救援整支跳過") == [])
+    check("★ 今天新增的「兩條路都不通」不映射（它一定伴隨 403，本來就是 blocked）",
+          kinds_of("兩條路都不通：httpx HTTP 403，瀏覽器載完仍只有 2.9KB") == [])
+
+    check("原始 ReadTimeout 物件 → timeout",
+          kinds_of(_httpx.ReadTimeout("t")) == ["timeout"])
+    check("原始 ConnectError 物件 → 不映射",
+          kinds_of(_httpx.ConnectError("x")) == [])
+    check("★ 型別名是精確比對，不是子字串",
+          kinds_of(RuntimeError("connect timeout happened")) == [],
+          "訊息含 timeout 但型別不是逾時類，不可以誤判")
+
+    sm.start(_U)
+    sm.note_error(http_fail_brief(403), "MUJI/httpx")
+    st = sm._ctx.get() or {}
+    check("★ 加了 where 前綴仍然分得出來（分類要在加前綴之前算）",
+          st.get("error_kinds") == ["blocked"], str(st.get("error_kinds")))
+    check("error_brief 本身還是帶 where 前綴",
+          (st.get("errors") or [""])[0].startswith("MUJI/httpx: "),
+          (st.get("errors") or [""])[0][:30])
+
+
+def test_end_to_end_kind():
+    print("\n【11】★ 端到端：Source 吞掉的逾時最後真的變成 timeout")
+    from scrapers.platform import net_error_brief
+    import httpx as _httpx
+
+    sm.start(_U)
+    sm.note_error(net_error_brief(_httpx.ReadTimeout("")), "MUJI/httpx")
+    sm.record(_U, product=_FakeProduct(False), elapsed_ms=31494)
+    e = sm.read_day()[-1]
+    check("ok=False", e["ok"] is False)
+    check("★ failure_kind = timeout（修正前是 other）",
+          e["failure_kind"] == "timeout", e["failure_kind"])
+    check("error_brief 仍然說得出原因", "逾時" in e["error_brief"], e["error_brief"][:60])
+
+    sm.start(_U)
+    sm.note_http(404)
+    sm.note_error(net_error_brief(_httpx.ReadTimeout("")), "Src")
+    sm.record(_U, product=_FakeProduct(False), elapsed_ms=10)
+    e = sm.read_day()[-1]
+    check("★ 有 404 時仍是 not_found（既有訊號優先，gate 碰不到）",
+          e["failure_kind"] == "not_found", e["failure_kind"])
+
+    sm.start(_U)
+    sm.note_error(net_error_brief(_httpx.ReadTimeout("")), "Src")
+    sm.record(_U, product=_FakeProduct(True), elapsed_ms=10)
+    e = sm.read_day()[-1]
+    check("成功筆 failure_kind 仍是空的", e["ok"] is True and e["failure_kind"] == "")
+    check("成功筆的原因進 warnings", "逾時" in e["warnings"], e["warnings"][:50])
+
+
+def test_error_kinds_failsafe():
+    print("\n【12】fail-safe 與欄位集合")
+    sm.start(_U)
+    st = sm._ctx.get()
+    check("start() 有初始化 error_kinds", st.get("error_kinds") == [], str(st.get("error_kinds")))
+    st["error_kinds"] = object()          # 弄壞它
+    sm.note_error("被擋：HTTP 403（x）", "Src")
+    before = len(sm.read_day())
+    sm.record(_U, product=_FakeProduct(False), elapsed_ms=1)
+    check("★ error_kinds 壞掉仍然寫得出紀錄", len(sm.read_day()) == before + 1,
+          f"{before} -> {len(sm.read_day())}")
+    e = sm.read_day()[-1]
+    check("★ error_kinds 不進 JSONL（欄位集合不變）", "error_kinds" not in e,
+          str(sorted(e)))
+
+
 async def main():
     print("=" * 74)
     print("爬取監控驗證（只記錄、不寄信階段）")
@@ -342,6 +543,11 @@ async def main():
     test_write_and_fields()
     test_content_fields()
     await test_failsafe()
+    test_gate_equivalence()
+    test_gate_severity()
+    test_note_kind_binding()
+    test_end_to_end_kind()
+    test_error_kinds_failsafe()
 
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

@@ -84,7 +84,8 @@ def start(url: str) -> None:
     try:
         _ctx.set({"url": url, "http_status": None, "source": "",
                   "platform_id": "", "errors": [], "redirect_to": "",
-                  "block_hint": False, "gone_hint": False})
+                  "block_hint": False, "gone_hint": False,
+                  "error_kinds": []})
     except Exception as e:
         print(f"[ScrapeLog] start 失敗（略過）: {type(e).__name__}: {e}")
 
@@ -223,6 +224,59 @@ def note_platform(platform_id: str) -> None:
         print(f"[ScrapeLog] note_platform 失敗（略過）: {type(e).__name__}: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# note_error 當下就把分類算好，不要事後拿字串去猜
+# ─────────────────────────────────────────────────────────────────────
+# 🔴 為什麼分類要在這裡做，而不是在 classify_failure 裡比對訊息（2026-09-03）
+#   Source 一律用 return None 表示失敗，網路層的原因只能靠 note_error 補回來
+#   （見 .claude/rules/scraping-price.md）。那些原因**進不了 failure_kind**：
+#   classify_failure 只看 record() 傳進來的 error 參數，而那個參數是 None。
+#   於是「httpx 逾時但最後整條失敗」的紀錄，error_brief 寫「逾時」，
+#   failure_kind 卻是 other —— 而摘要與警報看的是 failure_kind。
+#
+#   把分類放在 note_error 當下有三個好處：
+#     · 字串比對只存在**一個地方**，不會散到 classify_failure 去
+#     · 例外物件用**型別名**精確比對（ASCII、不是子字串猜）
+#     · classify_failure 維持純函式，它那 11 條分類表測試一條都不用改
+#
+# ★ 字串比對用 startswith 錨定開頭，比對的是**我們自己產生的** brief
+#   （scrapers/platform.py 的三個 helper）。措辭一改分類就會靜默失效，
+#   所以有一支測試把兩邊綁死：期望值由 http_fail_brief(403) 現算出來。
+_NOTE_KIND_PREFIX = (
+    ("被擋：HTTP ", "blocked"),
+    ("頁面不存在：HTTP ", "not_found"),
+    ("逾時（", "timeout"),
+)
+
+# 例外物件走型別名，不碰訊息內容
+_TIMEOUT_TYPES = (
+    "TimeoutError", "TimeoutException", "ReadTimeout", "ConnectTimeout",
+    "WriteTimeout", "PoolTimeout",
+)
+
+
+def _note_kind(error, brief: str) -> str:
+    """
+    這一則 note_error 對應到哪個 failure_kind；對不上回空字串。
+
+    ★ 刻意**不映射**的幾類：
+      連線失敗（ConnectError）  多半是網址錯或站掛了，不是被擋也不是逾時
+      非 200（500 之類）        站的暫時性錯誤，映到哪一類都不對
+      引擎沒有 X()              那是能力警告，不是這次失敗的原因
+      未設 YAHOO_APP_ID         同上，是設定問題
+      硬要給它們一個分類，只會讓摘要指向錯的地方。
+    """
+    try:
+        if not isinstance(error, str):
+            return "timeout" if type(error).__name__ in _TIMEOUT_TYPES else ""
+        for prefix, kind in _NOTE_KIND_PREFIX:
+            if brief.startswith(prefix):
+                return kind
+    except Exception:
+        pass
+    return ""
+
+
 def note_error(error, where: str = "") -> None:
     """
     Source 內部把例外吞掉時，把失敗原因交給監控。
@@ -240,6 +294,12 @@ def note_error(error, where: str = "") -> None:
         brief = (brief or "").replace("\n", " ").strip()
         if not brief:
             return
+        # ★ 一定要在加上 where 前綴**之前**算分類 —— 前綴會讓 startswith 失效
+        kind = _note_kind(error, brief)
+        if kind:
+            kinds = state.setdefault("error_kinds", [])
+            if kind not in kinds:
+                kinds.append(kind)
         if where:
             brief = f"{where}: {brief}"
         errs = state.setdefault("errors", [])
@@ -255,12 +315,16 @@ def note_error(error, where: str = "") -> None:
 # ─────────────────────────────────────────────────────────────────────
 def classify_failure(http_status=None, error=None, timed_out: bool = False,
                      block_hint: bool = False, gone_hint: bool = False,
-                     got_page: bool = False) -> str:
+                     got_page: bool = False, noted_kinds=()) -> str:
     """
     回傳 blocked / parse_failed / not_found / timeout / other。
 
     判斷順序有意義：先看逾時（最明確），再看 HTTP 狀態碼，再看內容特徵，
     最後才是「拿到頁面卻抽不出欄位」。
+
+    noted_kinds 是 Source 透過 note_error 補回來的分類（state["error_kinds"]）。
+    ★ 它**只在既有邏輯什麼都判斷不出來時**才會被用到 —— 見函式最後。
+      這樣可以證明：對所有原本不是 other 的輸入，行為一個字都沒變。
     """
     if timed_out:
         return "timeout"
@@ -283,6 +347,33 @@ def classify_failure(http_status=None, error=None, timed_out: bool = False,
     if got_page or http_status == 200:
         return "parse_failed"
 
+    # ★ 走到這裡代表既有訊號什麼都判斷不出來（本來一律回 other），
+    #   才輪到 Source 自己 note 出來的分類。**gate 放在最後一行**是刻意的：
+    #   上面每個分支都是 return，新程式碼碰不到它們，所以
+    #   「原本不是 other 的輸入，結果完全不變」是可以窮舉證明的。
+    # ★ 取**最嚴重**的，不取最後一個：note_error 只留最後 3 則，
+    #   最後一則往往是最弱的那層退路（generic Playwright），資訊量最低。
+    #   順序抄本函式自己的（403/429 先於 404/410），處置成本也同向 ——
+    #   被擋要花錢買代理，逾時只要觀察。
+    # ★ 整段包 try：noted_kinds 是輔助資訊，壞掉不可以害**整筆紀錄**寫不出來。
+    #   `in` 對非序列會拋 TypeError，而它會一路穿透到 record() 的外層 except ——
+    #   跟 2026-09-02 _safe_price 那次一模一樣：為了兩個診斷欄位賠掉整筆，
+    #   而失敗路徑正是最需要紀錄的時候。
+    try:
+        for kind in ("blocked", "not_found", "timeout"):
+            if kind in (noted_kinds or ()):
+                return kind
+    except Exception:
+        pass
+
+    # 🔴 已知的誤標風險（2026-09-03，這次刻意不修）
+    #   「httpx 逾時 → 退路用瀏覽器抓到頁 → 解析失敗」會落到這裡並讀到
+    #   timeout，但真正該修的是解析。原因是 got_page 目前只看 http_status，
+    #   而 Selenium 成功抓到 HTML **不會**設 http_status
+    #   （MUJI 那 4 筆 http_status 全是 None 就是證據）。
+    #   要根治得讓 Selenium 那條也回報「我拿到頁面了」，那是另一個改動；
+    #   在那之前，timeout 在這條路徑上的意思是「過程中有逾時」而不是
+    #   「這次失敗是逾時造成的」。
     return "other"
 
 
@@ -451,6 +542,9 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
                 block_hint=bool(state.get("block_hint")),
                 gone_hint=bool(state.get("gone_hint")),
                 got_page=got_page,
+                # ★ Source 吞掉的失敗原因（note_error 當下就分好類了）。
+                #   只在上面全部判斷不出來時才會被採用。
+                noted_kinds=state.get("error_kinds") or (),
             ),
             # ── 抓到的內容本身（規格第一節只記「爬取過程」，記不到「值對不對」）
             # ★ 2026-09-02 加。今天三個實際損失（brand 污染 67% 持續三個月、
