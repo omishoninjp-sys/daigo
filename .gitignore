@@ -11,3 +11,6 @@ analyze_*.py
 audit_markup.json
 source_analysis.csv
 generic_domains_*.csv
+.claude/settings.local.json
+.claude/hooks/_probe*.txt
+.claude/hooks/__pycache__/
