@@ -620,6 +620,9 @@ _SECONDHAND_HOSTS = (
     "paypayfleamarket.yahoo.co.jp",
     "suruga-ya.jp",
     "netmall.hardoff.co.jp",
+    # (b) 二手專門店，性質同駿河屋；12 個月訂單 0 筆、10 天爬取 0 次，
+    #     **無成交佐證**。2026-09-07 依使用者指示加入，同批也加進 theme 的 ALLOW。
+    "mandarake.co.jp",
 )
 # ⚠️ auctions.yahoo.co.jp 刻意**不在**豁免清單裡。
 #    該站同時有純競標與即決（Buy It Now），只有即決做得了，
@@ -682,6 +685,58 @@ _SOFT_WARNING = [
 ]
 
 
+# ── 純網域硬擋表：整站商品都不接的官方通路 ──────────────────────────
+#
+# ★ 這張表的判斷**不需要 title**，所以呼叫端要擺在爬取「之前」
+#   （見 detect_restricted_host）。放在爬取之後就等於沒有用：
+#   2026-09-07 線上實測，beyblade.takaratomy.co.jp 與 takaratomymall.jp
+#   都爬不出 title（各逾時 60 秒），`if not product.title: return` 先命中，
+#   detect_restricted_category 根本沒被呼叫，客人拿到的是
+#   「無法從此連結抓取商品資訊」＋手動填寫表單，而不是攔截訊息。
+#
+# 🔴 進這張表的門檻有兩條，缺一不可：
+#    (1) **整站單一品類**，沒有我們做得到的東西
+#    (2) **12 個月請到款 = 0**（「未取消」不算，這家店手動請款，
+#        EXPIRED 是授權過期沒收到錢）
+#
+#    2026-09-07 驗證（12 個月完整訂單，1,309 筆／2,308 line item）：
+#      1kuji.com               一番くじ倶楽部＝BANDAI SPIRITS 官方**情報站**，
+#                              無購物車、無外連購物站，全站 100% 一番賞。
+#                              2 件下單（NT$25,000）／請到款 0
+#      30th.pokemon-card.com   ポケモンカード30周年**特別站**，有税込價格但無購物車，
+#                              全站 100% TCG。3 件下單（NT$45,384）／請到款 0
+#      beyblade.takaratomy.co.jp  BEYBLADE X **入口站**，無購物車，
+#                              外連只到 takaratomymall.jp，全站 100% BEYBLADE。
+#                              2 件下單（NT$6,717）／請到款 0
+#    三站合計 7 件、NT$77,101 下單，**請到款 0 元** → 整域擋零營收損失。
+#
+# 🔴 刻意**不**進這張表的兩個站（同站有做得到的商品，維持標題條件）：
+#    pokemoncenter-online.com  12 個月唯一請到款的是 **Switch 遊戲軟體**
+#                              『口袋妖怪 火紅版』NT$23,759，不是卡牌；
+#                              「Pokémon Center」標籤另有 4 件請到款 NT$10,822，
+#                              全是皮卡丘毛絨玩具與卡片插畫收藏，
+#                              而取消的 36 件（NT$275,321）全是卡包／擴充包。
+#                              → 標題條件方向正確：擋卡牌、放行布偶文具。
+#    takaratomymall.jp         12 個月 26 件、請到款 15 件 NT$42,422，
+#                              成交率 58%（同期 Amazon 22%／樂天 19%／
+#                              Yodobashi 10%）。⚠️ 但那 15 件**全部命中**
+#                              下面的 _BEYBLADE_MODEL —— 現行規則擋掉的
+#                              正好是這個站唯一有成交紀錄的品項。
+#                              成交全部集中在 2026-03~05，2026-06 之後
+#                              同型號（UX-00 前 28 件成交 14／後 31 件成交 0，
+#                              CX-00 前 4/2、後 27/0）一件都做不到，
+#                              而該站近 30 天爬取只有 1 次。
+#                              → 現在擋是對的，但理由是「供給端斷了」，
+#                                不是舊註解說的「它同時賣トミカ」——
+#                                トミカ 在 12 個月訂單裡**一筆都沒有**，
+#                                那句話沒有成交佐證。
+_RESTRICTED_HOSTS = (
+    ("1kuji.com", _MSG_ICHIBAN),
+    ("30th.pokemon-card.com", _MSG_POKEMON_CARD),
+    ("beyblade.takaratomy.co.jp", _MSG_BEYBLADE),
+)
+
+
 def _restricted_host(url: str) -> str:
     """從 url 取 host；取不到回空字串（手動建單常常沒有網址）。"""
     try:
@@ -698,6 +753,33 @@ def _is_pokemon_card(haystack: str) -> bool:
         return False
     # ★ 順序不拘 —— 「寶可夢 卡片擴充包」與「拡張パック ポケモン」都要算
     return bool(_POKEMON_PACK_WORD.search(haystack) or _POKEMON_ANNIV.search(haystack))
+
+
+def detect_restricted_host(url: str) -> tuple[str, str] | None:
+    """
+    只看網域的硬擋。**在爬取之前呼叫**（detect_blocked / detect_invalid_link 之後）。
+
+    回傳 ("hard", 說明) 或 None。
+
+    ★ 與 detect_restricted_category 的分工：
+        這支    純網域，不需要 title，擋得掉「爬不動的官方站」
+        那支    需要 title（品類關鍵字、型番），只能擺在爬取之後
+      兩支都要呼叫，順序是先這支再那支。
+
+    ★ 這支也是手動建單漏洞的補丁：手動表單的標題是客人自己打的，
+      打中文泛稱（「卡盒」「BLEACH 公仔」）就繞得過關鍵字規則，
+      但繞不過網域。2026-09-07 實測繞過情形：
+        寶可夢官方 + 打「ポケモンカード 拡張パック」→ 擋下
+        寶可夢官方 + 打「寶可夢卡盒」            → **放行**
+        1kuji 官方 + 打「BLEACH 公仔」          → **放行**
+    """
+    host = _restricted_host(url)
+    if not host:
+        return None
+    for domain, msg in _RESTRICTED_HOSTS:
+        if _host_matches(host, domain):
+            return ("hard", msg)
+    return None
 
 
 def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | None:

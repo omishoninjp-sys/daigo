@@ -41,6 +41,38 @@ Shopify 商店：`fd249b-ba.myshopify.com` / `goyoutati.com`
 所以：印出實際取到的原始數值、跑真實網址、給前後對照。
 **樣本要涵蓋要驗的情境** —— 測變體價格就要找真的有多種價格的頁面。
 
+### 2-1. 🔴 跨層註解不可信，除非附了驗證日期
+
+**後端註解描述前端行為、或前端註解描述後端行為，一律當成「沒有驗證過」。**
+要寫這種註解，必須先實際跑過另一層，並在註解裡附上驗證日期。
+
+2026-09-07 的實例：`main.py` 的 `ScrapeResponse.blocked` 上寫著
+
+```python
+blocked: bool = False  # ← True 表示此網站被封鎖（前端應顯示錯誤訊息，不要切到「手動填寫」UI）
+```
+
+**這句是假的。** 抓線上正在服務的 `assets/daigo.js`（19,659 bytes）全檔搜尋，
+`blocked` 出現 **0 次**；實際邏輯是
+`if (!data.success || !data.product || !data.product.title) { showManualForm(url); return }`。
+也就是四則硬擋訊息（寶可夢卡牌／BEYBLADE／一番賞／抽選販售）**從來沒有顯示給任何客人看過**，
+全部被當成「抓取失敗」切到手動填寫表單。
+
+代價不只是一個 bug：那一整天的攔截驗證都建立在「後端回 blocked=true 就等於客人被擋下」
+這個錯誤前提上，`/api/scrape` 測出來的 4/6 通過因此**高估了實際效果**。
+**註解會變成下一輪推理的前提，錯的註解比沒有註解更貴。**
+
+怎麼寫才算數：
+
+```python
+# 前端行為（2026-09-07 抓線上 assets/daigo.js 實測）：
+#   blocked=True  → showError(error, handoff_url)，停在輸入步驟
+#   blocked=False 且沒有 title → showManualForm()
+```
+
+同一條規則反向也成立：`daigo.js` 裡不可以寫「後端會擋掉 X」而沒驗過。
+**驗的方法是打一次 API 看回應，或抓一次線上資產看原始碼，不是讀對面的原始碼推論。**
+
 ### 3. 線上寫入要分級，不是一律問或一律不問
 
 | 級別 | 例子 | 做法 |

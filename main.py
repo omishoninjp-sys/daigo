@@ -372,7 +372,14 @@ class ScrapeResponse(BaseModel):
     product: dict | None = None
     pricing: dict | None = None
     error: str | None = None
-    blocked: bool = False  # ← True 表示此網站被封鎖（前端應顯示錯誤訊息，不要切到「手動填寫」UI）
+    # blocked=True 的意思是「**這條連結我們不承接，不要讓客人自己補資料建單**」，
+    # 涵蓋：封鎖網站、受限品類、非商品頁連結。
+    # 前端行為（2026-09-07 抓線上 assets/daigo.js 實測，非讀原始碼推論）：
+    #   blocked=true                     → showError(error, handoff_url)，停在輸入步驟
+    #   blocked=false 且沒有 product.title → showManualForm()
+    # 🔴 2026-09-07 之前這裡寫著「前端已支援」，但線上 daigo.js 全檔沒有 blocked 這個字，
+    #    四則硬擋訊息從來沒顯示給任何客人看過。跨層註解一律要實測過才寫，見 CLAUDE.md 2-1。
+    blocked: bool = False
     queue_info: dict | None = None
 class CreateOrderRequest(BaseModel):
     url: str
@@ -389,7 +396,7 @@ class CreateOrderResponse(BaseModel):
     checkout_url: str | None = None
     admin_url: str | None = None
     error: str | None = None
-    blocked: bool = False  # ← True 表示此網站被封鎖
+    blocked: bool = False  # 語意同 ScrapeResponse.blocked
 class SearchRequest(BaseModel):
     query: str
     source: str = "rakuten"
@@ -527,7 +534,8 @@ async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
-        from scrapers.base import detect_blocked, detect_invalid_link, detect_restricted_category
+        from scrapers.base import (detect_blocked, detect_invalid_link,
+                                    detect_restricted_host, detect_restricted_category)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站: {url[:80]}")
@@ -539,12 +547,28 @@ async def scrape_product(req: ScrapeRequest):
             )
         # ★ 非商品頁連結（圖片直連／搜尋結果／短網址／本站自己）擋在爬取之前，
         #   也不進 scrape_monitor 的失敗紀錄（那份資料是用來排「哪個網域該修」的）
+        # 🔴 blocked=True：這四種連結一樣不該讓客人切到手動填寫表單自己補資料。
+        #    2026-09-07 之前回 blocked=False，所以那四則說明也從來沒顯示過，
+        #    客人照樣被丟到手動表單 —— generic-longtail 裡的 Cdn.filestackcontent
+        #    就是圖床網址被當商品建進來的。
         invalid_reason = detect_invalid_link(url)
         if invalid_reason:
             print(f"[API] 🔗 非商品頁連結: {url[:80]}")
             return ScrapeResponse(
                 success=False,
+                blocked=True,
                 error=invalid_reason,
+                queue_info={"active": _active_count, "waiting": _queue_count},
+            )
+        # ★ 純網域硬擋：**一定要擺在爬取之前**。這些官方站爬不出 title
+        #   （2026-09-07 實測各逾時 60 秒），擺在爬取之後永遠走不到。
+        host_restricted = detect_restricted_host(url)
+        if host_restricted:
+            print(f"[API] 🚫 受限通路（網域）: {url[:80]}")
+            return ScrapeResponse(
+                success=False,
+                blocked=True,
+                error=host_restricted[1],
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         product: ProductInfo = await scrape_with_queue(url)
@@ -591,7 +615,8 @@ async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站
-        from scrapers.base import detect_blocked, detect_invalid_link, detect_restricted_category
+        from scrapers.base import (detect_blocked, detect_invalid_link,
+                                    detect_restricted_host, detect_restricted_category)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
@@ -600,13 +625,23 @@ async def create_order(req: CreateOrderRequest):
                 blocked=True,
                 error=blocked_reason,
             )
-        # ★ 非商品頁連結，同 /api/scrape
+        # ★ 非商品頁連結，同 /api/scrape（blocked=True 的理由也同）
         invalid_reason = detect_invalid_link(url)
         if invalid_reason:
             print(f"[API] 🔗 非商品頁連結（建單嘗試）: {url[:80]}")
             return CreateOrderResponse(
                 success=False,
+                blocked=True,
                 error=invalid_reason,
+            )
+        # ★ 純網域硬擋，擺在爬取之前，理由同 /api/scrape
+        host_restricted = detect_restricted_host(url)
+        if host_restricted:
+            print(f"[API] 🚫 受限通路（網域，建單嘗試）: {url[:80]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=host_restricted[1],
             )
         # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
         # 一般平台：先試 cache，沒有才爬
@@ -689,14 +724,25 @@ async def create_manual_order(req: ManualOrderRequest):
         manual_pricing = calculate_selling_price(original_jpy)
         # ★ 新增：source_url 也要過黑名單（手動建單一樣要擋，防止繞過前端攔截）
         if req.source_url:
-            from scrapers.base import detect_blocked
-            blocked_reason = detect_blocked(req.source_url.strip())
+            from scrapers.base import detect_blocked, detect_restricted_host
+            _su = req.source_url.strip()
+            blocked_reason = detect_blocked(_su)
             if blocked_reason:
                 print(f"[API] 🚫 封鎖網站（手動建單嘗試）: {req.source_url[:80]}")
                 return CreateOrderResponse(
                     success=False,
                     blocked=True,
                     error=blocked_reason,
+                )
+            # ★ 純網域硬擋。這條是手動路徑漏洞的主要補丁：
+            #   標題是客人自己打的，打中文泛稱就繞得過關鍵字規則，但繞不過網域。
+            host_restricted = detect_restricted_host(_su)
+            if host_restricted:
+                print(f"[API] 🚫 受限通路（網域，手動建單）: {req.source_url[:80]}")
+                return CreateOrderResponse(
+                    success=False,
+                    blocked=True,
+                    error=host_restricted[1],
                 )
         # ★ 手動表單的標題是客人自己打的，一樣要擋 ——
         #   否則爬取失敗的卡牌會從這條路溜進來。
