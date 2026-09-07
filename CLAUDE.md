@@ -299,6 +299,61 @@ FakeResp 少一個 cookies 欄位，無關的 AttributeError 混進 error_brief�
 
 ---
 
+## 🔴 本機開發（三條，每一條都已經害人踩過）
+
+### 1. `python main.py` 會刪掉線上商品
+
+啟動後 **60 秒**跑第一次 `_auto_cleanup_loop`，刪除 `DAIGO_COLLECTION_ID` 系列裡
+超過 `DAIGO_AUTO_DELETE_DAYS` 天的商品 —— 用的是 `.env` 裡的**正式 token**。
+本機只是要測一支 API，卻會動到線上資料。
+
+```bash
+DAIGO_COLLECTION_ID="" python main.py     # ← 本機一律這樣起
+```
+
+`cleanup_old_daigo_products` 第一行就是 `if not DAIGO_COLLECTION_ID: return`，
+fail-closed，log 會印「⚠️ 中止：DAIGO_COLLECTION_ID 未設定，已刪除 0 件」。
+2026-09-07 直接 `python main.py` 起過一次，在 60 秒內砍掉行程才沒出事。
+
+### 2. 跑測試要 `PYTHONPATH=.`
+
+`tests/` 底下的測試 `import main` / `from pricing import ...`，
+直接 `python tests/xxx.py` 會 `ModuleNotFoundError`。**24 支測試全部如此**，
+不是哪一支的問題。
+
+```bash
+PYTHONPATH=. python tests/verify_restricted_category.py
+```
+
+根目錄有 `conftest.py`，但那只在 pytest 路徑生效（而且本機沒裝 pytest）。
+
+### 3. 🔴🔴 本機沒有 SeleniumBase —— 本機測 scraper 的結果一律不可信
+
+需要瀏覽器渲染的 scraper（grail／amiami／newbalance／netmall／generic 的
+Selenium 分支…）在本機會直接印 `[Driver] seleniumbase 未安裝`，
+然後在 **1–3 毫秒**內失敗。那個失敗**看起來跟「網站擋我們」「scraper 壞了」
+一模一樣**，只是快得不合理。
+
+**2026-09-07 已經因此誤報過一次**：本機重爬 15 筆得到「7 筆失敗」，
+據此差點結論「grail／amiami／newbalance 的 scraper 全壞了」。
+改打正式環境後，grail 新舊兩種路徑都正常、newbalance 取到的價與建單原價
+完全一致 —— **那 7 筆全是本機環境造成的假象**。
+
+判斷方法：**看耗時**。正常的瀏覽器爬取是 10–50 秒，
+本機缺件的失敗是 0.0 秒。看到 0.0s 失敗先想這一條。
+
+要驗證 scraper 只有兩條路：
+
+```bash
+# a) 打正式環境（有 SeleniumBase）——/api/scrape 不寫入 Shopify，安全
+curl -X POST https://goyoutatidaigo.zeabur.app/api/scrape \
+     -H "X-API-Key: $API_SECRET_KEY" -d '{"url":"..."}'
+
+# b) 本機裝 seleniumbase（requirements.txt 裡有）
+```
+
+---
+
 ## 使用者的執行環境：Windows PowerShell 5.1
 
 不是 PowerShell 7，也不是 bash。
