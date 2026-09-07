@@ -6,11 +6,12 @@ GOYOUTATI DAIGO 代購系統 API v3.4
 - SEO 最佳化標題（ChatGPT 翻譯）
 - 併發限制 + 排隊機制 + 超時保護
 """
+import os
 import re
 import time
 import asyncio
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -423,6 +424,66 @@ class SuggestResponse(BaseModel):
     suggestions: list[SuggestItem] = []
     error: str | None = None
 # === Endpoints ===
+# ── 部署識別（模組載入時算一次）──────────────────────────────
+# 🔴 為什麼需要這個（2026-09-07）：
+#   `version` 是寫死的 "3.4.0"，同一天四次不同部署都回同一個值，
+#   **完全沒辦法用它判斷「我推的那版上線了沒」**。
+#   當天就是因為缺這個訊號，改用「打 create-manual 看有沒有被擋」當探針 ——
+#   而攔截生效前的每一次探測都真的建立了一件商品，共 13 件。
+#   有了 git_sha 之後，部署驗證就是「打一次 health、比對 sha」，唯讀且明確。
+#
+# ★ 取值順序刻意由「平台注入」優先於「本地 git」：容器裡通常沒有 .git。
+# ★ 整段包 try/except —— health 是給監控打的，它自己絕不可以掛。
+def _detect_git_sha() -> str:
+    for key in ("ZEABUR_GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT_SHA",
+                "SOURCE_COMMIT", "GIT_COMMIT", "COMMIT_SHA", "GIT_SHA"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return v[:12]
+    # ★ 直接讀 .git 的檔案，**不呼叫 git 指令** ——
+    #   正式環境的 image 是 python:3.11-slim，Dockerfile 沒有安裝 git，
+    #   subprocess 那條在容器裡一定失敗。而沒有 .dockerignore，
+    #   `COPY . .` 會把 .git 一起帶進 image，所以讀檔這條行得通。
+    try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        gitdir = os.path.join(root, ".git")
+        head = open(os.path.join(gitdir, "HEAD"), encoding="utf-8").read().strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1].strip()
+            p = os.path.join(gitdir, *ref.split("/"))
+            if os.path.exists(p):
+                return open(p, encoding="utf-8").read().strip()[:12]
+            # 分支被打包進 packed-refs（clone 後常見）
+            packed = os.path.join(gitdir, "packed-refs")
+            if os.path.exists(packed):
+                for line in open(packed, encoding="utf-8"):
+                    line = line.strip()
+                    if line and not line.startswith(("#", "^")) and line.endswith(" " + ref):
+                        return line.split(" ", 1)[0][:12]
+        elif len(head) >= 7:
+            return head[:12]        # detached HEAD
+    except Exception:
+        pass
+    # 最後才試 git 指令（本機開發用；容器裡沒有 git）
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
+                             capture_output=True, text=True, timeout=3,
+                             cwd=os.path.dirname(os.path.abspath(__file__)))
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+try:
+    GIT_SHA = _detect_git_sha()
+except Exception:
+    GIT_SHA = "unknown"
+STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @app.get("/api/health")
 async def health():
     driver_status = scraper.get_driver_status()
@@ -430,6 +491,12 @@ async def health():
         "status": "ok",
         "service": "daigo-api",
         "version": "3.4.0",
+        # ★ 判斷「部署上線了沒」看這兩個，不要看 version（那是寫死的）。
+        #   started_at 是**行程啟動時間** —— Zeabur 每次部署都重啟容器，
+        #   所以它等同於本次部署的生效時間。刻意不叫 build_time：
+        #   真正的建置時間需要建置步驟寫檔才知道，這裡不假裝有那個資訊。
+        "git_sha": GIT_SHA,
+        "started_at": STARTED_AT,
         "cache_size": len(_scrape_cache),
         "cache_ttl": CACHE_TTL,
         "no_cache_domains": list(NO_CACHE_DOMAINS),
