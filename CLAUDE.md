@@ -209,11 +209,15 @@ generic 從 og 標籤湊出店名 + 頁面上某件商品的價格，就當成�
 path 空的卻確實是商品頁。分類頁（`/items?bc=J`）目前擋不掉，仍會生出假商品。
 
 **🔴 但不可以只憑 `source_url` 判定商品是不是假的 —— 手動填寫的商品不適用這條規則。**
-`/api/create-manual` 讓工作人員手動建商品，`source_url` 可能是首頁、可能不完整，
+`/api/create-manual` **不是工作人員用的，是客人用的** —— 爬取失敗時前端
+（`daigo.js` 的 Step 1b 手動表單）讓**客人自己**填商品名稱與日幣價格，
+`source_url` 帶的是客人原本貼的那條連結，可能是首頁、可能不完整，
 之後才在後台補正連結與金額，**商品本身是真的**。
+🔴 因為填的人是客人不是工作人員，這條路徑的 `detect_restricted_category`
+**必須照擋**（爬取失敗的卡牌會從這裡溜進來），不可以因為「手動」就放寬。
 
 **而且系統沒有記錄商品是怎麼被建立的**：`/api/create-order`（爬取）與
-`/api/create-manual`（手動）走同一支 `create_daigo_product`，tags、metafields
+`/api/create-manual`（爬取失敗時客人自己填）走同一支 `create_daigo_product`，tags、metafields
 完全一樣；連 `source:xxx` 標籤都不能用來分辨 —— 沒帶 `platform_id` 時它會
 退而用 `detect_platform(source_url)` 補上。商品刪掉之後 Shopify 也查不到痕跡
 （`/products/{id}/events.json` 回 404，全店 Product 事件翻 3,000 筆也沒有）。
