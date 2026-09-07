@@ -85,7 +85,7 @@ def start(url: str) -> None:
         _ctx.set({"url": url, "http_status": None, "source": "",
                   "platform_id": "", "errors": [], "redirect_to": "",
                   "block_hint": False, "gone_hint": False,
-                  "error_kinds": []})
+                  "error_kinds": [], "price_cands": {}, "price_vals": {}})
     except Exception as e:
         print(f"[ScrapeLog] start 失敗（略過）: {type(e).__name__}: {e}")
 
@@ -221,6 +221,42 @@ def note_page_settled(size) -> None:
               f"—— 這個網域需要住宅代理")
     except Exception as e:
         print(f"[ScrapeLog] note_page_settled 失敗（略過）: {type(e).__name__}: {e}")
+
+
+def note_price_candidates(picked: dict, cand_vals: dict = None) -> None:
+    """
+    記下取價時**每一條規則各自會選出什麼**（generic 專用，其他 scraper 沒有候選概念）。
+
+    ★ 這支只記錄，不參與判斷。加它的原因（2026-09-07）：
+      auctions.yahoo 的商品頁同時有「現在価格 ¥3,850」與「即決価格 ¥4,950」，
+      generic 取到 3,850 —— 售價算出來 ¥4,812，**低於我們要付的 ¥4,950**。
+      這種「挑錯欄位」不會讓爬取失敗，ok=True，五個 failure_kind 一個都涵蓋不到，
+      而且**低估售價的錯不會有客人來反映**（對他有利），沒有回饋迴路。
+
+    ★ 為什麼先記錄不先擋：門檻要用真實分佈定，不是憑感覺挑數字。
+      現行離散度檢查只在**同一條規則內**比（R1 的候選彼此比），
+      跨規則從不對照 —— R1 取税抜、R3 取税込時，R1 先命中就直接回傳。
+      跑一到兩週、看 price_spread 的分佈有沒有自然斷點，再決定要不要標 soft。
+
+    picked:    {"R1": 5000, "R3": 5500, ...}  各規則最後選出的值
+    cand_vals: {"R3": [3850, 4950], ...}      各規則排除後**剩下的全部候選**
+
+    🔴 兩個都要記，而且會出事的資訊多半在 cand_vals：
+      auctions.yahoo 那筆的各規則 chosen 全部是 3850（跨規則離散度 1.0，
+      看起來完全一致），但 R3 的候選其實是 [3850, 4950] ——
+      3850 是「現在価格」、4950 是「即決価格」，規則取 min 所以挑了 3850。
+      取 min 對「定価／SALE 群集」是對的，對「現在価格／即決価格」是錯的。
+      **只記 chosen 會讓這種錯完全隱形。**
+    """
+    try:
+        state = _ctx.get()
+        if state is not None and picked:
+            state["price_cands"] = {k: int(v) for k, v in picked.items() if v}
+        if state is not None and cand_vals:
+            state["price_vals"] = {k: [int(x) for x in v]
+                                   for k, v in cand_vals.items() if v}
+    except Exception as e:
+        print(f"[ScrapeLog] note_price_candidates 失敗（略過）: {type(e).__name__}: {e}")
 
 
 def note_source(name: str) -> None:
@@ -503,6 +539,23 @@ def _warnings_brief(state) -> str:
         return ""
 
 
+def _price_spread(picked: dict):
+    """跨規則離散度 max/min。少於兩個值就回 None（沒有可比性）。"""
+    try:
+        vals = []
+        for v in (picked or {}).values():
+            if isinstance(v, (list, tuple)):
+                vals.extend(int(x) for x in v if x)
+            elif v:
+                vals.append(int(v))
+        if len(vals) < 2:
+            return None
+        lo, hi = min(vals), max(vals)
+        return round(hi / lo, 3) if lo > 0 else None
+    except Exception:
+        return None
+
+
 def _safe_price(product):
     """
     取 product.price_jpy 轉 int；取不到或不合理一律回 None。
@@ -608,6 +661,16 @@ def record(url: str, product=None, error=None, elapsed_ms=None,
             #   已經有天然上限（最多 3 條），限長是第二道。
             #   這是給人看的診斷摘要，不是完整紀錄。
             "warnings": _warnings_brief(state) if ok else "",
+            # ── 取價候選（generic 專用；其他 scraper 沒有候選概念，恆為 null）──
+            # ★ 2026-09-07 加，**只記錄不判斷**。price_spread = max/min，
+            #   跨規則的離散度。auctions.yahoo 那類「現在価格 vs 即決価格」
+            #   在這裡會呈現為 spread 明顯 > 1。跑一到兩週看分佈再定門檻。
+            "price_candidates": (state.get("price_cands") or None),
+            "price_values": (state.get("price_vals") or None),
+            # ★ spread 算的是**全部候選**的 max/min，不是各規則 chosen 的。
+            #   理由見 note_price_candidates 的 docstring。
+            "price_spread": _price_spread(state.get("price_vals")
+                                          or state.get("price_cands") or {}),
             "url_path": _url_path(url),
         }
 

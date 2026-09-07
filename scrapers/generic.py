@@ -72,6 +72,15 @@ def _note_error(error, where=""):
         pass
 
 
+def _note_price_candidates(picked: dict, cand_vals: dict = None) -> None:
+    """把取價候選交給 scrape_monitor。記錄失敗絕不影響爬取。"""
+    try:
+        import scrape_monitor
+        scrape_monitor.note_price_candidates(picked, cand_vals)
+    except Exception:
+        pass
+
+
 def _note_page_settled(size):
     """回報「瀏覽器把頁面載完了，多大」。**只有事實，沒有判斷。**
     要不要因此判定『兩條路都不通』由 scrape_monitor 決定 ——
@@ -116,8 +125,19 @@ class GenericMixin:
 
             self._extract_json_ld(soup, product)
             self._extract_og_tags(soup, product)
+            _prior_price = product.price_jpy      # 結構化資料（JSON-LD／OG）取到的價
             if not product.title or not product.price_jpy:
                 self._extract_generic(soup, product)
+            elif _prior_price:
+                # ★ 2026-09-07：title 與 price 都已由結構化資料取得時，
+                #   原本整條 DOM 取價完全不會跑 —— 而 auctions.yahoo
+                #   （現在価格 vs 即決価格）正是走這條，等於最需要對照的
+                #   情況反而沒有任何候選資料。這裡**只為記錄**跑一次，
+                #   回傳值刻意丟棄，不影響 product.price_jpy。
+                try:
+                    self._find_price_in_html(soup, _prior=_prior_price)
+                except Exception:
+                    pass
 
             if product.price_jpy and (product.price_jpy < 100 or product.price_jpy > 1000000):
                 product.price_jpy = None
@@ -306,8 +326,14 @@ class GenericMixin:
                 if not any(s in src.lower() for s in ["logo", "icon", "banner", "sprite", "blank"]):
                     product.image_url = src
                     break
+        # ★ 2026-09-07：不論價格是否已由 JSON-LD／OG 設定，**都要跑一次候選收集**。
+        #   原本是 `if not product.price_jpy` 才跑，於是 JSON-LD 先命中的頁面
+        #   完全不會經過 R1–R5 —— 而 auctions.yahoo（現在価格 vs 即決価格）
+        #   正是走 JSON-LD 那條，等於最需要對照的情況反而沒有資料。
+        #   決策仍然不變：已經有價就沿用，DOM 這條只拿來記錄與比對。
+        dom_price = self._find_price_in_html(soup, _prior=product.price_jpy)
         if not product.price_jpy:
-            product.price_jpy = self._find_price_in_html(soup)
+            product.price_jpy = dom_price
 
     # ══════════════════════════════════════════════════════════════
     # 取價：候選收集 → 脈絡排除 → 分級決策
@@ -436,7 +462,7 @@ class GenericMixin:
                                   self._price_reject(text, m.start(1), m.end(1))))
         return out
 
-    def _find_price_in_html(self, soup) -> int | None:
+    def _find_price_in_html(self, soup, _prior: int | None = None) -> int | None:
         # ── 先移除刪除線元素（原價），避免抓到劃掉的舊價
         for tag in soup.find_all(['del', 's', 'strike']):
             tag.decompose()
@@ -444,7 +470,16 @@ class GenericMixin:
         text = soup.get_text()
         cands = self._price_candidates(soup, text)
 
+        # ★ 2026-09-07：五條規則**全部跑完**再決策，不再一命中就 return。
+        #   決策順序完全沒變（仍是 R1→R5 取第一個有值的），差別只在
+        #   後面幾條規則也會被算出來，好把「各規則各自會選什麼」記進 scrape_monitor。
+        #   加這個是因為 auctions.yahoo 那類頁面同時有現在価格與即決価格，
+        #   R1 先命中就直接回傳，跨規則從來沒有對照過 —— 挑錯欄位不會讓爬取失敗，
+        #   ok=True，而低估售價的錯客人不會來反映。
+        #   **這一版只記錄不判斷**，門檻要等真實分佈出來再定。
         log = []
+        picked = {}
+        cand_vals = {}
         for rule in ("R1", "R2", "R3", "R4", "R5"):
             raw = cands[rule]
             if not raw:
@@ -490,8 +525,31 @@ class GenericMixin:
                 # 排除後剩下的是同一件商品的定価／SALE 群集，取最小＝實際售價。
                 chosen = min(vals)
             log.append(f"{rule}=({detail})✔取 {chosen}")
-            print(f"[Generic] 取價 ¥{chosen:,}（{rule}）｜" + " ".join(log))
-            return chosen
+            picked[rule] = chosen
+            # ★ 記整份候選，不只記 chosen。auctions.yahoo 的 R3 是 [3850, 4950]
+            #   （現在価格／即決価格），規則取 min=3850 —— 各規則的 chosen 全都是
+            #   3850，跨規則離散度是 1.0，只看 chosen 完全看不出問題。
+            #   會出事的資訊在**規則內的候選清單**裡。
+            cand_vals[rule] = vals
+
+        # ★ _prior 是 JSON-LD／OG 已經取到的價（若有）。把它一起送進候選，
+        #   跨規則離散度才涵蓋「結構化資料 vs DOM」這個最常出錯的軸線。
+        if _prior:
+            picked = dict(picked, PRIOR=int(_prior))
+            cand_vals = dict(cand_vals, PRIOR=[int(_prior)])
+        _note_price_candidates(picked, cand_vals)
+
+        # 決策：與改版前逐字相同 —— R1→R5 第一個有值的就是答案。
+        for rule in ("R1", "R2", "R3", "R4", "R5"):
+            if rule in picked and rule != "PRIOR":
+                chosen = picked[rule]
+                extra = ""
+                if len(picked) >= 2:
+                    lo, hi = min(picked.values()), max(picked.values())
+                    if lo > 0 and hi / lo > 1.0:
+                        extra = f"｜跨規則 max/min={hi / lo:.3f}"
+                print(f"[Generic] 取價 ¥{chosen:,}（{rule}）｜" + " ".join(log) + extra)
+                return chosen
 
         print("[Generic] ⚠️ 取價失敗（寧可失敗不猜價）｜" + " ".join(log))
         return None

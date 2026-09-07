@@ -147,7 +147,11 @@ def test_write_and_fields():
                      "price_jpy", "brand",
                      # 2026-09-02 加：error_brief 在 ok=True 時被清空，
                      # 成功路徑上的 note_error（退路／降級）全被丟掉
-                     "warnings"},
+                     "warnings",
+                     # 2026-09-07 加：generic 各規則的取價候選與跨規則離散度。
+                     # 只記錄不判斷 —— 門檻要等真實分佈出來再定。
+                     # 其他 scraper 沒有候選概念，這兩欄恆為 null。
+                     "price_candidates", "price_values", "price_spread"},
           str(sorted(r)))
 
     # 失敗筆：error_brief 不可含 traceback
@@ -204,7 +208,7 @@ def test_content_fields():
               r["failure_kind"] == "timeout", r["failure_kind"])
         check("其餘欄位照常（platform_id 靠 note_platform 拿得到）",
               r["platform_id"] == "rakuten", r["platform_id"])
-        check("欄位數與成功筆一致（不是缺欄位）", len(r) == 13, str(len(r)))
+        check("欄位數與成功筆一致（不是缺欄位）", len(r) == 16, str(len(r)))
 
     # ── 2. 正常路徑：兩欄有值
     p = _FakeProduct(True)
