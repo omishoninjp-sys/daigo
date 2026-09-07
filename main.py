@@ -460,7 +460,7 @@ async def scrape_product(req: ScrapeRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
-        from scrapers.base import detect_blocked, detect_invalid_link
+        from scrapers.base import detect_blocked, detect_invalid_link, detect_restricted_category
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站: {url[:80]}")
@@ -485,6 +485,17 @@ async def scrape_product(req: ScrapeRequest):
             return ScrapeResponse(
                 success=False,
                 error="無法從此連結抓取商品資訊",
+                queue_info={"active": _active_count, "waiting": _queue_count},
+            )
+        # ★ 品類攔截：要有 title 才判斷得出來，所以擺在 scrape 之後
+        #   （detect_blocked 是網址層級，擋不掉「同網域但特定商品」）
+        restricted = detect_restricted_category(product.title, url)
+        if restricted and restricted[0] == "hard":
+            print(f"[API] 🚫 受限品類: {product.title[:60]}")
+            return ScrapeResponse(
+                success=False,
+                blocked=True,          # 前端已支援：顯示訊息、不切手動表單
+                error=restricted[1],
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         pricing = calculate_selling_price(product.price_jpy) if product.price_jpy else None
@@ -513,7 +524,7 @@ async def create_order(req: CreateOrderRequest):
     try:
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站
-        from scrapers.base import detect_blocked, detect_invalid_link
+        from scrapers.base import detect_blocked, detect_invalid_link, detect_restricted_category
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
@@ -544,6 +555,16 @@ async def create_order(req: CreateOrderRequest):
             return CreateOrderResponse(success=False, error="無法抓取商品資訊")
         if not product.price_jpy:
             return CreateOrderResponse(success=False, error="無法偵測到商品價格")
+        # ★ 同上。這裡是最後一道 —— cache 命中時不會重跑 /api/scrape，
+        #   所以不能只靠上面那道。
+        restricted = detect_restricted_category(product.title, url)
+        if restricted and restricted[0] == "hard":
+            print(f"[API] 🚫 受限品類（建單嘗試）: {product.title[:60]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=restricted[1],
+            )
         pricing = calculate_selling_price(product.price_jpy)
         title = req.title_override or product.title
         seo = await generate_seo_title(
@@ -610,6 +631,19 @@ async def create_manual_order(req: ManualOrderRequest):
                     blocked=True,
                     error=blocked_reason,
                 )
+        # ★ 手動表單的標題是客人自己打的，一樣要擋 ——
+        #   否則爬取失敗的卡牌會從這條路溜進來。
+        #   import 另外寫一次：上面那個在 `if req.source_url:` 裡面，
+        #   沒有 source_url 時不會被綁定，而這道檢查不論有沒有網址都要跑。
+        from scrapers.base import detect_restricted_category
+        restricted = detect_restricted_category(req.title, req.source_url or "")
+        if restricted and restricted[0] == "hard":
+            print(f"[API] 🚫 受限品類（手動建單）: {req.title[:60]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=restricted[1],
+            )
         seo = await generate_seo_title(
             original_title=req.title,
             source_url=req.source_url,
