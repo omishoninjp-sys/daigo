@@ -490,6 +490,40 @@ FakeResp 少一個 cookies 欄位，無關的 AttributeError 混進 error_brief�
 
 **絕不代為處理憑證。** 使用者貼出 token 時要他立刻撤銷，不要用它做任何事。
 
+### 🔴 GID 只能比數字，不可以比整條字串
+
+**同一個資源在不同查詢裡的 GID 型別前綴不一樣。**
+
+```
+channels     → gid://shopify/Channel/112334471402
+publications → gid://shopify/Publication/112334471402
+```
+
+同一個「線上商店」管道，數字相同、前綴不同，**直接比字串永遠不相等**。
+2026-09-08 寫 soft 品類的「不發布到線上商店」時就是這樣：排除清單一個都對不到，
+每一件 soft 商品都掉進 fail-closed 分支、一個銷售管道都沒發布。
+
+**是離線測試（假 httpx client）抓到的，讀程式碼看不出來** ——
+兩邊都寫著 `id`，型別藏在字串裡面。
+
+比對一律先取最後一段：`str(gid).rsplit("/", 1)[-1]`。
+
+### 🔴 publication 的 `name` 會隨呼叫者的語系變，只能比 `channels` 的 `handle`
+
+2026-09-08 同一天、同一個 publication（id `112334471402`）：
+
+| 呼叫者 | 回傳的 `name` |
+|---|---|
+| Shopify 連接器（商家身分，店家語系繁中） | 「線上商店」 |
+| 本 app 的 token | `"Online Store"` |
+
+比對哪一邊都會在另一邊失效。`channels` 的 `handle`（`online_store`）兩邊都一樣，
+而且 `Channel.id` 與 `Publication.id` 是同一個數字（見上一條）。
+
+**失效的方向是最壞的那種：「以為排除了、其實照樣上架」** ——
+不該賣的東西會安靜地變成可以結帳，沒有任何錯誤訊息。
+所以這類判斷一律 fail-closed：認不出目標管道時整個發布跳過，不是照發全部。
+
 ### 🔴🔴 `SHOPIFY_ACCESS_TOKEN` 沒有 `read_all_orders`，跨月份訂單分析一律不能用它
 
 **超過 60 天的訂單查詢會靜默只回最近 60 天，不報錯、不警告。**
