@@ -1100,12 +1100,29 @@
           msg: '⚠ dokodemo（どこでも）為日本代購轉送平台，本服務不代購其他代購平台的商品。\n\n如需代購，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
         },
         {
-          pattern: /hoka\.com/i,
+          /* 🔴 邊界守衛（2026-09-08）。BLOCKED_SITES **是真閘門**（包住
+             window.daikoSearch，命中就 alert 並 return），所以它跟後端
+             detect_blocked 犯的是同一種子字串病，只是換一張清單。
+             後端已改用 _host_matches，這裡是前端對應的修正。
+
+             守衛要**兩邊都有，只有右邊不夠**：
+               /buyee\.jp(?![a-z.])/            → xbuyee.jp 照樣命中（左邊沒守）
+               /(?:^|[^a-z0-9-])buyee\.jp.../   → xbuyee.jp 才放行
+             2026-09-08 用 node 逐條實測過，對照表在 commit message 裡。
+
+             ⚠️ 左邊刻意允許 `.` 與 `/` —— www.buyee.jp 這種子網域**要**擋。
+             ⚠️ 用 (?:^|[^...]) 而不是 lookbehind (?<!...)：lookbehind 在
+                Safari 16.4 以前不支援，regex literal 解析失敗會讓**整支
+                script 掛掉**，連帶整個代購流程都不能用。 */
+          pattern: /(?:^|[^a-z0-9-])hoka\.com(?![a-z\.])/i,
           msg: '⚠ HOKA 官網明文規定禁止轉載資訊，在我們取得授權前，暫時無法抓取商品資料。\n\n如需代購 HOKA 商品，請於 LINE @544kaytb 直接傳送商品截圖、款式、尺寸與顏色，我們將為您手動報價並建立訂單。\n\n造成不便敬請見諒。'
         },
         {
           // 嚴格 amazon.com 匹配，避免誤殺 amazon.co.jp / amazon.com.tw
-          pattern: /amazon\.com(?![a-z\.])/i,
+          /* ⚠️ 這條原本就有右邊的守衛（避開 amazon.com.tw / amazon.co.jp）——
+             上面那組守衛的寫法就是從這裡抄的。2026-09-08 補上左邊：
+             原本 notamazon.com 之類也會被誤擋，同一種病的另一半。 */
+          pattern: /(?:^|[^a-z0-9-])amazon\.com(?![a-z\.])/i,
           msg: '⚠ 您貼上的是 Amazon 美國站（amazon.com）的連結，本服務僅代購日本商品。\n\n請至 Amazon 日本站（amazon.co.jp）挑選商品後再試一次。'
         },
         // ── 其他代購平台（本服務不代購其他代購商）──
@@ -1134,11 +1151,14 @@
           msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
         },
         {
-          pattern: /buyma\.com/i,
+          /* 守衛理由同 hoka：右邊擋 buyma.com.tw，左邊擋 notbuyma.com */
+          pattern: /(?:^|[^a-z0-9-])buyma\.com(?![a-z\.])/i,
           msg: '⚠ BUYMA 為日本個人代購（Personal Shopper）平台，本服務不代購其他代購平台的商品。\n\nBUYMA 上的商品本身就是賣家代購的，建議直接提供商品原本品牌的官方網站連結，可省下中間代購費用。\n\n如需代購日本商品，請改用 Amazon JP、ZOZOTOWN 等購物網站。'
         },
         {
-          pattern: /buyee\.jp/i,
+          /* 守衛理由同 hoka：xbuyee.jp、mybuyee.jp 都是**左邊**那一種，
+             只加右邊的守衛完全擋不掉它們 */
+          pattern: /(?:^|[^a-z0-9-])buyee\.jp(?![a-z\.])/i,
           msg: '⚠ Buyee 為日本代購／轉運平台，本服務不代購其他代購平台的商品。\n\nBuyee 上的商品多來自 Mercari、Yahoo 拍賣、樂天等網站，建議直接提供原始網站連結（例如 jp.mercari.com 的商品連結），可省下中間代購費用。'
         },
       ];
@@ -1206,10 +1226,18 @@
   ];
 
   /* 封鎖清單優先於白名單（同步自 base.py BLOCKED_DOMAINS） */
+  /* 2026-09-08：補上後端有、這裡缺的三筆（jpgoodbuy / buyma / buyee），
+     14 筆與 scrapers/base.py 的 BLOCKED_DOMAINS 一致。
+     ⚠️ 這張表**不是閘門** —— 它只決定 ?url= 要不要自動帶入。
+        真正會擋下查詢的是上面那張 BLOCKED_SITES（那張本來就有這三筆）。
+        缺這三筆的後果是：帶著 buyee.jp 的連結進來會先被自動填入，
+        按下查詢才被 BLOCKED_SITES 攔下跳 alert —— 填了又立刻被罵，
+        比一開始就不填更差。 */
   var DENY = [
     'tw.mercari.com','amazon.com','hoka.com','duty-free-japan.jp',
     'bibian.co.jp','dokodemo.world','zenmarket.jp','tokukai.com',
-    'letao.com.tw','daigobang.com','go1buy1.com'
+    'letao.com.tw','daigobang.com','go1buy1.com',
+    'jpgoodbuy.com','buyma.com','buyee.jp'
   ];
 
   function hostMatches(host, domain) {

@@ -190,7 +190,20 @@
         showError(data.error || '這個連結目前不開放代購。', data.handoff_url);
         return;
       }
-      if (!data.success) { alert(data.error || '建立商品失敗'); return; }
+      // 🔴 這裡以前是 alert()，2026-09-08 改成與 daikoCreateOrder 一致的 showError。
+      //    理由有兩個，第二個才是關鍵：
+      //      1. alert 是系統彈窗，塞不下四行說明，也沒有樣式
+      //      2. **alert 顯示不了 data.handoff_url** —— 那條「用 LINE 幫我處理
+      //         這件商品 →」的連結只有 showError 會畫出來
+      //    而 soft 品類（一番賞／航海王卡牌／JFA／Pokémon Center 受注）回的是
+      //    blocked=false + success=false，**唯一會走到的就是這一行** ——
+      //    商品其實已經建好了，只是沒有上架，客人要來詢問。用 alert 等於
+      //    叫客人自己去找 LINE。
+      if (!data.success) {
+        backToInput();
+        showError(data.error || '建立商品失敗', data.handoff_url);
+        return;
+      }
 
       document.getElementById('daiko-checkout-link').href = data.checkout_url;
       document.getElementById('step-manual').style.display = 'none';
