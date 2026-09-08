@@ -101,23 +101,31 @@ def _append(prefix: str, entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-# 🔴🔴 附錄 H 要的 `customer_id`（或雜湊）**這把 token 拿不到。**
+# 附錄 H 要的 `customer_id`：**這一版故意不記，但不是因為拿不到。**
 #
-#   2026-09-08 實測 `orders { nodes { customer { id } } }`：
+#   `orders { nodes { customer { id } } }` 確實拿不到 —— 2026-09-08 實測回
 #     "Access denied for customer field. Required access: `read_customers`
 #      access scope."（extensions.code = ACCESS_DENIED）
-#   `/admin/oauth/access_scopes.json` 也確認過，這把 token 有
-#   read_orders / write_orders / read_products…，**沒有 read_customers**。
-#   email、地址同屬受保護的客人資料，一樣拿不到。
+#   `/admin/oauth/access_scopes.json` 也確認這把 token 沒有 read_customers。
 #
-#   影響：分不出「同一位客人重試 14 次」與「14 位客人各試一次」。
-#   工單裡 ZOZO 那筆 14 次正是**同一位客人 10 天內**，兩者該有不同門檻 ——
-#   這件事第二階段定門檻時會有影響，不是可有可無的欄位。
+#   🔴 但**不要因此以為客人身分完全拿不到**。同一天實測近 30 天 245 筆訂單：
+#        order.email                                 245/245 拿得到
+#        order.clientIp                              245/245 拿得到
+#        customerJourneySummary.customerOrderIndex    245/245 拿得到
+#      read_customers 擋的是 `customer` 這個物件，不是訂單自己的這幾個欄位。
+#      （這段原本寫著「email、地址一樣拿不到」，那句話是錯的，當天量完就改掉 ——
+#        錯的註解會變成下一輪推理的前提，比沒有註解更貴。）
 #
-#   替代：這裡改記 `distinct_orders`（同一張訂單買兩件 ≠ 兩次下單）。
-#   它是「不重複客人數」的**上界**，不是同一件事，不要當成同一件事解讀。
-#   要真正拿到就得幫 daigo app 加 read_customers（受保護客人資料要另外申請），
-#   或這一段分析改走 Shopify 連接器的商家身分。已記進 backlog。
+#   這一版仍然不記，理由是**能不落地的個資就不要落地**：
+#   第一階段先看時間分佈（first_seen / last_seen / span_days）分不分得開
+#   「一個人重試 14 次」與「14 個人各試一次」——
+#   14 次分散 10 天與 14 次集中 20 分鐘，形狀完全不同。
+#   分得開就不必記任何身分；分不開再依序加 customerOrderIndex（無個資）、
+#   sha256(email)（只存雜湊）。評估與數字全部在
+#   `gyt-ops-analysis/backlog/TICKET-brake-distinct-customers.md`。
+#
+#   在那之前這裡記 `distinct_orders`（同一張訂單買兩件 ≠ 兩次下單）。
+#   ⚠️ 它是「不重複客人數」的**上界**，不是同一件事，不要當成同一件事解讀。
 
 
 def _hash_customer(gid: str) -> str:
