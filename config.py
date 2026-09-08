@@ -118,6 +118,10 @@ DEFAULT_JPY_TO_TWD_RATE = _float_env("DEFAULT_JPY_TO_TWD_RATE", 0.0)
 SCRAPE_TIMEOUT = _int_env("SCRAPE_TIMEOUT", 30)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 # 代理（ZOZOTOWN 用，日本住宅 IP 繞過 Akamai IP 信譽檢查）
+# 🔴 目前留空是刻意的，不是還沒填。
+#    先前實測過住宅代理，爬取速度慢到不可接受，因此不採用。
+#    要重新評估的話，先確認速度問題有沒有解 —— 例如只對特定站台走代理，
+#    或改用資料中心以外的固定 IP —— 不要直接填值上線。
 PROXY_URL = os.getenv("PROXY_URL", "")
 # OpenAI（SEO 標題翻譯用）
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
