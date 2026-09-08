@@ -82,8 +82,9 @@ const MUST_BLOCK = [
 for (const u of MUST_BLOCK) check('gate still blocks ' + u, gated(u));
 
 const MUST_PASS = [
-  ['https://hoka.com.tw/x', 'HOKA 台灣'],
-  ['https://www.hoka.com.au/x', 'HOKA 澳洲'],
+  // 2026-09-08 實際連過：兩個都真的存在，但跟 HOKA 無關
+  ['https://hoka.com.tw/x', '真存在的無關網站（手工紙盒）'],
+  ['https://www.hoka.com.au/x', '真存在的無關網站（塑膠管配件）'],
   ['https://xbuyee.jp/x', '左邊誤擋'],
   ['https://mybuyee.jp/x', '左邊誤擋'],
   ['https://notbuyma.com/x', '左邊誤擋'],

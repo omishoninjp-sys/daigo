@@ -133,14 +133,16 @@ for u in MUST_BLOCK:
 # ── D. 子字串誤擋要消失 ────────────────────────────────────────────
 print("\n【D】誤擋要消失（左右兩種）")
 MUST_PASS = [
-    ("https://hoka.com.tw/x", "HOKA 台灣官網（右邊）"),
-    ("https://www.hoka.com.au/x", "HOKA 澳洲官網（右邊）"),
+    # ⚠️ 2026-09-08 實際連過：這兩個網域都**真的存在但跟 HOKA 無關**
+    #    hoka.com.tw 是手工紙盒廠、hoka.com.au 是塑膠管配件廠。
+    ("https://hoka.com.tw/x", "真存在的無關網站（右邊）"),
+    ("https://www.hoka.com.au/x", "真存在的無關網站（右邊）"),
     ("https://xbuyee.jp/x", "🔴 左邊 —— 只加右邊守衛完全擋不掉"),
     ("https://mybuyee.jp/x", "🔴 左邊"),
     ("https://notbuyma.com/x", "🔴 左邊"),
     ("https://buyma.com.tw/x", "右邊"),
     ("https://notamazon.com/x", "🔴 左邊（amazon 原本只有右邊守衛）"),
-    ("https://amazon.com.tw/dp/1", "右邊（amazon 原本就守得住）"),
+    ("https://amazon.com.tw/dp/1", "右邊（amazon 原本就守得住；DNS 查不到，是构造的）"),
     ("https://www.amazon.co.jp/dp/1", "🔴 Amazon JP 絕不可擋"),
     ("https://jp.mercari.com/item/m1", "Mercari JP"),
     ("https://item.rakuten.co.jp/x/1", "樂天"),

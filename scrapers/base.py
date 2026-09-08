@@ -111,11 +111,24 @@ def detect_blocked(url: str) -> str | None:
     🔴 2026-09-08：由 `if domain in host` 改成 `_host_matches`。
        舊寫法與 CLAUDE.md「網域比對絕不可用 in」直接牴觸，只是還沒被踩到 ——
        對 295 個真實網域回測**誤擋 0**，所以它一直看起來沒問題。
-       但機制上這幾個正常網域都會被誤擋（回測樣本裡剛好都沒有）：
-         amazon.com  → amazon.com.tw、amazon.com.au、amazon.com.br
-         hoka.com    → hoka.com.tw、hoka.com.au
-         buyee.jp    → xbuyee.jp、mybuyee.jp
-         buyma.com   → notbuyma.com、buyma.com.tw
+       但機制上這幾個網域都會被誤擋（回測樣本裡剛好都沒有）：
+         amazon.com  → amazon.com.au、amazon.com.br、notamazon.com …
+         hoka.com    → hoka.com.tw、hoka.com.au …
+         buyee.jp    → xbuyee.jp、mybuyee.jp …
+         buyma.com   → notbuyma.com、buyma.com.tw …
+
+       ⚠️ 2026-09-08 實際連過（第一版註解寫「都是各品牌的各國官網」是**猜的**，
+          而且猜錯了，見 CLAUDE.md 2-1）：
+            amazon.com.au / amazon.com.br  真的是 Amazon 的澳洲／巴西站
+            amazon.com.tw                  **不存在**（DNS 查不到）
+            hoka.com.tw                    存在，但是「閎康彩色印刷有限公司」，
+                                           手工紙盒，跟 HOKA 一點關係都沒有
+            hoka.com.au                    存在，但是 "Australia's Largest Range
+                                           of Plastic Duct Fittings"，塑膠管配件
+            xbuyee.jp / mybuyee.jp / notbuyma.com / notamazon.com
+                                           查不到，是構造出來的反例
+          結論不變（這個寫法會誤擋不相干的網域），但**理由要寫對的那個**：
+          誤擋的是「剛好以某個字串結尾／開頭的無關網站」，不是「品牌的各國官網」。
        這正是 `t.co` 誤擋 7 家商店的同一種病，只是換了一張清單。
        **「目前沒有誤擋」不等於「這個寫法是對的」** —— 前者是語料的巧合，
        後者才是機制。改完的回測見 tests/verify_invalid_link.py。

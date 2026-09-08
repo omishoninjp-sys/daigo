@@ -89,3 +89,47 @@ $ python -m py_compile main.py shopify_client.py
 「soft 商品到底能不能被買到」時，看得到這是決定不是遺漏。
 實測：soft 商品 `onlineStoreUrl=null`、storefront 404，但仍發布到
 Shop / Inbox / TikTok / Google & YouTube / Facebook & Instagram / Collective。
+
+---
+
+## GYT-003　`shopify theme push` 直接改線上，沒有任何攔截
+
+**狀態**：待評估（不做）　**開立**：2026-09-08　**優先度**：看 theme 改動頻率
+
+### 現況
+
+`shopify theme push --theme 139858084074` **直接寫線上 MAIN theme**：
+
+- 沒有預覽、沒有 staging、沒有審核
+- 不像 daigo repo 的 `git push` 還會經過 Zeabur 的建置（雖然那個也不會擋你）
+- 錯了要靠 Shopify 後台的 theme 版本記錄回滾，而那個記錄只留最近幾次
+
+**性質與 `git push origin main`（daigo）同一類：一個指令、不可逆、影響線上客人。**
+而 `guard.py` 目前擋得住後者、擋不住前者 —— 那張清單裡沒有 `shopify`。
+
+漏掉 `--only` 的情況更糟：`theme/` 只是**部分快照**（兩支檔案），
+不帶 `--only` 會用一份殘缺的 theme 覆蓋整個線上版面。
+
+### 怎麼發現的
+
+2026-09-08 做批次二的 theme 改動時。當時只有兩支檔案、一次性，
+所以是人工小心處理的（先 pull baseline、對 checksum、再 push）。
+
+### 不做會怎樣
+
+現在不會怎樣 —— theme 改動很少，而且每次都會走 review。
+**風險是頻率上升之後**：習慣了就會有人直接 `shopify theme push` 不 pull，
+蓋掉別人在後台改的東西（見 `theme/README.md` 第 2 點：過期**沒有任何訊號**）。
+
+### 要做的話
+
+把 `shopify` 加進 `guard_impl.py` 的確認清單，命中 `theme push` 就擋。
+🔴 但那是動守門員，跟 GYT-001 一樣要另外評估 ——
+   而且擋太多會讓人習慣繞過，那比沒有更糟（`guard_impl.py` 檔頭自己寫的）。
+   **判準應該是「theme 改動變成常態」再做，不是現在。**
+
+### 順帶
+
+`theme/` 在 daigo repo 裡 → 改 theme 也會觸發 Zeabur 重新部署後端。
+不算問題（重啟是安全的），但要知道 `git push` 之後線上前端**還沒變**，
+`shopify theme push` 是分開的第二步。兩個動作都要做。

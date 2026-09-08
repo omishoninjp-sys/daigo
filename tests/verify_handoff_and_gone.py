@@ -281,6 +281,10 @@ for domain in BLOCKED_DOMAINS:
 # C-2 子字串誤擋要消失。這些網域**都是真實存在的站**，
 #     舊寫法（`domain in host`）全部誤擋。
 FALSE_POSITIVES = [
+    # ⚠️ 2026-09-08 實際連過：amazon.com.au / amazon.com.br 真的是 Amazon 的各國站；
+    #    hoka.com.tw 是「闎康彩色印刷」（手工紙盒）、hoka.com.au 是澳洲的塑膠管配件廠，
+    #    **都跟 HOKA 無關**；amazon.com.tw 查不到（构造的反例）。
+    #    要驗的是「子字串比對會誤擋無關網域」，不是「誤擋品牌各國官網」。
     ("amazon.com.tw", "amazon.com"),
     ("www.amazon.com.au", "amazon.com"),
     ("amazon.com.br", "amazon.com"),
