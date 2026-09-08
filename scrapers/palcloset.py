@@ -9,7 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, price_in_range
 
 
 class PalClosetMixin:
@@ -51,7 +51,7 @@ class PalClosetMixin:
                     pm = re.search(pat, html)
                     if pm:
                         p = int(float(pm.group(1).replace(",", "")))
-                        if 100 <= p <= 1000000:
+                        if price_in_range(p):
                             product.price_jpy = p
                             break
 

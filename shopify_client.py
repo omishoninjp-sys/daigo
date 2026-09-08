@@ -194,7 +194,8 @@ class ShopifyClient:
                                     source_url="", original_price_jpy=0, brand="", extra_images=None,
                                     variants=None, image_base64="", extra_tags=None,
                                     seo_title="", seo_tags=None, in_stock=True, platform_id="",
-                                    created_via="", seo_source=""):
+                                    created_via="", seo_source="",
+                                    publish_online_store=True):
         print(f"[Shopify] ▶ create_daigo_product build=GRAPHQL-PRODUCTSET-v2 | variants_in={len(variants) if variants else 0}")
         # ══════════════════════════════════════════════════════════════
         # 1. 建立 option 名稱 + 變體規格（沿用原本的 色/尺寸 判斷邏輯）
@@ -523,7 +524,8 @@ class ShopifyClient:
         else:
             print(f"[Shopify] ⚠️ DAIGO_COLLECTION_ID 未設定,跳過 collection")
 
-        await self._publish_to_all_channels(product_id)
+        await self._publish_to_all_channels(
+            product_id, publish_online_store=publish_online_store)
 
         return {
             "product_id": product_id,
@@ -638,12 +640,81 @@ class ShopifyClient:
         except Exception as e:
             print(f"[Shopify] 顏色圖片連動錯誤: {e}")
 
-    async def _publish_to_all_channels(self, product_id):
+    @staticmethod
+    def _gid_num(gid):
+        """gid://shopify/Xxx/123 → "123"。取不到回空字串。"""
+        return str(gid or "").rsplit("/", 1)[-1]
+
+    async def _online_store_publication_ids(self, client):
+        """
+        線上商店那個 publication 的**數字 id** 集合。取不到回 None（不是空集合）。
+
+        🔴 不可以用名稱比對，**因為同一個管道的 name 會隨呼叫者變**。
+           2026-09-08 同一天實測同一個 publication（id 112334471402）：
+             用 Shopify 連接器（商家身分，店家語系繁中）→ name = "線上商店"
+             用本 app 的 token                          → name = "Online Store"
+           比對哪一邊都會在另一邊失效，而失效的方向是
+           「以為排除了、其實照樣上架」—— 最壞的那種。
+           `channels` 的 `handle`（online_store）兩邊都一樣。
+
+        🔴 而且**要比數字，不能比整條 GID**：同一個管道在兩個查詢裡的
+           GID 型別不一樣 ——
+             channels     → gid://shopify/Channel/112334471402
+             publications → gid://shopify/Publication/112334471402
+           直接比字串永遠不相等，於是每一件 soft 商品都會走進 fail-closed、
+           一個管道都不發布。這個 bug 是離線測試（fake client）抓到的，
+           不是靠讀程式碼看出來的。
+        """
+        resp = await client.post(self.graphql_url, headers=self.headers, json={
+            "query": "{ channels(first:50){ edges{ node{ id handle }}}}"
+        })
+        if resp.status_code != 200:
+            return None
+        edges = (resp.json().get("data") or {}).get("channels", {}).get("edges")
+        if not edges:
+            return None
+        ids = {self._gid_num(e["node"]["id"]) for e in edges
+               if (e["node"].get("handle") or "") == "online_store"}
+        ids.discard("")
+        return ids or None
+
+    async def _publish_to_all_channels(self, product_id, publish_online_store=True):
+        """
+        把商品發布到所有銷售管道。
+
+        publish_online_store=False（soft 品類用）時排除線上商店那一個，
+        商品在後台是 ACTIVE、看得到、可以人工處理，但客人**不能自己結帳**。
+
+        ★ 2026-09-08 在正式商店實測過一件（product 8734942265578，驗完已刪除）：
+            product.status         = ACTIVE
+            product.onlineStoreUrl = null
+            product.publishedAt    = null
+            resourcePublicationsV2 = Shop / Inbox / TikTok / Google & YouTube /
+                                     Facebook & Instagram / Collective（共 6 個），
+                                     **線上商店（Publication/112334471402）不在裡面**
+            GET https://goyoutati.com/products/<handle>       → HTTP 404
+            GET https://goyoutati.com/products/<handle>.json  → HTTP 404
+        ⚠️ 「Shop」這個管道仍然有發布 —— 這一版刻意只排除線上商店（照需求），
+           要不要連 Shop 一起排除是另一個決定。
+
+        🔴 fail-closed：認不出線上商店是哪一個時，**整個發布都跳過**，
+           不是「照發全部」。認錯方向的代價不對稱 ——
+           少發布只是要人工補一步，誤發布是讓不該賣的東西直接可以買。
+        """
         try:
             graphql_url = self.graphql_url
             gql_headers = self.headers
 
             async with httpx.AsyncClient(timeout=15) as client:
+                exclude = set()
+                if not publish_online_store:
+                    exclude = await self._online_store_publication_ids(client)
+                    if not exclude:
+                        print("[Shopify] ⚠️ 認不出線上商店的 publication，"
+                              "為避免誤上架，**整個發布跳過**（商品仍為 ACTIVE，"
+                              "請到後台手動處理銷售管道）")
+                        return
+
                 resp = await client.post(graphql_url, headers=gql_headers, json={
                     "query": "{ publications(first:20){ edges{ node{ id name }}}}"
                 })
@@ -660,9 +731,16 @@ class ShopifyClient:
                 unique_pubs = []
                 for p in pubs:
                     name = p["node"]["name"]
+                    if self._gid_num(p["node"]["id"]) in exclude:
+                        print(f"[Shopify] 🔒 soft 品類：跳過銷售管道「{name}」")
+                        continue
                     if name not in seen:
                         seen.add(name)
                         unique_pubs.append(p["node"])
+
+                if not unique_pubs:
+                    print("[Shopify] 🔒 沒有可發布的銷售管道（全部被排除）")
+                    return
 
                 mutation = """mutation publishablePublish($id:ID!,$input:[PublicationInput!]!){
                     publishablePublish(id:$id,input:$input){

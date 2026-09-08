@@ -20,7 +20,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import USER_AGENT
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, price_in_range
 from scrapers.driver import VALID_SIZES
 
 # 預約・取り寄せも在庫あり扱い、「在庫なし」だけ缺貨
@@ -386,7 +386,7 @@ class BeamsMixin:
                 v = int(m.group(1).replace(",", ""))
             except ValueError:
                 return None
-        if 100 <= v <= 10_000_000:
+        if price_in_range(v):
             return v
         return None
 

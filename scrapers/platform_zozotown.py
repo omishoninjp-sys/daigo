@@ -25,14 +25,18 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import PROXY_URL
-from scrapers.base import ProductInfo
+from scrapers.base import (ProductInfo, PRICE_MIN_JPY_YAHOO,
+                           PRICE_MAX_JPY, price_in_range)
 from scrapers.platform import (Platform, Source, _note_error, _note_http,
                               net_error_brief, http_fail_brief,
                               missing_method_brief)
 
 
-_MIN_PRICE = 50
-_MAX_PRICE = 2_000_000
+# 上下限的唯一出處是 scrapers/base.py。
+# ★ 下限用 PRICE_MIN_JPY_YAHOO（50）不是 100：這是這幾支原本就有的值，
+#   這一版只收斂「數字寫在哪裡」，不順便改行為。
+_MIN_PRICE = PRICE_MIN_JPY_YAHOO
+_MAX_PRICE = PRICE_MAX_JPY
 
 # source_url 是否切到雅虎店（False = 用客人原本的 zozo.jp 連結，與快取同 key）
 USE_YAHOO_AS_SOURCE = False
@@ -335,7 +339,7 @@ class ZozoYahooSource(Source):
             v = int(s)
         except ValueError:
             return None
-        return v if _MIN_PRICE <= v <= _MAX_PRICE else None
+        return v if price_in_range(v, _MIN_PRICE, _MAX_PRICE) else None
 
 
 # ─────────────────────────────────────────────────────────────────────

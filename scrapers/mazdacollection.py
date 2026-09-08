@@ -22,11 +22,12 @@ import time
 
 from bs4 import BeautifulSoup
 
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, PRICE_MIN_JPY, PRICE_MAX_JPY
 
 
-_MIN_PRICE = 100
-_MAX_PRICE = 10_000_000
+# 上下限的唯一出處是 scrapers/base.py（選值依據寫在那邊），這裡只是別名。
+_MIN_PRICE = PRICE_MIN_JPY
+_MAX_PRICE = PRICE_MAX_JPY
 
 
 class MazdaCollectionMixin:

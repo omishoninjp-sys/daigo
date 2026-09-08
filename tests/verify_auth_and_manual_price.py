@@ -149,17 +149,29 @@ def test_transitional_old_key():
 
 async def test_manual_price_is_server_side():
     print("\n【4】★ 手動建單的售價由伺服器算，客人填的是日本原價")
-    resp = await call_manual(title="測試", price_jpy=1)
-    expect = calculate_selling_price(1)["selling_price_jpy"]
+    # ⚠️ 這裡原本用 ¥1 當樣本，2026-09-08 改成 ¥2 ——
+    #    ¥1 已經是 detect_sentinel_price 的哨兵值（佔位數），會被擋在建單之前。
+    #    這一條要驗的是**最低服務費生效**，不是「1 這個數字」，所以換一個
+    #    同樣落在最低服務費區間、但不是哨兵的值就好。¥1 本身另外驗（見下）。
+    resp = await call_manual(title="測試", price_jpy=2)
+    expect = calculate_selling_price(2)["selling_price_jpy"]
     check("端點成功", resp.success is True, str(resp.error)[:50])
-    check(f"¥1 → 售價 ¥{expect}（最低服務費生效，不是 ¥1）",
+    check(f"¥2 → 售價 ¥{expect}（最低服務費生效，不是 ¥2）",
           CAPTURED.get("price_jpy") == expect,
           f'實際 {CAPTURED.get("price_jpy")}')
-    check("原價欄位記的是客人填的 ¥1",
-          CAPTURED.get("original_price_jpy") == 1,
+    check("原價欄位記的是客人填的 ¥2",
+          CAPTURED.get("original_price_jpy") == 2,
           str(CAPTURED.get("original_price_jpy")))
     check("仍標記為手動來源", CAPTURED.get("created_via") == "manual",
           repr(CAPTURED.get("created_via")))
+
+    # ★ 哨兵值走手動表單一樣要擋（客人自己填 1 / 999999 當佔位數）
+    for sent in (1, 999_999):
+        CAPTURED.clear()
+        resp = await call_manual(title="測試", price_jpy=sent)
+        check(f"哨兵原價 ¥{sent:,} 擋在建單之前",
+              resp.success is False and resp.blocked is True and not CAPTURED,
+              f"success={resp.success} blocked={resp.blocked} CAPTURED={bool(CAPTURED)}")
 
     resp = await call_manual(title="測試", price_jpy=6000)
     expect = calculate_selling_price(6000)["selling_price_jpy"]

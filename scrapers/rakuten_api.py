@@ -23,7 +23,7 @@ import asyncio
 
 import httpx
 
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, PRICE_MIN_JPY, PRICE_MAX_JPY
 
 # 樂天 Ichiba Item Search 的版本與端點 —— **全專案唯一一份**。
 # 2026-08-30 之前 scrapers/amiami.py 另外寫死了一份，兩邊版本各走各的
@@ -36,8 +36,9 @@ ICHIBA_ITEM_SEARCH_ENDPOINT = (
 _ENDPOINT = ICHIBA_ITEM_SEARCH_ENDPOINT
 _DEFAULT_REFERER = "https://goyoutati.com/"
 _HTTP_TIMEOUT = 20.0
-_MIN_PRICE = 100
-_MAX_PRICE = 10_000_000
+# 上下限的唯一出處是 scrapers/base.py（選值依據寫在那邊），這裡只是別名。
+_MIN_PRICE = PRICE_MIN_JPY
+_MAX_PRICE = PRICE_MAX_JPY
 
 
 def has_credentials() -> bool:

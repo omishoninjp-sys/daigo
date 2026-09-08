@@ -24,11 +24,13 @@ import time as _time
 
 from bs4 import BeautifulSoup
 
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, PRICE_MAX_JPY, price_in_range
 
 
+# ★ 下限 800 是這支自己的（HUMAN MADE 沒有這麼便宜的東西），保留；
+#   上限收斂到 scrapers/base.py。
 _MIN_VALID_PRICE = 800
-_MAX_VALID_PRICE = 5_000_000
+_MAX_VALID_PRICE = PRICE_MAX_JPY
 
 # SFCC 圖片 CDN base
 _SFCC_IMAGE_BASE = "https://www.humanmade.jp"
@@ -245,7 +247,7 @@ class HumanMadeMixin:
                 v = int(float(s))
             except (ValueError, TypeError):
                 return None
-        if _MIN_VALID_PRICE <= v <= _MAX_VALID_PRICE:
+        if price_in_range(v, _MIN_VALID_PRICE, _MAX_VALID_PRICE):
             return v
         return None
 

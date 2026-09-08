@@ -12,7 +12,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
-from scrapers.base import ProductInfo, normalize_price
+from scrapers.base import (ProductInfo, normalize_price,
+                           PRICE_MIN_JPY, PRICE_MAX_JPY, price_in_range)
 
 
 def _note_http(status, body="", final_url=""):
@@ -139,7 +140,8 @@ class GenericMixin:
                 except Exception:
                     pass
 
-            if product.price_jpy and (product.price_jpy < 100 or product.price_jpy > 1000000):
+            # 範圍檢查一律走 base.price_in_range —— 數字只有一個出處
+            if product.price_jpy and not price_in_range(product.price_jpy):
                 product.price_jpy = None
 
             if product.image_url and not product.image_url.startswith("http"):
@@ -295,7 +297,7 @@ class GenericMixin:
                     price = offers.get("price") or offers.get("lowPrice")
                     if price:
                         p = normalize_price(price)
-                        if p and 100 <= p <= 1000000:
+                        if price_in_range(p):
                             product.price_jpy = p
             except (json.JSONDecodeError, StopIteration):
                 continue
@@ -372,8 +374,12 @@ class GenericMixin:
     )
     _PRICE_CTX_BEFORE = 24      # 只看數字前這麼多字
     _PRICE_CTX_AFTER = 12       # 只看數字後這麼多字
-    _PRICE_MIN = 100
-    _PRICE_MAX = 1_000_000
+    # 🔴 不要在這裡寫數字 —— 上下限的唯一出處是 scrapers/base.py 的
+    #    PRICE_MIN_JPY / PRICE_MAX_JPY（含選這兩個值的實測依據）。
+    #    這兩個名字留著是因為子類別與測試會覆寫／讀它們。
+    #    ⚠️ 上限 2026-09-08 由 1,000,000 放寬成 10,000,000（收斂到單一值的結果）。
+    _PRICE_MIN = PRICE_MIN_JPY
+    _PRICE_MAX = PRICE_MAX_JPY
     # 一致性檢查：**每一個分級都有**，但 R2 與其他級用不同的方法，因為失效模式不同。
     #
     #  · R3/R4/R5 是「整頁掃文字」，同頁的選配、加購、補充包會混進來 →
@@ -490,7 +496,7 @@ class GenericMixin:
             for v, reject_kw in raw:
                 if v is None:
                     continue
-                if not (self._PRICE_MIN <= v <= self._PRICE_MAX):
+                if not price_in_range(v, self._PRICE_MIN, self._PRICE_MAX):
                     dropped.append(f"{v}→範圍外")
                     continue
                 if reject_kw:

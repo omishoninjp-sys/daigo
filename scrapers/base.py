@@ -477,6 +477,49 @@ def normalize_price(price) -> int | None:
     return None
 
 
+# ============ 價格合理範圍：單一數值來源 ============
+#
+# 🔴 這裡是**唯一**可以寫價格上下限數字的地方。
+#    2026-09-08 之前有三套並存且互相矛盾的範圍：
+#      generic.GenericMixin._PRICE_MIN/_PRICE_MAX      100 / 1,000,000
+#      generic._scrape_with_playwright 與 _extract_json_ld  100 / 1000000（各自寫死）
+#      amiami / animate / netmall / pbandai / …        100 / 10,000,000
+#    同一件商品走不同 scraper 會有不同的接受範圍，而沒有任何地方說得出為什麼。
+#
+# ★ 數值依據（2026-09-08，Shopify 連接器 bulk，全庫 5,309 件商品中
+#   1,526 件帶 daigo.original_price_jpy metafield）：
+#      最低      ¥110（郵票）        → 沒有任何一件低於 ¥100
+#      最高合法  ¥972,612（ASUS Ascent GX10 迷你電腦，amazon.co.jp）
+#      次高      ¥440,000（CITIZEN 腕錶）、¥415,000（AIRBOW 音響，ippinkan.jp）
+#      >¥1,000,000 的合法商品：0 件
+#
+# ★ 上限取 10,000,000 而不是 1,000,000，理由是**收斂必須挑一個值**，
+#   而 1,000,000 對 generic 太緊：ippinkan.jp（音響）已經出現 ¥415,000，
+#   那個品類 ¥1,000,000 以上是常態，而超出上限的後果是 price_jpy 被清成 None
+#   →「無法偵測到商品價格」，客人看不出是被範圍擋掉的（靜默失敗）。
+#   原本 1,000,000 這個上限也**從來沒有擋下過**它看起來要擋的東西 ——
+#   實際出事的 ¥999,999（dot-st）剛好在它底下。那件事現在由
+#   detect_sentinel_price() 負責，不是靠上限。
+PRICE_MIN_JPY = 100
+PRICE_MAX_JPY = 10_000_000
+
+# ⚠️ Yahoo 系（yahoo_api / platform_yahoo_store / platform_zozotown）原本就是 50，
+#    收斂時**刻意不改成 100**：這一版的目標是「數字只有一個出處」，
+#    不是「順便改行為」。全庫最低 ¥110，所以 50 與 100 在現有語料上等價，
+#    真要統一應該另外開一次、拿 Yahoo 自己的資料驗。
+PRICE_MIN_JPY_YAHOO = 50
+
+
+def price_in_range(value, min_jpy: int = PRICE_MIN_JPY,
+                   max_jpy: int = PRICE_MAX_JPY) -> bool:
+    """價格是否落在合理範圍內。None／非數字一律 False。"""
+    if value is None or isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    return min_jpy <= value <= max_jpy
+
+
 # ============ 成人商品偵測 ============
 
 ADULT_KEYWORDS = [
@@ -654,10 +697,22 @@ _SECONDHAND_HOSTS = (
 #    PING 那筆少 ¥9,000、EIZO 那筆少 ¥1,100（低估售價，客人不會來反映）。
 #    → 即決 scraper 寫好、能取到即決価格之後，再把這行加回來。
 _ICHIBAN = re.compile(r"一番くじ|一番賞|イチバンくじ", re.I)
+# ⚠️ 這則是**純網域硬擋**（1kuji.com）在用的，不是標題規則在用的。
+#    1kuji.com 整站 100% 一番賞、12 個月請到款 0 元，整域擋沒有營收損失。
 _MSG_ICHIBAN = (
     "一番賞是日本店頭限量抽選商品，官方通路線上無法穩定取得，這類連結目前不開放代購。"
     f"若你想要特定賞品，可以貼 {_ALT_CHANNELS} 這些二手平台的現貨連結，"
     "那些我們照常代購。"
+)
+# ★ 標題命中「一番くじ／一番賞」時改判 soft（2026-09-08）——
+#   精確率 66.7%，也就是每三件裡有一件其實買得到，硬擋等於連那一件一起丟掉。
+#   soft 的處置是「商品頁照建，但不上架到線上商店」，客人不能自己結帳、
+#   要來詢問，錯判的成本從「完全買不到」降成「多問一句」。
+_MSG_ICHIBAN_SOFT = (
+    "一番賞多半是日本店頭的限量抽選商品，官方通路線上不一定拿得到，"
+    "所以這一件我們先幫你建好商品頁、但不開放直接結帳。"
+    "麻煩用 LINE @544kaytb 跟我們確認現在還買不買得到，可以的話馬上幫你開通。"
+    f"如果你想要的是現貨，也可以直接貼 {_ALT_CHANNELS} 這些二手平台的連結，那些我們照常代購。"
 )
 
 # ── 航海王卡牌 ──
@@ -665,10 +720,13 @@ _ONEPIECE_CARD = re.compile(
     r"ワンピースカード|ONE\s*PIECE\s*カードゲーム|海賊王\s*卡牌|OPカードゲーム",
     re.I,
 )
+# ★ 2026-09-08 由 hard 改判 soft：精確率 61.5%，是幾條規則裡最低的一條 ——
+#   將近四成命中其實買得到，硬擋把那四成一起丟掉。
 _MSG_ONEPIECE = (
-    "航海王卡牌採限量／抽選販售，官方通路無法穩定取得，目前不開放直接下單。"
-    f"請改貼 {_ALT_CHANNELS} 上的現貨連結，那些我們照常代購。"
-    "找不到的話歡迎用 LINE @544kaytb 詢問。"
+    "航海王卡牌多半採限量／抽選販售，官方通路不一定拿得到，"
+    "所以這一件我們先幫你建好商品頁、但不開放直接結帳。"
+    "麻煩用 LINE @544kaytb 跟我們確認一下現況，買得到的話馬上幫你開通。"
+    f"想要現貨的話也可以直接貼 {_ALT_CHANNELS} 上的連結，那些我們照常代購。"
 )
 
 # ── 抽選販售頁 ──
@@ -684,6 +742,55 @@ _CHUSEN = re.compile(
 _MSG_CHUSEN = (
     "這個商品頁是日本官方的「抽選販售」（抽籤制），中籤才能購買，"
     "我們無法代為參加抽選。若之後開放一般販售，再麻煩你重新貼連結。"
+)
+
+# ── 軟擋網域：整站不硬擋，但不開放自助結帳 ─────────────────────
+#
+# 🔴 進這張表的門檻**比 _RESTRICTED_HOSTS 低一階**：
+#    只需要「12 個月請到款 = 0」，不需要「整站單一品類」。
+#    因為 soft 不會讓客人買不到 —— 商品頁照建，只是要先問一句。
+#
+# 2026-09-08 實測（Shopify 連接器 bulk，12 個月 1,302 筆訂單／2,301 line item，
+#                  日期範圍 2025-09-07 → 2026-09-07）：
+#   official-store.jfa.jp   23 個 line item，**23 個全部 VOIDED 且已取消，
+#                           請到款 0 元**。
+#                           ★ 這 23 件實際上是 BEYBLADE X ×日本代表 聯名
+#                             （UX-00 サムライセイバー5-60K），但 SEO 標題被
+#                             寫成「日本足球協會 運動器材／武士劍」，
+#                             **關鍵字規則一條都不命中**；而 _BEYBLADE_MODEL
+#                             只在 takaratomymall.jp 生效，所以型番也擋不到。
+#                             → 這是「只有網域擋得住」的典型案例。
+#   ⚠️ 不放進硬擋表的理由：該站同時賣一般日本代表隊周邊（球衣、圍巾），
+#      那些我們做得到，只是 12 個月剛好沒有人買過。
+_MSG_JFA = (
+    "這個商品來自日本足球協會官方商店。這個網站上的聯名／限定商品我們過去"
+    "一件都沒有成功買到過（近一年 23 筆全部取消），所以先幫你建好商品頁、"
+    "但不開放直接結帳。麻煩用 LINE @544kaytb 跟我們確認能不能取得，"
+    "可以的話馬上幫你開通。"
+)
+_SOFT_HOSTS = (
+    ("official-store.jfa.jp", _MSG_JFA),
+)
+
+# ── Pokémon Center 的受注生產 ────────────────────────────────
+#
+# 已經有的 _SOFT_WARNING 只認「受注生産／受注販売／受注期間」，
+# **不認單獨一個「受注」**。而 Pokémon Center 的 SEO 標題正好都是單獨的：
+#   「寶可夢中心 皮卡丘 毛絨玩具 - 受注皮卡丘毛絨玩具」
+#   「寶可夢中心 皮卡丘 玩偶 - 受注 皮卡丘玩偶・公仔」
+# 2026-09-08 實測 12 個月訂單，這四筆的結果是 2 PAID／2 VOIDED（50%）——
+# 買得到，但一半會失敗，正好是 soft 的定義。
+#
+# ★ 為什麼把單獨的「受注」限定在這個網域，不做成全站規則：
+#   全站語料裡單獨「受注」只有這四筆，沒有其他樣本可以驗誤擋率。
+#   沒驗過的範圍不放進規則 —— 要放大要先拿資料。
+_POKECEN_HOSTS = ("pokemoncenter-online.com",)
+_JUCHU_BARE = re.compile(r"受注", re.I)
+_MSG_POKECEN_JUCHU = (
+    "這是 Pokémon Center 的「受注生產」商品（先接單後生產），"
+    "日本端的接單期間與出貨時間都由官方決定，我們過去成功率大約一半。"
+    "所以先幫你建好商品頁、但不開放直接結帳 —— "
+    "麻煩用 LINE @544kaytb 跟我們確認接單狀況，可以的話馬上幫你開通。"
 )
 
 # ── 軟擋：仍可生成商品頁，但要提醒交期 ───────────────────────────
@@ -809,17 +916,22 @@ def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | N
 
     回傳:
         ("hard", 說明)  → 不要生成商品頁，直接回 blocked
-        ("soft", 說明)  → 可生成，但應顯示交期提醒
+        ("soft", 說明)  → 商品頁照建，但**不發布到線上商店**，客人只能詢問
         None            → 正常
 
     呼叫端務必在 scrape 完成後才呼叫（要有 title 才判斷得出來）。
     url 有給就會一起看：BEYBLADE 完全靠網域判斷，一番賞靠網域決定要不要豁免。
+
+    ★ 判斷順序：**hard 全部先跑完，才輪到 soft**（2026-09-08 起）。
+      同一個標題可能同時命中兩層（例：一番賞 + 抽選販売），
+      hard 在前才不會被先命中的 soft 蓋掉。
     """
     if not title:
         return None
     haystack = f"{title} {url or ''}"
     host = _restricted_host(url)
 
+    # ───────── hard：整件不接 ─────────
     if _is_pokemon_card(haystack):
         return ("hard", _MSG_POKEMON_CARD)
 
@@ -832,18 +944,105 @@ def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | N
             and _BEYBLADE_MODEL.search(haystack)):
         return ("hard", _MSG_BEYBLADE)
 
-    # 一番賞：二手平台上的是現貨，買得到 → 豁免
-    if _ICHIBAN.search(haystack):
-        if not any(_host_matches(host, d) for d in _SECONDHAND_HOSTS):
-            return ("hard", _MSG_ICHIBAN)
-
-    if _ONEPIECE_CARD.search(haystack):
-        return ("hard", _MSG_ONEPIECE)
-
     if _CHUSEN.search(haystack):
         return ("hard", _MSG_CHUSEN)
+
+    # ───────── soft：商品頁照建，但不上架 ─────────
+    # 一番賞：二手平台上的是現貨，買得到 → 完全豁免（連 soft 都不掛）
+    if _ICHIBAN.search(haystack):
+        if not any(_host_matches(host, d) for d in _SECONDHAND_HOSTS):
+            return ("soft", _MSG_ICHIBAN_SOFT)
+
+    if _ONEPIECE_CARD.search(haystack):
+        return ("soft", _MSG_ONEPIECE)
+
+    for domain, msg in _SOFT_HOSTS:
+        if _host_matches(host, domain):
+            return ("soft", msg)
+
+    if (any(_host_matches(host, d) for d in _POKECEN_HOSTS)
+            and _JUCHU_BARE.search(haystack)):
+        return ("soft", _MSG_POKECEN_JUCHU)
 
     for pattern, reason in _SOFT_WARNING:
         if pattern.search(haystack):
             return ("soft", reason)
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 哨兵值：落在合理範圍內、但幾乎不可能是真實售價的「魔術數字」
+# ══════════════════════════════════════════════════════════════════════
+#
+# 為什麼範圍檢查不夠：¥999,999 比 generic 的舊上限 1,000,000 **小 1 圓**，
+# 所以爬取、計價、建商品三關全過。實際發生過：
+#   2026-07-31 建立的「Classical Elf T恤｜Dot-st」原價寫成 ¥999,999
+#   （真價約 ¥1,499），售價 ¥1,149,998。訂單 GYT20262427 有人下單，
+#   最後**是人工把 variant price 改成 ¥1,874 才收到錢** ——
+#   metafield 到今天還停在 999,999（daigo.original_price_jpy 建立後永不更新）。
+#
+# 🔴 dot-st.com 現在還在壞（2026-09-08 查全庫）：該網域 4 件商品
+#    **全部**是 ¥999,999，其中 3 件是 2026-09-08 當天建的。
+#
+# ─────────────────────────────────────────────────────────────────────
+# 清單怎麼定的（2026-09-08 實測，Shopify 連接器 bulk，商家身分）
+# ─────────────────────────────────────────────────────────────────────
+# 語料 A：全庫 1,526 件帶 daigo.original_price_jpy 的商品
+# 語料 B：12 個月訂單 1,302 筆／2,301 line item
+#         （日期範圍 2025-09-07 → 2026-09-07，與 cancellation-2026-09 的
+#           1,302／448 對得上；**不可以用 SHOPIFY_ACCESS_TOKEN 重跑，
+#           那把 token 沒有 read_all_orders，會靜默只回近 60 天**）
+#
+#   哨兵值      語料 A 命中   語料 B 命中           判定
+#   0                0 件      0                    收（全庫最低 ¥110）
+#   1                0 件      0                    收
+#   99,999           0 件      0                    收
+#   999,999          4 件      1（GYT20262427）     收 ★ 4 件全是 dot-st 的壞值；
+#                                                    那筆訂單是人工改價才成立的，
+#                                                    攔下來正是要的結果
+#   1,000,000        0 件      0                    收
+#   9,999,999        0 件      0                    收
+#
+# 🔴 9,999 **不收** —— 使用者原本的清單裡有，回測證明會誤擋：
+#      語料 A：9 件，全部 jp.mercari.com（GBA SP 兩台、Z/X UR 卡、
+#              HUMAN MADE 馬克杯…）
+#      語料 B：3 個 line item，**全部 PAID 且未取消**
+#              GYT20262587 一張單裡三台 GBA 分別是
+#              ¥9,999 / ¥10,000 / ¥9,999，客人實付 ¥12,198 / ¥12,199 / ¥12,198，
+#              **沒有任何人工改價** —— 那就是 Mercari 上的真實開價。
+#    ¥9,999 是二手平台的心理定價（壓在 ¥10,000 以下），和 ¥100 一樣是
+#    合理商品價。收它會擋掉真實成交，違反「誤擋接近 0」這個前提本身。
+#
+# ★ 只檢查**商品層的原價**（product.price_jpy／手動表單的原價），
+#   不檢查各變體的價格 —— 變體價沒有回測語料，沒驗過的東西不擋。
+_SENTINEL_PRICES_JPY = (0, 1, 99_999, 999_999, 1_000_000, 9_999_999)
+
+_MSG_SENTINEL_PRICE = (
+    "這個連結抓到的日本原價是 ¥{price:,}，這種數字通常是網站的預設值或佔位數，"
+    "不是真正的售價（我們遇過真價 ¥1,499 被抓成 ¥999,999 的情況）。"
+    "為了避免用錯的金額幫你下單，這一筆需要人工確認過才能開商品頁。"
+    "麻煩用 LINE @544kaytb 把這條連結傳給我們，確認價格後馬上幫你處理。"
+)
+
+
+def detect_sentinel_price(price_jpy) -> tuple[str, str] | None:
+    """
+    原價是不是哨兵值（看起來合理、實際上是佔位數的魔術數字）。
+
+    回傳 ("hard", 說明) 或 None。回傳形狀刻意與 detect_restricted_category
+    一致，好讓 main.py 的三個端點用同一種接線方式。
+
+    ★ `None` 不算命中 —— 那是「沒抓到價格」，是另一種失敗，
+      由呼叫端原本的 `if not product.price_jpy` 處理。
+      但 `0` 算命中：0 是被明確抓到的值。
+    """
+    if price_jpy is None or isinstance(price_jpy, bool):
+        return None
+    if not isinstance(price_jpy, (int, float)):
+        return None
+    v = int(price_jpy)
+    if v != price_jpy:            # 有小數就不是這幾個整數魔術值
+        return None
+    if v not in _SENTINEL_PRICES_JPY:
+        return None
+    return ("hard", _MSG_SENTINEL_PRICE.format(price=v))

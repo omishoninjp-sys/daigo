@@ -10,7 +10,7 @@ import time as _time
 
 from bs4 import BeautifulSoup
 
-from scrapers.base import ProductInfo, normalize_price
+from scrapers.base import ProductInfo, normalize_price, price_in_range
 
 
 class MakeShopMixin:
@@ -71,7 +71,7 @@ class MakeShopMixin:
                 m = re.search(r'[￥¥]\s*([\d,]+)\s*[\(（]?\s*税込', page_text)
                 if m:
                     p = normalize_price(m.group(1))
-                    if p and 100 <= p <= 2_000_000:
+                    if price_in_range(p):
                         product.price_jpy = p
 
             # 3. X円（税込）
@@ -79,7 +79,7 @@ class MakeShopMixin:
                 m = re.search(r'([\d,]+)\s*円\s*[（\(]\s*税込', page_text)
                 if m:
                     p = normalize_price(m.group(1))
-                    if p and 100 <= p <= 2_000_000:
+                    if price_in_range(p):
                         product.price_jpy = p
 
             # 4. class*=price
@@ -88,7 +88,7 @@ class MakeShopMixin:
                     m = re.search(r'[￥¥]([\d,]+)', el.get_text(strip=True))
                     if m:
                         p = normalize_price(m.group(1))
-                        if p and 100 <= p <= 2_000_000:
+                        if price_in_range(p):
                             product.price_jpy = p
                             break
 

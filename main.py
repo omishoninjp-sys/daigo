@@ -382,13 +382,32 @@ class ScrapeResponse(BaseModel):
     pricing: dict | None = None
     error: str | None = None
     # blocked=True 的意思是「**這條連結我們不承接，不要讓客人自己補資料建單**」，
-    # 涵蓋：封鎖網站、受限品類、非商品頁連結。
-    # 前端行為（2026-09-07 抓線上 assets/daigo.js 實測，非讀原始碼推論）：
-    #   blocked=true                     → showError(error, handoff_url)，停在輸入步驟
-    #   blocked=false 且沒有 product.title → showManualForm()
-    # 🔴 2026-09-07 之前這裡寫著「前端已支援」，但線上 daigo.js 全檔沒有 blocked 這個字，
-    #    四則硬擋訊息從來沒顯示給任何客人看過。跨層註解一律要實測過才寫，見 CLAUDE.md 2-1。
+    # 涵蓋：封鎖網站、受限品類、非商品頁連結、哨兵價格。
+    #
+    # 前端行為（**2026-09-08 重新實測**：抓線上
+    #   //goyoutati.com/cdn/shop/t/4/assets/daigo.js?v=150301092339533680921788760972
+    #   ，20,802 bytes，全檔搜尋）：
+    #   `blocked` 出現 2 次、`handoff_url` 出現 3 次。
+    #     daikoSearch（/api/scrape）：
+    #       if(data.blocked){ showError(data.error||"這個連結目前不開放代購。",
+    #                                   data.handoff_url); return }
+    #       if(!data.success||!data.product||!data.product.title){ showManualForm(url); return }
+    #     daikoManualOrder（/api/create-manual）：同樣先看 data.blocked。
+    #     daikoCreateOrder（/api/create-order）：**沒有看 data.blocked**，
+    #       但 `if(!data.success){ backToInput(), showError(data.error, data.handoff_url) }`
+    #       ——所以 success=false 就會顯示訊息，效果一樣。
+    #   showError(msg, handoffUrl) 會在訊息下面加一條
+    #   「用 LINE 幫我處理這件商品 →」的連結（只認 https）。
+    #
+    # 🔴 上一版註解寫「線上 daigo.js 全檔沒有 blocked 這個字」——
+    #    那在 2026-09-07 是對的，但 theme 之後更新過（19,659 → 20,802 bytes），
+    #    現在四則硬擋訊息**確實會顯示給客人**。跨層事實會過期，日期要跟著寫。
+    # ⚠️ 後端目前**沒有**回 handoff_url 這個欄位，所以那條 LINE 連結永遠不會出現。
+    #    （2026-09-08 查 main.py 全檔：ScrapeResponse／CreateOrderResponse 都沒有它。）
     blocked: bool = False
+    # soft 品類的提醒。**不影響 success**，只是把判定結果帶出來給監控與後台看。
+    # ⚠️ 線上 daigo.js 不讀這個欄位（同上實測），客人看不到 —— 不要當成對客訊息用。
+    notice: str | None = None
     queue_info: dict | None = None
 class CreateOrderRequest(BaseModel):
     url: str
@@ -406,6 +425,11 @@ class CreateOrderResponse(BaseModel):
     admin_url: str | None = None
     error: str | None = None
     blocked: bool = False  # 語意同 ScrapeResponse.blocked
+    # soft 品類：商品**已經建立**（product_id 有值），但沒有上架到線上商店，
+    # 所以 success=False —— 客人不能自己結帳，要來詢問。
+    # 前端（daikoCreateOrder / daikoManualOrder）在 success=False 時會顯示 error，
+    # 這正是我們要的行為，不需要動 theme。
+    soft: bool = False
 class SearchRequest(BaseModel):
     query: str
     source: str = "rakuten"
@@ -544,7 +568,8 @@ async def scrape_product(req: ScrapeRequest):
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
         from scrapers.base import (detect_blocked, detect_invalid_link,
-                                    detect_restricted_host, detect_restricted_category)
+                                    detect_restricted_host, detect_restricted_category,
+                                    detect_sentinel_price)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站: {url[:80]}")
@@ -598,9 +623,26 @@ async def scrape_product(req: ScrapeRequest):
                 error=restricted[1],
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
+        # ★ 哨兵價格：與 detect_restricted_category 並排的一道獨立檢查。
+        #   放在這裡（而不是 scraper 裡）是因為它是**業務政策**不是解析邏輯 ——
+        #   三個端點要用同一套判準，寫在 scraper 裡就會漏掉手動建單那條路。
+        sentinel = detect_sentinel_price(product.price_jpy)
+        if sentinel:
+            print(f"[API] 🚨 哨兵價格 ¥{product.price_jpy}: {product.title[:60]} | {url[:60]}")
+            return ScrapeResponse(
+                success=False,
+                blocked=True,
+                error=sentinel[1],
+                queue_info={"active": _active_count, "waiting": _queue_count},
+            )
         pricing = calculate_selling_price(product.price_jpy) if product.price_jpy else None
+        # soft 在這支**不擋**：這裡不寫入任何東西，擋了客人連預覽都看不到，
+        # 而 soft 的定義本來就是「商品照建」。只把判定帶回去。
+        if restricted and restricted[0] == "soft":
+            print(f"[API] 🔒 soft 品類（僅預覽，未建立）: {product.title[:60]}")
         return ScrapeResponse(
             success=True, product=product.to_dict(), pricing=pricing,
+            notice=restricted[1] if restricted else None,
             queue_info={"active": _active_count, "waiting": _queue_count},
         )
     except HTTPException:
@@ -625,7 +667,8 @@ async def create_order(req: CreateOrderRequest):
         url = str(req.url).strip()
         # ★ 先檢查封鎖網站
         from scrapers.base import (detect_blocked, detect_invalid_link,
-                                    detect_restricted_host, detect_restricted_category)
+                                    detect_restricted_host, detect_restricted_category,
+                                    detect_sentinel_price)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
@@ -676,6 +719,19 @@ async def create_order(req: CreateOrderRequest):
                 blocked=True,
                 error=restricted[1],
             )
+        # ★ 哨兵價格，同 /api/scrape。cache 命中時不會重跑 scrape，
+        #   所以這裡是最後一道，不能省。
+        sentinel = detect_sentinel_price(product.price_jpy)
+        if sentinel:
+            print(f"[API] 🚨 哨兵價格（建單嘗試）¥{product.price_jpy}: "
+                  f"{product.title[:60]} | {url[:60]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=sentinel[1],
+            )
+        # ★ soft：商品照建，但不發布到線上商店。
+        is_soft = bool(restricted and restricted[0] == "soft")
         pricing = calculate_selling_price(product.price_jpy)
         title = req.title_override or product.title
         seo = await generate_seo_title(
@@ -697,6 +753,7 @@ async def create_order(req: CreateOrderRequest):
             in_stock=product.in_stock,
             platform_id=getattr(product, "platform_id", ""),
             created_via="auto",
+            publish_online_store=not is_soft,
         )
         # ★ 重複下單煞車第一階段：建單成功時記一筆正規化後的 key。
         #   **不擋任何東西**，門檻等一到兩週的分佈再定
@@ -706,6 +763,17 @@ async def create_order(req: CreateOrderRequest):
         if _bk["norm_key"]:
             print(f"[Brake] 建單紀錄 key={_bk['norm_key']} "
                   f"rule={_bk['matched_site_rule'] or '(通用)'}")
+        if is_soft:
+            # 🔴 success=False 是刻意的：商品建好了，但**沒有上架**，
+            #    storefront_url 現在是 404 —— 把它當成 checkout_url 回給前端
+            #    等於給客人一條壞連結。前端在 success=False 時顯示 error，
+            #    正好就是「請來詢問」。product_id / admin_url 照回，後台找得到。
+            print(f"[API] 🔒 soft 品類已建立但未上架: {result['product_id']} | {title[:60]}")
+            return CreateOrderResponse(
+                success=False, soft=True,
+                product_id=result["product_id"], admin_url=result["admin_url"],
+                error=restricted[1],
+            )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],
@@ -765,7 +833,7 @@ async def create_manual_order(req: ManualOrderRequest):
         #   否則爬取失敗的卡牌會從這條路溜進來。
         #   import 另外寫一次：上面那個在 `if req.source_url:` 裡面，
         #   沒有 source_url 時不會被綁定，而這道檢查不論有沒有網址都要跑。
-        from scrapers.base import detect_restricted_category
+        from scrapers.base import detect_restricted_category, detect_sentinel_price
         restricted = detect_restricted_category(req.title, req.source_url or "")
         if restricted and restricted[0] == "hard":
             print(f"[API] 🚫 受限品類（手動建單）: {req.title[:60]}")
@@ -774,6 +842,18 @@ async def create_manual_order(req: ManualOrderRequest):
                 blocked=True,
                 error=restricted[1],
             )
+        # ★ 哨兵價格。這條路徑填價的是**客人**（爬取失敗時的手動表單），
+        #   所以一樣要檢查 —— 客人把「999999」當佔位填進來的情況跟爬蟲抓錯一樣可能。
+        #   檢查的是**原價**（original_jpy），不是前端算出來的 price_jpy。
+        sentinel = detect_sentinel_price(original_jpy)
+        if sentinel:
+            print(f"[API] 🚨 哨兵價格（手動建單）¥{original_jpy}: {req.title[:60]}")
+            return CreateOrderResponse(
+                success=False,
+                blocked=True,
+                error=sentinel[1],
+            )
+        is_soft = bool(restricted and restricted[0] == "soft")
         seo = await generate_seo_title(
             original_title=req.title,
             source_url=req.source_url,
@@ -789,6 +869,7 @@ async def create_manual_order(req: ManualOrderRequest):
             # ★ 手動填寫的商品 source_url 常常是首頁或不完整，但商品是真的。
             #   任何「用 source_url 判斷商品品質」的掃描都要先看這個欄位排除掉。
             created_via="manual",
+            publish_online_store=not is_soft,
         )
         # ★ 同 /api/create-order。手動建單常常沒有 source_url（或填的是首頁），
         #   那批 note_created 會直接跳過 —— 第一階段先只記錄有 URL 的。
@@ -797,6 +878,21 @@ async def create_manual_order(req: ManualOrderRequest):
         if _bk["norm_key"]:
             print(f"[Brake] 建單紀錄（手動）key={_bk['norm_key']} "
                   f"rule={_bk['matched_site_rule'] or '(通用)'}")
+        if is_soft:
+            # 同 /api/create-order：建好了但沒上架，storefront_url 是 404。
+            # ⚠️ 前端差異（2026-09-08 抓線上 daigo.js 實測）：
+            #    daikoManualOrder 先看 data.blocked（我們這裡是 false），
+            #    再走 `if(!data.success){ alert(data.error||"建立商品失敗") }`
+            #    —— 所以客人看到的是**瀏覽器 alert**，不是 daikoCreateOrder
+            #    那種內嵌的 showError。訊息會到，但樣式不同。
+            #    要一致就得動 theme（讓前端認 soft 欄位），本次刻意不動。
+            print(f"[API] 🔒 soft 品類已建立但未上架（手動）: "
+                  f"{result['product_id']} | {req.title[:60]}")
+            return CreateOrderResponse(
+                success=False, soft=True,
+                product_id=result["product_id"], admin_url=result["admin_url"],
+                error=restricted[1],
+            )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],

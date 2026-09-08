@@ -18,7 +18,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
-from scrapers.base import ProductInfo
+from scrapers.base import (ProductInfo, PRICE_MIN_JPY, PRICE_MAX_JPY,
+                           price_in_range)
 
 
 def _note_http(status, body=""):
@@ -31,8 +32,9 @@ def _note_http(status, body=""):
 
 
 
-_SKU_MIN_PRICE = 100
-_SKU_MAX_PRICE = 10_000_000
+# 上下限的唯一出處是 scrapers/base.py，這裡只是別名。
+_SKU_MIN_PRICE = PRICE_MIN_JPY
+_SKU_MAX_PRICE = PRICE_MAX_JPY
 
 # _build_variants 判斷顏色軸用的關鍵字（_parse_sku_json 沿用同一組，行為一致）
 _COLOR_KEYWORDS = ["色分類", "カラー", "color", "色"]
@@ -159,7 +161,7 @@ def _parse_sku_json(html: str):
                 price = int(float(raw_price))
             except (TypeError, ValueError):
                 price = 0
-            if not (_SKU_MIN_PRICE <= price <= _SKU_MAX_PRICE):
+            if not price_in_range(price, _SKU_MIN_PRICE, _SKU_MAX_PRICE):
                 price = 0
 
         image = ""
@@ -418,7 +420,7 @@ class RakutenMixin:
                     if m:
                         try:
                             price = int(m.group(1).replace(",", ""))
-                            if 100 <= price <= 10_000_000:
+                            if price_in_range(price):
                                 product.price_jpy = price
                                 print(f"[Rakuten DEBUG] 價格 pattern={pat!r} → ¥{price}")
                                 break
@@ -442,7 +444,7 @@ class RakutenMixin:
                             price_val = offers.get("price") or offers.get("lowPrice")
                             if price_val:
                                 price = int(float(str(price_val)))
-                                if 100 <= price <= 10_000_000:
+                                if price_in_range(price):
                                     product.price_jpy = price
                                     print(f"[Rakuten DEBUG] JSON-LD 價格 → ¥{price}")
                                     break

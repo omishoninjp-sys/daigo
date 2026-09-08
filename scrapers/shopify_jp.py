@@ -13,7 +13,7 @@ from urllib.parse import urlparse, urlencode, urlunparse, parse_qs, urljoin
 import httpx
 
 from config import SCRAPE_TIMEOUT, USER_AGENT
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, price_in_range
 
 
 def _extract_price_from_html(html: str) -> tuple[int, str]:
@@ -57,7 +57,7 @@ def _extract_tax_included_price(html: str) -> int:
     if m:
         try:
             price = int(m.group(1).replace(",", ""))
-            if 100 <= price <= 10_000_000:
+            if price_in_range(price):
                 return price
         except (ValueError, TypeError):
             pass
@@ -75,7 +75,7 @@ def _extract_tax_included_price(html: str) -> int:
     if m:
         try:
             price = int(m.group(1).replace(",", ""))
-            if 100 <= price <= 10_000_000:
+            if price_in_range(price):
                 return price
         except (ValueError, TypeError):
             pass

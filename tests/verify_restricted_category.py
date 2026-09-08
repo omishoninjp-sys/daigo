@@ -51,12 +51,22 @@ HARD_TITLES = [
     "ポケモンカードゲーム スカーレット&バイオレット 拡張パック",
     "ポケカ 強化拡張パック 熱風のアリーナ BOX",
     "【抽選販売】ポケモンセンター オリジナル",
-    "ONE PIECE カードゲーム 新時代の主役",
-    "一番くじ ドラゴンボール",
 ]
 for t in HARD_TITLES:
     r = detect_restricted_category(t, "")
     check(f"硬擋：{t[:24]}", r is not None and r[0] == "hard", f"實際回傳 {r}")
+
+# 🔴 2026-09-08 由 hard 改判 soft 的兩條。**這兩條原本在 HARD_TITLES 裡**，
+#    移過來不是因為規則失效，是因為精確率不夠格硬擋：
+#      航海王卡牌 61.5%、一番賞 66.7%（三分之一其實買得到）。
+#    soft 的處置是「商品頁照建、不上架」，錯判成本從「買不到」降成「多問一句」。
+SOFT_TITLES = [
+    "ONE PIECE カードゲーム 新時代の主役",
+    "一番くじ ドラゴンボール",
+]
+for t in SOFT_TITLES:
+    r = detect_restricted_category(t, "")
+    check(f"軟擋：{t[:24]}", r is not None and r[0] == "soft", f"實際回傳 {r}")
 
 # 正常商品不可以被擋（含刻意挑的相鄰詞）
 CLEAN_TITLES = [
@@ -117,25 +127,45 @@ for t, u, want, why in ANNIV_CASES:
     check(f"週年：{why}", got == want, f"實際回傳 {r}")
 
 # ── 3. 一番賞：二手平台豁免 ──
+# ⚠️ 2026-09-08 起命中的結果是 **soft**（商品照建、不上架），不是 hard。
+#    豁免那幾條**仍然是 None** —— 二手現貨是真的買得到，連 soft 都不該掛。
+#    這一組的斷言故意分成兩種期望值（"soft" / None），
+#    不可以簡化成布林 —— 那樣就分不出「改成 soft」和「規則整條失效」。
 ICHIBAN_CASES = [
-    ("一番くじ ドラゴンボール", "https://1kuji.com/lineup/xxx", True, "官方通路 → 擋"),
-    ("一番くじ ドラゴンボール", "", True, "沒有網址 → 判斷不出來，照擋"),
-    ("一番賞 弗利倫 公仔 C賞 D賞", "https://jp.mercari.com/item/m123", False, "Mercari 現貨"),
-    ("一番賞 まとめ賣", "https://www.mercari.com/jp/items/m1", False, "mercari.com 子網域"),
-    ("一番くじ ワンピース", "https://paypayfleamarket.yahoo.co.jp/item/z1", False, "PayPay フリマ"),
+    ("一番くじ ドラゴンボール", "https://1kuji.com/lineup/xxx", "soft", "官方通路 → 軟擋"),
+    ("一番くじ ドラゴンボール", "", "soft", "沒有網址 → 判斷不出來，照軟擋"),
+    ("一番賞 弗利倫 公仔 C賞 D賞", "https://jp.mercari.com/item/m123", None, "Mercari 現貨"),
+    ("一番賞 まとめ賣", "https://www.mercari.com/jp/items/m1", None, "mercari.com 子網域"),
+    ("一番くじ ワンピース", "https://paypayfleamarket.yahoo.co.jp/item/z1", None, "PayPay フリマ"),
     # ⚠️ Yahoo 拍賣已從 _SECONDHAND_HOSTS 移除：純競標與即決網址相同，分不出來，
-    #    留在豁免清單會讓純競標頁被放行。即決 scraper 完成後再改回 False。
-    ("一番くじ 景品", "https://auctions.yahoo.co.jp/jp/auction/x1", True,
+    #    留在豁免清單會讓純競標頁被放行。即決 scraper 完成後再改回 None。
+    ("一番くじ 景品", "https://auctions.yahoo.co.jp/jp/auction/x1", "soft",
      "Yahoo 拍賣 → 不豁免（競標與即決分不出來）"),
-    ("一番くじ フィギュア", "https://www.suruga-ya.jp/product/detail/123", False, "駿河屋"),
-    ("一番くじ 景品", "https://netmall.hardoff.co.jp/product/1", False, "ハードオフ"),
+    ("一番くじ フィギュア", "https://www.suruga-ya.jp/product/detail/123", None, "駿河屋"),
+    ("一番くじ 景品", "https://netmall.hardoff.co.jp/product/1", None, "ハードオフ"),
     # ★ 子字串誤命中的反例：網域裡有 mercari 字樣但不是 mercari
-    ("一番くじ 景品", "https://mercari-fan.example.jp/item/1", True, "假 mercari 網域 → 照擋"),
+    ("一番くじ 景品", "https://mercari-fan.example.jp/item/1", "soft", "假 mercari 網域 → 照軟擋"),
 ]
 for t, u, want, why in ICHIBAN_CASES:
     r = detect_restricted_category(t, u)
-    got = r is not None and r[0] == "hard"
-    check(f"一番賞：{why}", got == want, f"實際回傳 {r}")
+    got = r[0] if r else None
+    check(f"一番賞：{why}", got == want, f"期望 {want}，實際回傳 {r}")
+
+# ── 3-2. 一番賞仍然**不可以**是 hard（回歸保險）──
+# 只驗「不是 None」會讓「改回 hard」也通過，那就等於沒驗到這次的改動。
+r = detect_restricted_category("一番くじ ドラゴンボール", "https://1kuji.com/lineup/x")
+check("一番賞：不可以再是 hard", r is not None and r[0] != "hard", f"實際回傳 {r}")
+r = detect_restricted_category("ONE PIECE カードゲーム 新時代の主役", "")
+check("航海王卡牌：不可以再是 hard", r is not None and r[0] != "hard", f"實際回傳 {r}")
+
+# ── 3-3. 純網域硬擋不受影響：1kuji.com 走的是 detect_restricted_host ──
+# 🔴 標題規則改成 soft **不可以**連帶把整域硬擋一起放掉 ——
+#    1kuji.com 整站 100% 一番賞、12 個月請到款 0 元，那個判斷是另一支函式。
+from scrapers.base import detect_restricted_host as _drh
+r = _drh("https://1kuji.com/lineup/xxx")
+check("1kuji.com 仍然是純網域 hard", r is not None and r[0] == "hard", f"實際回傳 {r}")
+r = _drh("https://jp.mercari.com/item/m123")
+check("Mercari 不在純網域硬擋表", r is None, f"實際回傳 {r}")
 
 # ── 4. BEYBLADE 只擋官網 ──
 BEY_CASES = [
@@ -195,9 +225,11 @@ MALL_CASES = [
      "型番中但不是官方商城 → 放行"),
     ("BEYBLADE X BX-46 戰鬥入門套件", "https://www.amazon.co.jp/dp/B0X", False,
      "Amazon → 放行"),
+    # ⚠️ 這條 2026-09-08 之後改由 _SOFT_HOSTS 接手 → 回 soft，仍然**不是 hard**。
+    #    這裡驗的是「型番規則不可以跨網域生效」，那個結論沒變。
     ("日本足球協會 - UX-00 サムライセイバー5-60K 日本代表足球",
      "https://official-store.jfa.jp/item/1", False,
-     "JFA 聯名，型番中但 host 不符 → 放行（站上真實商品）"),
+     "JFA 聯名，型番中但 host 不符 → 不可 hard（改由 soft 網域規則接）"),
     ("ベイブレードX UX-21", "https://takaratomymall.jp.evil.example.com/x", False,
      "後綴偽裝網域 → 不可命中"),
     # 邊界：CJK 緊貼型番（\b 會失效的那種寫法）
@@ -210,6 +242,125 @@ for t, u, want, why in MALL_CASES:
     r = detect_restricted_category(t, u)
     got = r is not None and r[0] == "hard"
     check(f"商城：{why}", got == want, f"實際回傳 {r}")
+
+# ── 7. 2026-09-08 新增的兩條 soft 規則 ──
+#
+# official-store.jfa.jp：12 個月 23 個 line item **全部 VOIDED 且已取消**、
+#   請到款 0 元。這 23 件實際上是 BEYBLADE X 聯名（UX-00 サムライセイバー），
+#   但 SEO 標題寫成「日本足球協會 運動器材」，**關鍵字一條都不命中**，
+#   而 _BEYBLADE_MODEL 只在 takaratomymall.jp 生效 → 只有網域擋得住。
+JFA = "https://official-store.jfa.jp/item/1"
+SOFT_HOST_CASES = [
+    ("日本足球協會 運動器材 - UX-00 サムライセイバー5-60K 足球運動器材", JFA, "soft",
+     "真實標題（型番在，但關鍵字全不中）"),
+    ("日本代表 レプリカユニフォーム 2026", JFA, "soft",
+     "同網域的一般周邊 → 也是 soft（整域規則）"),
+    ("日本代表 レプリカユニフォーム 2026", "https://item.rakuten.co.jp/x/1", None,
+     "🔴 換個網域就不可以命中"),
+    ("なにかの商品", "https://official-store.jfa.jp.evil.example.com/x", None,
+     "後綴偽裝網域 → 不可命中"),
+    ("なにかの商品", "https://shop.official-store.jfa.jp/x", "soft", "子網域 → 命中"),
+]
+for t, u, want, why in SOFT_HOST_CASES:
+    r = detect_restricted_category(t, u)
+    check(f"JFA：{why}", (r[0] if r else None) == want, f"期望 {want}，實際回傳 {r}")
+
+# Pokémon Center 的單獨「受注」。既有的 _SOFT_WARNING 只認「受注生産／受注販売」，
+# 而該站的 SEO 標題是單獨的「受注」。12 個月 4 筆＝2 PAID／2 VOIDED（50%）。
+POKECEN = "https://www.pokemoncenter-online.com/?p=1"
+JUCHU_CASES = [
+    ("寶可夢中心 皮卡丘 毛絨玩具 - 受注皮卡丘毛絨玩具", POKECEN, "soft", "真實標題（單獨受注）"),
+    ("寶可夢中心 皮卡丘 玩偶 - 受注 皮卡丘玩偶・公仔", POKECEN, "soft", "真實標題（受注＋空白）"),
+    ("寶可夢中心 比卡超 毛絨玩具", POKECEN, None,
+     "🔴 同網域但沒有受注 → 不可命中（這是有成交的一般周邊）"),
+    ("寶可夢中心 桌遊 - 寶可夢探險盒 01 桌遊", POKECEN, None, "一般商品 → 放行"),
+    ("なにか 受注 グッズ", "https://item.rakuten.co.jp/x/1", None,
+     "🔴 單獨『受注』只在 Pokémon Center 生效，別站不可命中"),
+    # 這條在別站要命中，但靠的是既有的 _SOFT_WARNING（受注生産），不是新規則
+    ("なにか 受注生産 グッズ", "https://item.rakuten.co.jp/x/1", "soft",
+     "受注『生産』→ 既有 soft 規則照舊"),
+]
+for t, u, want, why in JUCHU_CASES:
+    r = detect_restricted_category(t, u)
+    check(f"受注：{why}", (r[0] if r else None) == want, f"期望 {want}，實際回傳 {r}")
+
+# 🔴 hard 不可以被新規則波及：卡牌在 Pokémon Center 上仍然是 hard
+r = detect_restricted_category("寶可夢 卡牌擴充包 - 受注 MEGA 擴張包", POKECEN)
+check("hard 優先於 soft：卡牌＋受注 → 仍是 hard",
+      r is not None and r[0] == "hard", f"實際回傳 {r}")
+r = detect_restricted_category("【抽選販売】一番くじ 限定", "")
+check("hard 優先於 soft：抽選販売＋一番賞 → 仍是 hard",
+      r is not None and r[0] == "hard", f"實際回傳 {r}")
+
+
+# ────────────────────────────────────────────────────────────────────
+# 一之三、哨兵價格（detect_sentinel_price）
+# ────────────────────────────────────────────────────────────────────
+print("\n【一之三】哨兵價格")
+
+from scrapers.base import detect_sentinel_price
+
+# 命中：全庫 1,526 件與 12 個月 2,301 個 line item 裡，
+# 除了 dot-st 的 4 件 ¥999,999 之外一件都沒有（見 base.py 的表）
+for v in (0, 1, 99_999, 999_999, 1_000_000, 9_999_999):
+    r = detect_sentinel_price(v)
+    check(f"哨兵命中 ¥{v:,}", r is not None and r[0] == "hard", f"實際回傳 {r}")
+    if r:
+        check(f"哨兵訊息帶出金額 ¥{v:,}", f"{v:,}" in r[1], f"實際 {r[1][:60]}")
+
+# 🔴 最重要的一組：真實成交價不可以被當成哨兵
+#    ¥9,999 曾被列入候選清單，回測發現全庫 9 件、12 個月 3 個 line item
+#    全部 PAID 未取消（GYT20262587 一張單三台 GBA：9,999 / 10,000 / 9,999），
+#    所以**刻意排除**。這條掉了就代表有人把它加回去了。
+NOT_SENTINEL = [
+    (9_999,   "Mercari 心理定價，12 個月 3 筆實際成交"),
+    (10_000,  "同一張訂單裡的鄰居"),
+    (972_612, "★ ASUS Ascent GX10：真實最高價，與 ¥999,999 只差 2.8%"),
+    (110,     "全庫最低價（郵票）"),
+    (100,     "使用者指定不可納入 —— animate ¥176、郵票 ¥110 都在附近"),
+    (415_000, "AIRBOW 音響（ippinkan.jp，走 generic）"),
+    (440_000, "CITIZEN 腕錶"),
+    (99_998,  "只差 1 圓就不是魔術值"),
+    (1_000_001, "只差 1 圓"),
+    (999_999.5, "非整數 → 不是那幾個整數魔術值"),
+]
+for v, why in NOT_SENTINEL:
+    check(f"不可誤擋 ¥{v:,}：{why}", detect_sentinel_price(v) is None,
+          f"實際回傳 {detect_sentinel_price(v)}")
+
+# None 是「沒抓到價格」，不是哨兵 —— 那條路由呼叫端原本的檢查處理
+check("None 不算哨兵（那是抓不到價格）", detect_sentinel_price(None) is None)
+check("非數字不算哨兵", detect_sentinel_price("999999") is None)
+check("布林不算哨兵", detect_sentinel_price(True) is None and detect_sentinel_price(False) is None)
+
+
+# ────────────────────────────────────────────────────────────────────
+# 一之四、價格範圍收斂成單一數值來源
+# ────────────────────────────────────────────────────────────────────
+print("\n【一之四】價格範圍單一來源")
+
+from scrapers import base as _b
+from scrapers.generic import GenericMixin as _G
+from scrapers import amiami as _amiami, animate as _animate, rakuten as _rakuten
+from scrapers import platform_zozotown as _zozo
+
+check("generic 的 _PRICE_MIN 指向 base", _G._PRICE_MIN is _b.PRICE_MIN_JPY)
+check("generic 的 _PRICE_MAX 指向 base", _G._PRICE_MAX is _b.PRICE_MAX_JPY)
+check("amiami 的上限指向 base", _amiami._MAX_PRICE == _b.PRICE_MAX_JPY)
+check("animate 的上限指向 base", _animate._MAX_PRICE == _b.PRICE_MAX_JPY)
+check("rakuten SKU 的上限指向 base", _rakuten._SKU_MAX_PRICE == _b.PRICE_MAX_JPY)
+check("ZOZO 的下限保留自己的 50", _zozo._MIN_PRICE == _b.PRICE_MIN_JPY_YAHOO == 50)
+check("三處上限已經一致",
+      _G._PRICE_MAX == _amiami._MAX_PRICE == _rakuten._SKU_MAX_PRICE,
+      f"{_G._PRICE_MAX} / {_amiami._MAX_PRICE} / {_rakuten._SKU_MAX_PRICE}")
+
+check("price_in_range：全庫最低 ¥110 收得下", _b.price_in_range(110) is True)
+check("price_in_range：¥99 在下限外", _b.price_in_range(99) is False)
+check("price_in_range：ASUS ¥972,612 收得下", _b.price_in_range(972_612) is True)
+check("price_in_range：黏起來的巨數 49504620 擋掉",
+      _b.price_in_range(49_504_620) is False)
+check("price_in_range：None 是 False", _b.price_in_range(None) is False)
+check("price_in_range：True 不可以被當成 1", _b.price_in_range(True) is False)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -225,9 +376,14 @@ OK_URL = "https://www.muji.com/jp/ja/store/cmdty/detail/4550344932803"
 _calls = {"shopify": 0, "seo": 0}
 
 
+_last_kw = {}
+
+
 class _FakeShopify:
     async def create_daigo_product(self, **kw):
         _calls["shopify"] += 1
+        _last_kw.clear()
+        _last_kw.update(kw)
         return {"product_id": 1, "storefront_url": "u", "admin_url": "a"}
 
 
@@ -306,12 +462,19 @@ check("/api/create-manual 擋下卡牌：blocked=True", res.blocked is True)
 check("/api/create-manual 擋下卡牌：沒有建到商品", _calls["shopify"] == 0)
 
 # ★ 沒有 source_url 也要擋得住（那道 import 不能借用 detect_blocked 區塊裡的）
+#   ⚠️ 一番賞 2026-09-08 起是 soft：商品**會**建立，但 success=False、不上架。
 saved = _install(card)
 res = asyncio.run(m.create_manual_order(
     m.ManualOrderRequest(title="一番くじ 鬼滅の刃", price_jpy=3000, source_url="")))
 _restore(saved)
-check("/api/create-manual 無 source_url 仍擋得住", res.success is False and res.blocked is True,
-      f"實際 error={res.error}")
+check("/api/create-manual 無 source_url 仍攔得住（soft）",
+      res.success is False and res.soft is True, f"實際 error={res.error}")
+check("/api/create-manual soft：商品有建立", _calls["shopify"] == 1)
+check("/api/create-manual soft：沒有上架到線上商店",
+      _last_kw.get("publish_online_store") is False, f"實際 {_last_kw.get('publish_online_store')}")
+check("/api/create-manual soft：不回 checkout_url（那條連結是 404）",
+      res.checkout_url is None, f"實際 {res.checkout_url}")
+check("/api/create-manual soft：回得了 product_id 給後台", res.product_id == 1)
 
 # ★ 二手平台豁免要能走到端點：同一個標題換成 Mercari 連結就該放行
 saved = _install(ok)
@@ -347,16 +510,233 @@ _restore(saved)
 check("/api/create-manual 放行正常商品", res.success is True and _calls["shopify"] == 1,
       f"實際 error={res.error}")
 
-# ── 軟擋在三個端點都必須放行（行為與接之前完全一樣）──
+# ── 軟擋接線（2026-09-08 起真的有行為，之前 soft 算出來就被丟掉）──
+#
+# 🔴 這一段是這次改動的核心。舊版斷言是「三個端點都放行」，
+#    那是「soft 沒有被使用」的行為，不是 soft 的正確行為。
 soft = ProductInfo(title="【予約】フィギュア 2026年3月発売予定", price_jpy=8800, source_url=OK_URL)
+
+# /api/scrape：**不擋**。這支不寫入任何東西，擋了客人連預覽都看不到，
+# 而 soft 的定義就是「商品照建」。判定結果放進 notice 欄位帶出來。
 saved = _install(soft)
 r1 = asyncio.run(m.scrape_product(m.ScrapeRequest(url=OK_URL)))
+_restore(saved)
+check("soft /api/scrape 仍然放行", r1.success is True and r1.blocked is False,
+      f"實際 error={r1.error}")
+check("soft /api/scrape 回得了商品資料", r1.product is not None and r1.pricing is not None)
+check("soft /api/scrape 把判定放進 notice",
+      r1.notice is not None and "預購" in r1.notice, f"實際 notice={r1.notice}")
+
+# /api/create-order：商品要建立，但不上架，且 success=False（前端會顯示訊息）
+saved = _install(soft)
 r2 = asyncio.run(m.create_order(m.CreateOrderRequest(url=OK_URL)))
+_restore(saved)
+check("soft /api/create-order：商品**有**建立", _calls["shopify"] == 1)
+check("soft /api/create-order：publish_online_store=False",
+      _last_kw.get("publish_online_store") is False,
+      f"實際 {_last_kw.get('publish_online_store')}")
+check("soft /api/create-order：success=False（客人不能自己結帳）", r2.success is False)
+check("soft /api/create-order：soft=True", r2.soft is True)
+check("soft /api/create-order：blocked 保持 False（商品確實建了）", r2.blocked is False)
+check("soft /api/create-order：不回 checkout_url", r2.checkout_url is None)
+check("soft /api/create-order：error 是那段說明",
+      r2.error is not None and "預購" in r2.error, f"實際 {r2.error}")
+
+# /api/create-manual：同上
+saved = _install(soft)
 r3 = asyncio.run(m.create_manual_order(
     m.ManualOrderRequest(title=soft.title, price_jpy=8800, source_url=OK_URL)))
 _restore(saved)
-check("軟擋在三個端點都放行", r1.success and r2.success and r3.success,
-      f"scrape={r1.error} order={r2.error} manual={r3.error}")
+check("soft /api/create-manual：商品**有**建立", _calls["shopify"] == 1)
+check("soft /api/create-manual：publish_online_store=False",
+      _last_kw.get("publish_online_store") is False)
+check("soft /api/create-manual：success=False + soft=True",
+      r3.success is False and r3.soft is True, f"實際 error={r3.error}")
+
+# ★ 反例：正常商品一定要 publish_online_store=True，
+#   不然這個旗標接錯方向也會全綠
+saved = _install(ok)
+r4 = asyncio.run(m.create_order(m.CreateOrderRequest(url=OK_URL)))
+_restore(saved)
+check("正常商品：publish_online_store=True",
+      _last_kw.get("publish_online_store") is True,
+      f"實際 {_last_kw.get('publish_online_store')}")
+check("正常商品：success=True 且回得了 checkout_url",
+      r4.success is True and r4.checkout_url == "u")
+check("正常商品：soft=False", r4.soft is False)
+
+
+# ────────────────────────────────────────────────────────────────────
+# 三、哨兵價格的端點接線（三支都要過）
+# ────────────────────────────────────────────────────────────────────
+print("\n【三】哨兵價格的端點接線")
+
+SENT_URL = "https://www.dot-st.com/classicalelf/disp/item/293463/"
+SENT_TITLE = "Classical Elf 再入荷 JaVa ジャバコラボ 綿100%刺繡半袖T恤"
+sent = ProductInfo(title=SENT_TITLE, price_jpy=999_999, source_url=SENT_URL)
+
+saved = _install(sent)
+s1 = asyncio.run(m.scrape_product(m.ScrapeRequest(url=SENT_URL)))
+_restore(saved)
+check("哨兵 /api/scrape：success=False", s1.success is False)
+check("哨兵 /api/scrape：blocked=True", s1.blocked is True)
+check("哨兵 /api/scrape：不回商品資料", s1.product is None and s1.pricing is None)
+check("哨兵 /api/scrape：訊息帶出金額",
+      s1.error is not None and "999,999" in s1.error, f"實際 {s1.error}")
+
+saved = _install(sent)
+s2 = asyncio.run(m.create_order(m.CreateOrderRequest(url=SENT_URL)))
+_restore(saved)
+check("哨兵 /api/create-order：success=False + blocked=True",
+      s2.success is False and s2.blocked is True)
+check("哨兵 /api/create-order：**沒有建到商品**", _calls["shopify"] == 0,
+      f"create_daigo_product 被呼叫了 {_calls['shopify']} 次")
+check("哨兵 /api/create-order：連 SEO 都沒去打", _calls["seo"] == 0)
+
+# 手動表單：客人自己填 999999 一樣要擋。檢查的是**原價**不是前端算的售價。
+saved = _install(ok)
+s3 = asyncio.run(m.create_manual_order(m.ManualOrderRequest(
+    title="なにかの商品", price_jpy=1_149_998, original_price_jpy=999_999,
+    source_url=SENT_URL)))
+_restore(saved)
+check("哨兵 /api/create-manual：success=False + blocked=True",
+      s3.success is False and s3.blocked is True, f"實際 {s3.error}")
+check("哨兵 /api/create-manual：沒有建到商品", _calls["shopify"] == 0)
+
+# 沒填 original_price_jpy 時，原價會退回 price_jpy —— 那條路也要擋
+saved = _install(ok)
+s4 = asyncio.run(m.create_manual_order(m.ManualOrderRequest(
+    title="なにかの商品", price_jpy=999_999, source_url=SENT_URL)))
+_restore(saved)
+check("哨兵 /api/create-manual：沒填原價時退回 price_jpy 也擋得住",
+      s4.success is False and s4.blocked is True, f"實際 {s4.error}")
+check("哨兵 /api/create-manual：沒有建到商品（退回路徑）", _calls["shopify"] == 0)
+
+# 🔴 回歸：真實成交價一定要走得完全程，三支都是
+asus = ProductInfo(title="ASUS Ascent GX10 迷你電腦 AI開發者用", price_jpy=972_612,
+                   source_url="https://www.amazon.co.jp/dp/B0ASUS")
+saved = _install(asus)
+a1 = asyncio.run(m.scrape_product(m.ScrapeRequest(url=asus.source_url)))
+_restore(saved)
+check("★ ASUS ¥972,612 /api/scrape 放行",
+      a1.success is True and a1.blocked is False, f"實際 {a1.error}")
+saved = _install(asus)
+a2 = asyncio.run(m.create_order(m.CreateOrderRequest(url=asus.source_url)))
+_restore(saved)
+check("★ ASUS ¥972,612 /api/create-order 建得出商品",
+      a2.success is True and _calls["shopify"] == 1, f"實際 {a2.error}")
+
+gba = ProductInfo(title="Game Boy Advance SP 星光金 限定版", price_jpy=9_999,
+                  source_url="https://jp.mercari.com/item/m29885564646")
+saved = _install(gba)
+g1 = asyncio.run(m.create_order(m.CreateOrderRequest(url=gba.source_url)))
+_restore(saved)
+check("★ Mercari GBA ¥9,999 建得出商品（12 個月實際成交過）",
+      g1.success is True and _calls["shopify"] == 1, f"實際 {g1.error}")
+
+
+# ────────────────────────────────────────────────────────────────────
+# 四、_publish_to_all_channels 的排除邏輯（離線，假 httpx client）
+# ────────────────────────────────────────────────────────────────────
+print("\n【四】銷售管道排除")
+
+from shopify_client import ShopifyClient
+
+
+class _FakeResp:
+    def __init__(self, payload, status=200):
+        self._p = payload
+        self.status_code = status
+
+    def json(self):
+        return self._p
+
+
+class _FakeClient:
+    """依 query 內容回不同的假結果，並記下 publishablePublish 送出的 input。"""
+
+    def __init__(self, channels_ok=True, channel_handle="online_store"):
+        self.channels_ok = channels_ok
+        self.channel_handle = channel_handle
+        self.published = None
+        self.publish_called = 0
+
+    async def post(self, url, headers=None, json=None):
+        q = (json or {}).get("query", "")
+        if "channels(" in q:
+            if not self.channels_ok:
+                return _FakeResp({}, status=500)
+            return _FakeResp({"data": {"channels": {"edges": [
+                {"node": {"id": "gid://shopify/Channel/111", "handle": self.channel_handle}},
+                {"node": {"id": "gid://shopify/Channel/222", "handle": "shop-72"}},
+            ]}}})
+        if "publications(" in q:
+            return _FakeResp({"data": {"publications": {"edges": [
+                # ★ 名稱刻意用繁中「線上商店」—— 這家店的 Admin 語系就是這樣，
+                #   用 "Online Store" 比對名稱會一個都對不到
+                {"node": {"id": "gid://shopify/Publication/111", "name": "線上商店"}},
+                {"node": {"id": "gid://shopify/Publication/222", "name": "Shop"}},
+                {"node": {"id": "gid://shopify/Publication/333", "name": "Inbox"}},
+            ]}}})
+        if "publishablePublish" in q:
+            self.publish_called += 1
+            self.published = [x["publicationId"]
+                              for x in (json.get("variables") or {}).get("input", [])]
+            return _FakeResp({"data": {"publishablePublish": {"userErrors": []}}})
+        return _FakeResp({})
+
+
+def _run_publish(fake, publish_online_store):
+    import contextlib
+    import httpx as _httpx
+
+    @contextlib.asynccontextmanager
+    async def _ac(*a, **kw):
+        yield fake
+
+    saved = _httpx.AsyncClient
+    _httpx.AsyncClient = _ac
+    try:
+        c = ShopifyClient.__new__(ShopifyClient)
+        c.graphql_url = "https://x/admin/api/2024-10/graphql.json"
+        c.headers = {}
+        asyncio.run(c._publish_to_all_channels(
+            123, publish_online_store=publish_online_store))
+    finally:
+        _httpx.AsyncClient = saved
+
+
+f = _FakeClient()
+_run_publish(f, True)
+check("一般商品：三個管道全發布", f.published is not None and len(f.published) == 3,
+      f"實際 {f.published}")
+check("一般商品：線上商店有在裡面",
+      f.published is not None and "gid://shopify/Publication/111" in f.published)
+
+f = _FakeClient()
+_run_publish(f, False)
+check("soft：線上商店被排除",
+      f.published is not None and "gid://shopify/Publication/111" not in f.published,
+      f"實際 {f.published}")
+check("soft：其他管道照發", f.published is not None and len(f.published) == 2,
+      f"實際 {f.published}")
+
+# 🔴 fail-closed：認不出線上商店時，**整個發布跳過**，不是照發全部
+f = _FakeClient(channels_ok=False)
+_run_publish(f, False)
+check("soft fail-closed：channels 查不到 → 一個都不發", f.publish_called == 0,
+      f"publishablePublish 被呼叫了 {f.publish_called} 次")
+
+f = _FakeClient(channel_handle="not_online_store")
+_run_publish(f, False)
+check("soft fail-closed：認不出 online_store handle → 一個都不發", f.publish_called == 0,
+      f"publishablePublish 被呼叫了 {f.publish_called} 次")
+
+# 反例：channels 掛掉時，**一般商品**不可以被連累
+f = _FakeClient(channels_ok=False)
+_run_publish(f, True)
+check("channels 掛掉不影響一般商品發布", f.publish_called == 1 and len(f.published) == 3,
+      f"實際 called={f.publish_called} {f.published}")
 
 
 print(f"\n{'=' * 60}")

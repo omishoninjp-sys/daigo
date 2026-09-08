@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from scrapers.base import ProductInfo
+from scrapers.base import ProductInfo, PRICE_MAX_JPY, price_in_range
 
 
 class TakaratomyMixin:
@@ -195,7 +195,8 @@ class TakaratomyMixin:
                 v = int(float(s))
             except (ValueError, TypeError):
                 return None
-        if 10 <= v <= 5_000_000:
+        # 下限 10 是這支自己的，上限收斂到 base
+        if price_in_range(v, 10, PRICE_MAX_JPY):
             return v
         return None
 
