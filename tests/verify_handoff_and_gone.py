@@ -90,12 +90,21 @@ check("超長網址的連結仍然是 https", lu.startswith("https://"), str(lu)
 # ════════════════════════════════════════════════════════════════════
 print("\n【B】商品頁 404/410")
 # ════════════════════════════════════════════════════════════════════
-check("訊息說明「再貼一次也一樣」", "重試" in MSG_PRODUCT_GONE or "一樣" in MSG_PRODUCT_GONE,
-      MSG_PRODUCT_GONE[:40])
+check("訊息勸客人先別重試", "重試" in MSG_PRODUCT_GONE, MSG_PRODUCT_GONE[:40])
 check("訊息給得出下一步", "LINE" in MSG_PRODUCT_GONE and "搜尋" in MSG_PRODUCT_GONE,
       MSG_PRODUCT_GONE[:40])
 check("訊息與通用訊息不同",
       MSG_PRODUCT_GONE != "無法從此連結抓取商品資訊")
+
+# 🔴 措辭不可以講死。2026-09-08 實際發生過：被重試 13 次的那條 zozo 連結
+#    當天下午就復活了（爬得出 Ellno Loset ワイドパンツ ¥8,800）。
+#    「已經不存在」「再貼還是會一樣」是**對客人的承諾**，而那個承諾會被打臉。
+for banned in ("已經不存在", "永遠", "不會再"):
+    check(f"訊息不可以講死：不含「{banned}」", banned not in MSG_PRODUCT_GONE,
+          MSG_PRODUCT_GONE[:50])
+check("訊息用「目前」限定現況", "目前" in MSG_PRODUCT_GONE, MSG_PRODUCT_GONE[:50])
+check("訊息用「短時間內」限定重試建議的範圍",
+      "短時間內" in MSG_PRODUCT_GONE, MSG_PRODUCT_GONE[:60])
 
 # ── scrape_monitor.current_state 的行為 ──
 scrape_monitor._ctx.set(None)
