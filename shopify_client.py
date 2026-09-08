@@ -791,6 +791,72 @@ class ShopifyClient:
         print(f"[Cleanup] 訂單掃描：近 {days} 天 {order_count} 筆訂單，涉及 {len(ids)} 件商品")
         return ids
 
+    async def fetch_orders_for_brake(self, days: int = 30) -> list:
+        """
+        給重複下單煞車第一階段用：近 N 天訂單，含 line item 的 source_url 來源。
+
+        🔴🔴 **這把 token 沒有 `read_all_orders`，超過 60 天會靜默只回 60 天。**
+             （bulk operation 一樣受限，「改用 bulk」不是解法。2026-09-07 踩過，
+             把 497 筆當成 12 個月在解讀。）呼叫端 `brake_log.scan_orders`
+             已經把 days 夾在 60 以內，這裡再寫一次是因為
+             **同一個事實影響兩件事就要寫兩次**。
+
+        🔴 **不要加 `customer { id }`。** 2026-09-08 實測回
+             "Access denied for customer field. Required access:
+             `read_customers` access scope."，這把 token 沒有那個 scope
+             （email、地址等受保護的客人資料同理）。加了會讓每一筆訂單都帶一則
+             GraphQL error，把真正的錯誤淹掉。
+
+        每個 line item 取兩個來源，**優先序在呼叫端決定**：
+          · `customAttributes` 的 `_daigo_source_url` —— 下單當下寫進訂單，
+            商品被 auto-cleanup 刪掉之後仍在
+          · `product.metafield(daigo.source_url)` —— 商品一被刪就消失
+        """
+        from datetime import datetime, timezone, timedelta
+
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        query = """
+        query BrakeOrders($cursor: String, $q: String!) {
+          orders(first: 50, after: $cursor, query: $q, sortKey: CREATED_AT) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              name createdAt cancelledAt cancelReason displayFinancialStatus
+              lineItems(first: 100) {
+                nodes {
+                  quantity
+                  title
+                  customAttributes { key value }
+                  product {
+                    id
+                    metafield(namespace: "daigo", key: "source_url") { value }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        out: list = []
+        cursor = None
+        seen_cursors: set = set()
+        while True:
+            data = await self._graphql(query, {"cursor": cursor, "q": f"created_at:>={since}"})
+            conn = data["data"]["orders"]
+            out.extend(conn["nodes"])
+            if not conn["pageInfo"]["hasNextPage"]:
+                break
+            cursor = conn["pageInfo"]["endCursor"]
+            # cursor 重複就停 —— 同 next_page_info() 的保險，2026-08-30 有腳本
+            # 因為分頁抓錯 cursor 在兩頁之間來回跑了 80 分鐘沒有結束。
+            if cursor in seen_cursors:
+                print("[Brake] ⚠️ cursor 重複，停止分頁")
+                break
+            seen_cursors.add(cursor)
+            await asyncio.sleep(0.3)
+
+        print(f"[Brake] 訂單查詢：近 {days} 天 {len(out)} 筆訂單（起算日 {since}）")
+        return out
+
     async def _fetch_tagged_ids(self, product_ids: set, tag: str):
         """
         回傳 (已經有該標籤的 id, 目前還存在的 id)。

@@ -14,3 +14,6 @@ generic_domains_*.csv
 .claude/settings.local.json
 .claude/hooks/_probe*.txt
 .claude/hooks/__pycache__/
+
+# 重複下單煞車紀錄（本機 fallback 目錄，不進版控 —— 含客人自填的標題）
+brake_log/

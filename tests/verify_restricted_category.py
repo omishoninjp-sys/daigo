@@ -23,6 +23,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 # 匯率固定住，避免 calculate_selling_price() 去打線上匯率 API（要在 import config 之前設）
 os.environ.setdefault("DEFAULT_JPY_TO_TWD_RATE", "0.2")
 
+# ★ 建單端點會呼叫 brake_log.note_created 寫紀錄。測試用的是假商品，
+#   **不可以寫進正式的紀錄目錄** —— 否則第一份 key 分佈裡會混進
+#   「無印良品」之類的測試資料。導到暫存區。
+import os as _os, tempfile as _tf
+_os.environ.setdefault("BRAKE_LOG_DIR", _tf.mkdtemp(prefix="brake_test_"))
+
 import main as m
 from scrapers.base import detect_restricted_category
 from scraper import ProductInfo

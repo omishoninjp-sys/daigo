@@ -141,6 +141,18 @@ DIGEST_STREAK_DAYS = _int_env("DIGEST_STREAK_DAYS", 7)  # 連續失敗往回看�
 # 寄信用 Resend，不用 Gmail SMTP（規格第五節：要應用程式密碼、容易被判垃圾信）
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
+# 重複下單煞車 —— 第一階段（TICKET-duplicate-order-brake.md）
+# ★ 預設 **true**，與 DIGEST_ENABLED 的預設相反，理由不一樣：
+#   DIGEST 預設 false 是因為它會**寄信給人**，部署了不該突然開始寄。
+#   這個只寫本機 JSONL、每天讀一次訂單，**沒有任何對外副作用、不擋任何東西**，
+#   而第一階段的全部價值就是「早一天記錄，早一天有分佈可看」。
+#   要停就在 Zeabur 設 BRAKE_LOG_ENABLED=false。
+BRAKE_LOG_ENABLED = os.getenv("BRAKE_LOG_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+BRAKE_SCAN_HOUR_UTC = _int_env("BRAKE_SCAN_HOUR_UTC", 2)   # 2 UTC = 台灣早上 10 點
+# ★ 實際會被 brake_log.MAX_SCAN_DAYS 夾在 60 以內 ——
+#   token 沒有 read_all_orders，設再多也只會靜默回 60 天。
+BRAKE_SCAN_DAYS = _int_env("BRAKE_SCAN_DAYS", 30)
+
 
 # ★ 沒設定的變數彙總成一行 —— 逐條印會在每次啟動洗掉九行，
 #   但完全不印就沒辦法回答「線上現在到底用哪個值」。

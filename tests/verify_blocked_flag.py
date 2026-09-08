@@ -30,6 +30,12 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 os.environ.setdefault("DEFAULT_JPY_TO_TWD_RATE", "0.2")
 
+# ★ 建單端點會呼叫 brake_log.note_created 寫紀錄。測試用的是假商品，
+#   **不可以寫進正式的紀錄目錄** —— 否則第一份 key 分佈裡會混進
+#   「無印良品」之類的測試資料。導到暫存區。
+import os as _os, tempfile as _tf
+_os.environ.setdefault("BRAKE_LOG_DIR", _tf.mkdtemp(prefix="brake_test_"))
+
 import main as m
 from scrapers.base import detect_restricted_host
 from scraper import ProductInfo
@@ -162,6 +168,8 @@ INVALID = [
     ("短網址", "https://bit.ly/abc123"),
     ("本站自己", "https://goyoutati.com/products/some-item"),
     ("社群平台", "https://www.facebook.com/share/r/abc"),
+    # 駿河屋的買取（收購）頁 —— 不是販售頁，履約在物理上不可能。2026-09-08 加
+    ("駿河屋買取頁", "https://www.suruga-ya.jp/kaitori/kaitori_detail/123456789"),
 ]
 for label, u in INVALID:
     saved = _install(None)

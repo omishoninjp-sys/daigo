@@ -28,6 +28,12 @@ os.environ.setdefault("ADMIN_SECRET_KEY", "test-admin-key-for-verify")
 
 from fastapi.testclient import TestClient
 
+# ★ 建單端點會呼叫 brake_log.note_created 寫紀錄。測試用的是假商品，
+#   **不可以寫進正式的紀錄目錄** —— 否則第一份 key 分佈裡會混進
+#   「無印良品」之類的測試資料。導到暫存區。
+import os as _os, tempfile as _tf
+_os.environ.setdefault("BRAKE_LOG_DIR", _tf.mkdtemp(prefix="brake_test_"))
+
 import main as m
 from config import API_SECRET_KEY, ADMIN_SECRET_KEY
 from pricing import calculate_selling_price

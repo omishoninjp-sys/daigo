@@ -452,6 +452,32 @@ HOST_CASES = [
 ]
 
 
+# ── F. 駿河屋的買取（收購）頁（2026-09-08 加）─────────────────────────
+#
+# 收購頁是駿河屋**向賣家收購**商品的報價頁，客人貼進來本來就不是要買東西，
+# 履約在物理上不可能。2026-09-07 的 source_url 分析在 12 個月訂單裡撈到 1 筆。
+#
+# ★ 這一組的重點是 F2：「kaitori」這個字在別家商店的網址裡完全可能出現
+#   （買取専門店多得是），只看 `"kaitori" in url` 會誤擋一整排正常商店。
+#   規則綁在 host + 第一段路徑上，這幾筆就是釘死那件事的回歸案例。
+KAITORI_BLOCK = [
+    ("https://www.suruga-ya.jp/kaitori/kaitori_detail/123456789", "買取明細頁"),
+    ("https://www.suruga-ya.jp/kaitori/", "買取首頁"),
+    ("https://www.suruga-ya.jp/kaitori/search?category=1", "買取搜尋（帶 query）"),
+    ("https://suruga-ya.jp/kaitori/kaitori_detail/999", "不帶 www."),
+    ("https://WWW.SURUGA-YA.JP/KAITORI/kaitori_detail/1", "大小寫不敏感"),
+]
+
+KAITORI_MUST_PASS = [
+    ("https://www.suruga-ya.jp/product/detail/892621178", "駿河屋販售頁"),
+    ("https://www.suruga-ya.jp/product/detail_kaitori/123", "路徑含 kaitori 但不是第一段"),
+    # ★ 別家店的網址裡有 kaitori —— 子字串比對會把這些全部誤擋
+    ("https://kaitori-okoku.jp/item/12345", "別家：買取王国"),
+    ("https://www.netmall.hardoff.co.jp/kaitori/item/999", "別家：ハードオフ"),
+    ("https://example.jp/kaitori/item/1", "別家：路徑第一段就是 kaitori"),
+]
+
+
 def main():
     print("=" * 74)
     print("A. 四類非商品頁連結都要擋")
@@ -508,6 +534,20 @@ def main():
         msg = detect_invalid_link(url) or ""
         check(f"{label}類有說明且提示該貼什麼",
               len(msg) > 20 and ("請" in msg), msg[:34])
+
+    print("\n" + "=" * 74)
+    print("F. 駿河屋買取頁要擋，但「kaitori」不可以用子字串比對")
+    print("=" * 74)
+    from scrapers.base import _MSG_BUYBACK
+    for url, label in KAITORI_BLOCK:
+        check(f"擋下 {label}", detect_invalid_link(url) == _MSG_BUYBACK,
+              (detect_invalid_link(url) or "(沒擋)")[:32])
+    for url, label in KAITORI_MUST_PASS:
+        check(f"放行 {label}", detect_invalid_link(url) != _MSG_BUYBACK,
+              (detect_invalid_link(url) or "None")[:32])
+    check("買取訊息有講清楚該貼什麼",
+          "product/detail" in _MSG_BUYBACK and "請" in _MSG_BUYBACK,
+          _MSG_BUYBACK[:34])
 
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

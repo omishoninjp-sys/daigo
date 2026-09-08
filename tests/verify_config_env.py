@@ -190,7 +190,10 @@ def test_no_bare_getenv():
     bad = re.findall(r"^[A-Z_]+\s*=\s*(?:int|float)\s*\(", code, re.M)
     check("★ 沒有漏網的（漏一個就等於留一顆同樣的地雷）", not bad, str(bad))
     used = len(re.findall(r"^[A-Z_]+\s*=\s*_(?:int|float)_env\(", code, re.M))
-    check("★ 9 個賦值全部改用 _int_env / _float_env", used == 9, f"{used} 個")
+    # 9 → 11：2026-09-08 加了 BRAKE_SCAN_HOUR_UTC / BRAKE_SCAN_DAYS。
+    # ★ 這個數字是釘子，不是統計 —— 它會在「有人新增數值變數卻用回裸 int()」時
+    #   跟著上面那條 bad 一起紅燈。改動這個數字前先確認新增的那幾個真的走了 _int_env。
+    check("★ 11 個賦值全部改用 _int_env / _float_env", used == 11, f"{used} 個")
 
 
 def main_():

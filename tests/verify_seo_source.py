@@ -31,6 +31,12 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# ★ 建單端點會呼叫 brake_log.note_created 寫紀錄。測試用的是假商品，
+#   **不可以寫進正式的紀錄目錄** —— 否則第一份 key 分佈裡會混進
+#   「無印良品」之類的測試資料。導到暫存區。
+import os as _os, tempfile as _tf
+_os.environ.setdefault("BRAKE_LOG_DIR", _tf.mkdtemp(prefix="brake_test_"))
+
 import main as m
 import seo_title as st
 from scrapers.base import ProductInfo

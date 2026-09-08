@@ -202,6 +202,12 @@ _MSG_MALFORMED = (
     "這不是一個有效的商品網址。"
     "請從購物網站的商品頁複製完整網址（以 http:// 或 https:// 開頭）再試一次。"
 )
+_MSG_BUYBACK = (
+    "您貼的是駿河屋的「買取（收購）」頁面 —— 那是駿河屋**向賣家收購**商品的報價頁，"
+    "不是可以下單購買的商品頁。"
+    "請在駿河屋站內搜尋同一件商品的販售頁面（網址會是 /product/detail/...），"
+    "再把連結給我們。"
+)
 
 
 def _host_matches(host: str, domain: str) -> bool:
@@ -313,6 +319,21 @@ def detect_invalid_link(url: str) -> str | None:
             return _MSG_HOMEPAGE
         if len(segments) == 1 and segments[0].lower() in _LANG_ONLY_SEGMENTS:
             return _MSG_HOMEPAGE
+
+    # ── 6. 駿河屋的「買取（收購）」頁：那是駿河屋向賣家收購的報價頁，不是販售頁 ──
+    #
+    # 客人貼這種連結本來就不是要買東西，履約在物理上不可能 —— 爬下去只會生出
+    # 一件「有標題有價格、但那個價格是收購價」的商品，比爬失敗更糟。
+    # 2026-09-07 的 source_url 分析在 12 個月訂單裡撈到 1 筆
+    # （/kaitori/kaitori_detail/…），量很小，但它是**確定不可能成交**的那一類。
+    #
+    # ★ 為什麼是 host + 第一段路徑，不是子字串：
+    #   「kaitori」這個字出現在別家商店的網址裡完全可能（買取専門店多得是），
+    #   只看 `"kaitori" in url` 會誤擋。綁在 suruga-ya.jp 的第一段路徑上，
+    #   而它的販售頁一律是 /product/detail/{id}，兩者不會互相誤傷。
+    if _host_matches(host, "suruga-ya.jp") and segments:
+        if segments[0].lower() == "kaitori":
+            return _MSG_BUYBACK
 
     return None
 

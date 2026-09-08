@@ -22,6 +22,7 @@ from config import (
     ZOZO_SCRAPER_URL, DAIGO_COLLECTION_ID,
     CACHE_TTL, MAX_CONCURRENT_SCRAPES, SCRAPE_QUEUE_TIMEOUT,
     DAIGO_AUTO_DELETE_DAYS,
+    BRAKE_LOG_ENABLED, BRAKE_SCAN_HOUR_UTC, BRAKE_SCAN_DAYS,
 )
 from scraper import Scraper, ProductInfo
 from pricing import calculate_selling_price, get_jpy_to_twd_rate
@@ -29,6 +30,7 @@ from shopify_client import ShopifyClient
 from seo_title import generate_seo_title
 import scrape_monitor
 import scrape_digest
+import brake_log     # 重複下單煞車第一階段：只記錄，不擋任何東西
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
@@ -142,11 +144,18 @@ async def lifespan(app: FastAPI):
     # ★ 另開一支，不動 _auto_cleanup_loop（它裡面有退避邏輯）。
     #   DIGEST_ENABLED=false 時 daily_digest_loop 自己會立刻 return。
     digest_task = asyncio.create_task(scrape_digest.daily_digest_loop())
+    # ★ 再開一支：重複下單煞車的每日訂單掃描。**只讀訂單、只寫本機檔案**，
+    #   不寫 Shopify、不寄信、不擋任何東西（第一階段）。
+    #   BRAKE_LOG_ENABLED=false 時 daily_scan_loop 自己會立刻 return。
+    brake_task = asyncio.create_task(
+        brake_log.daily_scan_loop(shopify, BRAKE_LOG_ENABLED,
+                                  BRAKE_SCAN_HOUR_UTC, BRAKE_SCAN_DAYS)
+    )
     yield
     # 關閉時取消任務
-    for t_ in (task, digest_task):
+    for t_ in (task, digest_task, brake_task):
         t_.cancel()
-    for t_ in (task, digest_task):
+    for t_ in (task, digest_task, brake_task):
         try:
             await t_
         except asyncio.CancelledError:
@@ -689,6 +698,14 @@ async def create_order(req: CreateOrderRequest):
             platform_id=getattr(product, "platform_id", ""),
             created_via="auto",
         )
+        # ★ 重複下單煞車第一階段：建單成功時記一筆正規化後的 key。
+        #   **不擋任何東西**，門檻等一到兩週的分佈再定
+        #   （同 C-1 price_spread 的做法）。note_created 內部全程 fail-safe。
+        _bk = brake_log.note_created(url, product_id=result["product_id"],
+                                     created_via="auto", title=title)
+        if _bk["norm_key"]:
+            print(f"[Brake] 建單紀錄 key={_bk['norm_key']} "
+                  f"rule={_bk['matched_site_rule'] or '(通用)'}")
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],
@@ -773,6 +790,13 @@ async def create_manual_order(req: ManualOrderRequest):
             #   任何「用 source_url 判斷商品品質」的掃描都要先看這個欄位排除掉。
             created_via="manual",
         )
+        # ★ 同 /api/create-order。手動建單常常沒有 source_url（或填的是首頁），
+        #   那批 note_created 會直接跳過 —— 第一階段先只記錄有 URL 的。
+        _bk = brake_log.note_created(req.source_url, product_id=result["product_id"],
+                                     created_via="manual", title=req.title)
+        if _bk["norm_key"]:
+            print(f"[Brake] 建單紀錄（手動）key={_bk['norm_key']} "
+                  f"rule={_bk['matched_site_rule'] or '(通用)'}")
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
             checkout_url=result["storefront_url"], admin_url=result["admin_url"],
@@ -1064,6 +1088,47 @@ async def summarize_scrape_log(days: int = 2):
     #   回傳值一字不改 —— verify_scrape_log_api.py 的 48 項全部斷言在這個 dict 上。
     #   _scrape_log_days 留在這裡：它 raise HTTPException，那是 HTTP 層的事。
     return scrape_digest.build_summary(_scrape_log_days(days))
+
+
+@app.post("/api/admin/brake/scan", dependencies=[Depends(verify_admin_key)])
+async def brake_scan(days: int = 0):
+    """
+    立刻掃一次訂單、算 key 分佈（重複下單煞車第一階段）。
+
+    **只讀訂單、只寫本機 JSONL，不擋任何東西、不寫 Shopify。**
+
+    · days 省略 → 用 BRAKE_SCAN_DAYS（預設 30）
+    · days > 60 會被夾成 60 —— token 沒有 read_all_orders，
+      再多也只會**靜默**回 60 天（2026-09-07 踩過）
+
+    走 verify_admin_key：這個端點會吐訂單編號與商品標題，
+    公開金鑰印在 storefront 頁面上，擋不住任何人。
+
+    PowerShell 5.1：
+        Invoke-RestMethod -Method Post `
+          "https://<host>/api/admin/brake/scan?days=30" `
+          -Headers @{ "X-Admin-Key" = $env:ADMIN_SECRET_KEY }
+    """
+    if days < 0:
+        raise HTTPException(status_code=400, detail="days 不可為負")
+    return await brake_log.scan_orders(shopify, days=days or BRAKE_SCAN_DAYS)
+
+
+@app.get("/api/admin/brake/summary", dependencies=[Depends(verify_admin_key)])
+async def brake_summary(day: str = ""):
+    """
+    讀某天排程跑出來的摘要快照（不重掃）。day 省略 = 今天（UTC）。
+
+    沒有快照時回 `{"day":…, "summary":{}}` 而不是 404 ——
+    「今天還沒跑」與「路徑撈錯」要分得出來，所以順便回 log_dir。
+    """
+    target = _valid_day(day) if day else datetime.now(timezone.utc).date().isoformat()
+    return {
+        "day": target,
+        "log_dir": brake_log.log_dir(),
+        "key_rule_version": brake_log.source_key.KEY_RULE_VERSION,
+        "summary": brake_log.read_summary(target),
+    }
 
 
 if __name__ == "__main__":
