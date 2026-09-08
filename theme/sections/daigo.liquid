@@ -1,0 +1,1297 @@
+{% comment %}
+  GOYOUTATI 代購頁面 v4 - 排隊提示 + Variant 選擇器 + 費率表
+{% endcomment %}
+
+<img src="https://cdn.shopify.com/s/files/1/0676/9947/4666/files/8.png?v=1772719375" alt="" width="800" height="400" fetchpriority="high" style="width:100%;max-width:800px;display:block;margin:0 auto 24px;height:auto;" />
+
+<div id="daiko-app">
+  <!-- Step 1: 貼連結 -->
+  <div class="daiko-section" id="step-input">
+
+    <!-- Hero 輸入區 -->
+    <div class="daiko-hero">
+      <h1 class="daiko-title">🛒 日本代購，30秒搞定</h1>
+      <p class="daiko-subtitle">不用私訊、不用等報價、不用來回確認<br><span class="daiko-subtitle-em">貼上連結，直接下單。</span></p>
+
+      <div class="daiko-input-wrap">
+      <!-- 手機專用：大貼上按鈕（電腦隱藏） -->
+      <button class="daiko-mobile-paste" id="daiko-mobile-paste" onclick="daikoPasteFromClipboard()">
+        <span class="daiko-mobile-paste-icon">📋</span>
+        <span class="daiko-mobile-paste-text">
+          <strong>點這裡貼上商品連結</strong>
+          <small>從剪貼簿自動填入</small>
+        </span>
+        <span class="daiko-mobile-paste-arrow">→</span>
+      </button>
+
+      <div class="daiko-mobile-divider"><span>或手動輸入</span></div>
+
+        <div class="daiko-input-inner">
+          <input
+            type="url"
+            id="daiko-url"
+            placeholder="貼上日本商品連結，例：https://www.amazon.co.jp/..."
+            autocomplete="off"
+          />
+          <button class="daiko-paste-btn" id="daiko-paste-btn" onclick="daikoPasteFromClipboard()" title="從剪貼簿貼上">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            貼上
+          </button>
+        </div>
+        <button id="daiko-search-btn" onclick="daikoSearch()">
+          <span class="btn-text">⚡ 立即查詢</span>
+          <span class="btn-loading" style="display:none;">取得商品資訊中...</span>
+        </button>
+      </div>
+
+      {%- comment -%}
+        🔴 這兩塊**必須留在查詢按鈕正下方**。
+        2026-09-07 之前它們在 step-input 的最底部（FAQ 手風琴與企業戶橫幅之後），
+        離按鈕約 1,400px。實機測試：後端回 blocked=true、訊息也確實寫進 DOM，
+        但客人按完「立即查詢」畫面毫無變化，要往下捲很久才看得到 —— 等於沒顯示。
+        排隊提示同理：爬取那 30–60 秒客人看不到任何 loading，
+        於是重複按、重複下單（BEYBLADE UX-20 一支被下單 76 次）。
+        daigo.js 的 showError() 還有 scrollIntoView 當備援，但位置本身要對。
+      {%- endcomment -%}
+      <div id="daiko-queue-status" class="daiko-queue-status" style="display:none;">
+        <div class="daiko-queue-icon">
+          <div class="daiko-spinner"></div>
+        </div>
+        <div class="daiko-queue-text">
+          <p id="daiko-queue-msg" class="daiko-queue-msg">正在查詢商品資訊...</p>
+          <p id="daiko-queue-detail" class="daiko-queue-detail"></p>
+        </div>
+      </div>
+
+      <div id="daiko-error" class="daiko-error" style="display:none;"></div>
+
+      <!-- 剪貼簿自動偵測提示 -->
+      <div id="daiko-clipboard-hint" class="daiko-clipboard-hint" style="display:none;">
+        <span class="daiko-clipboard-icon">📋</span>
+        <span id="daiko-clipboard-text" class="daiko-clipboard-url"></span>
+        <button onclick="daikoUseClipboard()" class="daiko-clipboard-use">點我貼上 →</button>
+        <button onclick="document.getElementById('daiko-clipboard-hint').style.display='none'" class="daiko-clipboard-dismiss">✕</button>
+      </div>
+
+      <!-- 費用計算機入口 -->
+      <div class="daiko-calc-hint">
+        <span class="daiko-calc-hint-icon">🧮</span>
+        <span class="daiko-calc-hint-text">不確定費用多少？先估算再下單</span>
+        <a href="/pages/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC%E8%B2%BB%E7%94%A8%E8%A8%88%E7%AE%97%E6%A9%9F" class="daiko-calc-hint-link">費用計算機 →</a>
+      </div>
+
+      <!-- 高單價提示 -->
+      <div class="daiko-highprice-note">
+        ⚠️ 商品日幣售價超過 <strong>¥100,000</strong>？請先聯繫客服確認，再行下單。
+        <a href="https://line.me/R/ti/p/@544kaytb" target="_blank" rel="noopener">LINE @544kaytb →</a>
+      </div>
+
+      <!-- 信任徽章 -->
+      <div class="daiko-trust-badges">
+        <div class="daiko-trust-badge">📦 包稅空運</div>
+        <div class="daiko-trust-badge">⚡ 30秒生成商品頁</div>
+        <div class="daiko-trust-badge">🚚 7-14個工作天到貨</div>
+        <div class="daiko-trust-badge">💬 LINE客服即時支援</div>
+      </div>
+    </div>
+
+    <!-- ── 截圖傳 LINE 代購（沒有連結時的入口）── -->
+    <style>
+      /* ── 截圖傳 LINE 代購區塊 ── */
+      .daiko-snaphelp{ margin:0 auto 8px; }
+      .daiko-snaphelp-card{
+        background:#fbfaf7; border:1px solid #ece6d8;
+        border-radius:16px; padding:26px 24px; text-align:center;
+      }
+      .daiko-snaphelp-title{
+        margin:0 0 8px; font-size:19px; font-weight:800;
+        line-height:1.4; color:#1a2744;
+      }
+      .daiko-snaphelp-sub{
+        margin:0 0 18px; font-size:14px; line-height:1.75; color:#6b6557;
+      }
+      .daiko-snaphelp-steps{
+        list-style:none; margin:0 0 20px; padding:0;
+        display:flex; flex-wrap:wrap; justify-content:center; gap:10px 18px;
+      }
+      .daiko-snaphelp-steps li{
+        display:flex; align-items:center; gap:8px;
+        font-size:14px; color:#1a2744;
+      }
+      .daiko-snaphelp-steps li span{
+        width:24px; height:24px; flex:none;
+        display:inline-flex; align-items:center; justify-content:center;
+        border-radius:50%; background:#c9a84c; color:#fff;
+        font-size:13px; font-weight:700;
+      }
+      .daiko-snaphelp-btn{
+        display:inline-flex; align-items:center; justify-content:center; gap:9px;
+        width:100%; max-width:320px; box-sizing:border-box;
+        padding:14px 22px; border-radius:12px;
+        background:#06c755; color:#fff;
+        font-size:16px; font-weight:800; text-decoration:none;
+        box-shadow:0 4px 14px rgba(6,199,85,.28);
+        transition:transform .12s ease, box-shadow .12s ease, filter .12s ease;
+      }
+      .daiko-snaphelp-btn:hover{
+        transform:translateY(-1px); filter:brightness(1.04);
+        box-shadow:0 6px 18px rgba(6,199,85,.34);
+      }
+      .daiko-snaphelp-btn:active{ transform:translateY(0); }
+      .daiko-snaphelp-btn svg{ width:22px; height:22px; flex:none; }
+      .daiko-snaphelp-note{
+        margin:14px 0 0; font-size:12.5px; line-height:1.6; color:#9a9384;
+      }
+      @media (max-width:480px){
+        .daiko-snaphelp-card{ padding:22px 18px; }
+        .daiko-snaphelp-title{ font-size:18px; }
+        .daiko-snaphelp-steps{
+          flex-direction:column; align-items:flex-start;
+          width:max-content; margin-left:auto; margin-right:auto;
+        }
+      }
+    </style>
+
+    <div class="dg-divider"><span>沒有商品連結？</span></div>
+    <div class="daiko-snaphelp">
+      <div class="daiko-snaphelp-card">
+        <p class="daiko-snaphelp-title">截圖傳給我們，一樣送到你家</p>
+        <p class="daiko-snaphelp-sub">
+          在 IG、LINE、小紅書或其他 App 看到喜歡的日本商品，<br>
+          找不到連結也沒關係 —— 交給專人幫你處理。
+        </p>
+        <ol class="daiko-snaphelp-steps">
+          <li><span>1</span>截下商品的圖</li>
+          <li><span>2</span>用 LINE 傳給我們</li>
+          <li><span>3</span>專人確認商品與報價</li>
+        </ol>
+        <a class="daiko-snaphelp-btn" href="https://lin.ee/9iLqvIO" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M12 3C6.477 3 2 6.797 2 11.5c0 2.69 1.46 5.09 3.74 6.66-.16.95-.62 2.3-1.36 3.34-.2.28.02.66.36.6 2.1-.38 3.66-1.1 4.62-1.66.96.2 1.97.3 3 .3 5.523 0 10-3.797 10-8.5S17.523 3 12 3Z" fill="currentColor"/>
+          </svg>
+          用 LINE 傳截圖代購
+        </a>
+        <p class="daiko-snaphelp-note">不需要自己找連結、不需要比價，一張圖剩下交給我們。</p>
+      </div>
+    </div>
+
+    <!-- ── 運費說明入口 ── -->
+    <div class="dg-divider"><span>選擇您的所在地區</span></div>
+    <div class="dg-shipping-row">
+      <a href="/blogs/%E6%9C%80%E6%96%B0%E6%B6%88%E6%81%AF/singapore-shipping-guide" class="dg-ship-card">
+        <span class="dg-ship-flag">🇸🇬</span>
+        <span class="dg-ship-name">新加坡</span>
+        <span class="dg-ship-note">EMS · 免 GST 門檻 S$400</span>
+        <span class="dg-ship-arrow">運費說明 →</span>
+      </a>
+      <a href="/blogs/%E6%9C%80%E6%96%B0%E6%B6%88%E6%81%AF/hongkong-shipping-guide" class="dg-ship-card">
+        <span class="dg-ship-flag">🇭🇰</span>
+        <span class="dg-ship-name">香港</span>
+        <span class="dg-ship-note">EMS · 自由港免關稅，需注意違禁品</span>
+        <span class="dg-ship-arrow">運費說明 →</span>
+      </a>
+      <a href="/blogs/%E6%9C%80%E6%96%B0%E6%B6%88%E6%81%AF/canada-shipping-guide" class="dg-ship-card">
+        <span class="dg-ship-flag">🇨🇦</span>
+        <span class="dg-ship-name">加拿大</span>
+        <span class="dg-ship-note">EMS · Zone 3 · 含中英文說明</span>
+        <span class="dg-ship-arrow">運費說明 →</span>
+      </a>
+      <a href="/blogs/%E6%9C%80%E6%96%B0%E6%B6%88%E6%81%AF/other-countries-shipping-guide" class="dg-ship-card">
+        <span class="dg-ship-flag">🌍</span>
+        <span class="dg-ship-name">其他國家</span>
+        <span class="dg-ship-note">歐洲・澳洲・中東・南美・非洲</span>
+        <span class="dg-ship-arrow">EMS 五大地帯費率 →</span>
+      </a>
+    </div>
+
+    <!-- ── 支援代購網站跑馬燈 ── -->
+    <div class="dg-divider"><span>支援代購網站</span></div>
+    <div class="dg-mq-wrap dg-mq-wrap--bg">
+      <!-- Row 1 → 左 -->
+      <div class="dg-mq-row">
+        <div class="dg-mq-track dg-track-l">
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=bape.com&sz=64" alt=""><span>BAPE</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=mercari.com&sz=64" alt=""><span>メルカリ</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=visvim.tv&sz=64" alt=""><span>visvim</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=zozo.jp&sz=64" alt=""><span>ZOZOTOWN</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=hm-strauss.jp&sz=64" alt=""><span>Human Made</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=adidas.jp&sz=64" alt=""><span>adidas JP</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=snowpeak.co.jp&sz=64" alt=""><span>Snow Peak</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=supremenewyork.com&sz=64" alt=""><span>Supreme</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=nijisanji.jp&sz=64" alt=""><span>にじさんじ</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=onitsukatiger.com&sz=64" alt=""><span>Onitsuka Tiger</span></div>
+          <!-- clone -->
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=bape.com&sz=64" alt=""><span>BAPE</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=mercari.com&sz=64" alt=""><span>メルカリ</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=visvim.tv&sz=64" alt=""><span>visvim</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=zozo.jp&sz=64" alt=""><span>ZOZOTOWN</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=hm-strauss.jp&sz=64" alt=""><span>Human Made</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=adidas.jp&sz=64" alt=""><span>adidas JP</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=snowpeak.co.jp&sz=64" alt=""><span>Snow Peak</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=supremenewyork.com&sz=64" alt=""><span>Supreme</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=nijisanji.jp&sz=64" alt=""><span>にじさんじ</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=onitsukatiger.com&sz=64" alt=""><span>Onitsuka Tiger</span></div>
+        </div>
+      </div>
+      <!-- Row 2 ← 右 -->
+      <div class="dg-mq-row">
+        <div class="dg-mq-track dg-track-r">
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=neighborhood.jp&sz=64" alt=""><span>NEIGHBORHOOD</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=beams.co.jp&sz=64" alt=""><span>BEAMS</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=wtaps.com&sz=64" alt=""><span>WTAPS</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=muji.com&sz=64" alt=""><span>無印良品</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=store.bluebottlecoffee.jp&sz=64" alt=""><span>Blue Bottle</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=amazon.co.jp&sz=64" alt=""><span>Amazon JP</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=workman.jp&sz=64" alt=""><span>WORKMAN</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=rakuten.co.jp&sz=64" alt=""><span>楽天市場</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=store.nanouniverse.jp&sz=64" alt=""><span>nano·universe</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=uniqlo.com&sz=64" alt=""><span>UNIQLO</span></div>
+          <!-- clone -->
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=neighborhood.jp&sz=64" alt=""><span>NEIGHBORHOOD</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=beams.co.jp&sz=64" alt=""><span>BEAMS</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=wtaps.com&sz=64" alt=""><span>WTAPS</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=muji.com&sz=64" alt=""><span>無印良品</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=store.bluebottlecoffee.jp&sz=64" alt=""><span>Blue Bottle</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=amazon.co.jp&sz=64" alt=""><span>Amazon JP</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=workman.jp&sz=64" alt=""><span>WORKMAN</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=rakuten.co.jp&sz=64" alt=""><span>楽天市場</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=store.nanouniverse.jp&sz=64" alt=""><span>nano·universe</span></div>
+          <div class="dg-chip"><img src="https://www.google.com/s2/favicons?domain=uniqlo.com&sz=64" alt=""><span>UNIQLO</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 即時購買通知 Toast -->
+    <style>
+      #gyt-toast {
+        position: fixed;
+        bottom: 24px;
+        left: 20px;
+        z-index: 9999;
+        background: #ffffff;
+        border-radius: 14px;
+        box-shadow: 0 8px 32px rgba(26,39,68,.22), 0 1px 4px rgba(0,0,0,.08);
+        padding: 12px 38px 12px 12px;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        max-width: 310px;
+        border-left: 3px solid #c9a84c;
+        font-family: "Noto Serif TC", "PingFang TC", "Microsoft JhengHei", Georgia, serif;
+        opacity: 0;
+        transform: translateX(-110%);
+        transition: opacity 0.45s ease, transform 0.45s cubic-bezier(.34,1.56,.64,1);
+        pointer-events: none;
+      }
+      #gyt-toast.gyt-show {
+        opacity: 1;
+        transform: translateX(0);
+        pointer-events: auto;
+      }
+      #gyt-toast.gyt-hide {
+        opacity: 0;
+        transform: translateX(-110%);
+      }
+      /* 商品縮圖 */
+      .gyt-t-thumb {
+        width: 48px; height: 48px; border-radius: 8px;
+        object-fit: cover; flex-shrink: 0;
+        background: linear-gradient(135deg, #1a2744, #2d4070);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 22px; overflow: hidden;
+      }
+      .gyt-t-thumb img {
+        width: 100%; height: 100%; object-fit: cover; border-radius: 8px;
+      }
+      .gyt-t-body { flex: 1; min-width: 0; }
+      .gyt-t-title {
+        font-size: 12.5px; font-weight: 600; color: #1a2744;
+        line-height: 1.45; margin-bottom: 2px;
+      }
+      .gyt-t-title .gyt-t-region { color: #c9a84c; }
+      .gyt-t-title .gyt-t-cname  { color: #1a2744; }
+      .gyt-t-product {
+        font-size: 12px; color: #444; font-weight: 500;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        margin-bottom: 2px;
+      }
+      .gyt-t-sub {
+        font-size: 11px; color: #aaa;
+        display: flex; align-items: center; gap: 4px;
+        overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+      }
+      .gyt-t-amount { color: #c9a84c; font-weight: 600; font-size: 11px; }
+      .gyt-t-dot { width: 3px; height: 3px; border-radius: 50%; background: #ddd; flex-shrink:0; }
+      .gyt-t-close {
+        position: absolute; top: 8px; right: 10px;
+        font-size: 13px; color: #ccc; cursor: pointer;
+        line-height: 1; padding: 2px;
+      }
+      .gyt-t-close:hover { color: #999; }
+      .gyt-t-prog {
+        position: absolute; bottom: 0; left: 0; height: 2px;
+        background: linear-gradient(to right, #1a2744, #c9a84c);
+        border-radius: 0 0 0 14px;
+        transition: none;
+      }
+      @media (max-width: 480px) {
+        #gyt-toast { max-width: calc(100vw - 32px); left: 16px; bottom: 16px; }
+      }
+    .daiko-highprice-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 8px 14px;
+  background: #fffbec;
+  border: 1px solid #f5d76e;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #7a5c00;
+  flex-wrap: wrap;
+}
+.daiko-highprice-note a {
+  color: #c8971e;
+  font-weight: 700;
+  white-space: nowrap;
+}
+</style>
+
+    <div id="gyt-toast" role="status" aria-live="polite">
+      <div class="gyt-t-thumb" id="gytToastThumb">🛍️</div>
+      <div class="gyt-t-body">
+        <div class="gyt-t-title" id="gytToastTitle">載入中…</div>
+        <div class="gyt-t-product" id="gytToastProduct"></div>
+        <div class="gyt-t-sub" id="gytToastSub"></div>
+      </div>
+      <span class="gyt-t-close" id="gytToastClose" aria-label="關閉">✕</span>
+      <div class="gyt-t-prog" id="gytToastProg"></div>
+    </div>
+
+    <script>
+    (function () {
+      var API_URL = 'https://livesale.zeabur.app/api/recent-orders';
+      var SHOW_DURATION = 5000;
+      var HIDE_DURATION = 8000;
+      var RELOAD_INTERVAL = 120000;
+
+      var toast    = document.getElementById('gyt-toast');
+      var titleEl  = document.getElementById('gytToastTitle');
+      var thumbEl  = document.getElementById('gytToastThumb');
+      var productEl= document.getElementById('gytToastProduct');
+      var subEl    = document.getElementById('gytToastSub');
+      var prog     = document.getElementById('gytToastProg');
+      var closeBtn = document.getElementById('gytToastClose');
+
+      var orders = [];
+      var idx    = 0;
+      var showTimer, hideTimer, reloadTimer;
+      var dismissed = false;
+
+      closeBtn.addEventListener('click', function () {
+        dismissed = true;
+        hide();
+        clearTimeout(showTimer);
+        clearTimeout(hideTimer);
+      });
+
+      function runProg() {
+        prog.style.transition = 'none';
+        prog.style.width = '0%';
+        requestAnimationFrame(function () { requestAnimationFrame(function () {
+          prog.style.transition = 'width ' + SHOW_DURATION + 'ms linear';
+          prog.style.width = '100%';
+        }); });
+      }
+
+      function show(order) {
+        /* ── 縮圖 ── */
+        if (order.image) {
+          thumbEl.innerHTML = '<img src="' + order.image + '" alt="" loading="lazy">';
+        } else {
+          thumbEl.innerHTML = '🛍️';
+        }
+
+        /* ── 標題：XX市 單XX 的顧客完成代購 ── */
+        var nameHtml = order.customer
+          ? ' <span class="gyt-t-cname">' + order.customer + '</span>'
+          : '';
+        titleEl.innerHTML =
+          '<span class="gyt-t-region">' + order.flag + ' ' + order.region + '</span>' +
+          nameHtml + ' 的顧客完成代購';
+
+        /* ── 商品名 ── */
+        productEl.textContent = order.product;
+
+        /* ── 底部資訊：金額 · 件數 · 時間 ── */
+        var parts = [];
+        if (order.amount) parts.push('<span class="gyt-t-amount">' + order.amount + '</span>');
+        if (order.count && order.count > 1) parts.push(order.count + ' 件');
+        parts.push('<span>' + order.time + '</span>');
+
+        subEl.innerHTML = parts.join('<span class="gyt-t-dot"></span>');
+
+        toast.classList.remove('gyt-hide');
+        toast.classList.add('gyt-show');
+        runProg();
+      }
+
+      function hide() {
+        toast.classList.remove('gyt-show');
+        toast.classList.add('gyt-hide');
+      }
+
+      function cycle() {
+        if (dismissed || orders.length === 0) return;
+        show(orders[idx]);
+        idx = (idx + 1) % orders.length;
+
+        showTimer = setTimeout(function () {
+          hide();
+          hideTimer = setTimeout(cycle, HIDE_DURATION);
+        }, SHOW_DURATION);
+      }
+
+      function load() {
+        fetch(API_URL)
+          .then(function (r) { return r.json(); })
+          .then(function (json) {
+            if (json.orders && json.orders.length > 0) {
+              orders = json.orders;
+              if (idx === 0 && !dismissed) {
+                setTimeout(cycle, 3000);
+              }
+            }
+          })
+          .catch(function () {});
+      }
+
+      load();
+      reloadTimer = setInterval(load, RELOAD_INTERVAL);
+    })();
+    </script>
+
+    <!-- 影片區 -->
+    <div class="daiko-video-placeholder">
+      <div class="daiko-video-text" style="text-align:center;margin-bottom:12px;">
+        <strong>30 秒代購示範影片</strong>
+        <span style="display:block;margin-top:4px;">看看貼連結到完成下單的全過程</span>
+      </div>
+      <div style="display:flex;justify-content:center;">
+        <iframe
+          src="https://www.youtube.com/embed/EpqZ6GjzEaQ"
+          title="30秒代購示範影片"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowfullscreen
+          style="border:none;border-radius:12px;width:315px;height:560px;max-width:100%;"
+        ></iframe>
+      </div>
+    </div>
+
+    <!-- 痛點共鳴段 -->
+    <div class="daiko-pain-block">
+      <p class="daiko-pain-lead">你是不是也遇過這些事？</p>
+      <div class="daiko-pain-list">
+        <div class="daiko-pain-item daiko-pain-bad">
+          <span class="daiko-pain-icon">😩</span>
+          <span>私訊代購店家，等了半天才回覆</span>
+        </div>
+        <div class="daiko-pain-item daiko-pain-bad">
+          <span class="daiko-pain-icon">😩</span>
+          <span>報價來了，又要來回確認顏色、尺寸</span>
+        </div>
+        <div class="daiko-pain-item daiko-pain-bad">
+          <span class="daiko-pain-icon">😩</span>
+          <span>確認完才發現商品已經賣完了</span>
+        </div>
+      </div>
+      <div class="daiko-pain-divider">
+        <span>在GOYOUTATI，這些全部消失</span>
+      </div>
+      <div class="daiko-pain-list">
+        <div class="daiko-pain-item daiko-pain-good">
+          <span class="daiko-pain-icon">✅</span>
+          <span>貼連結 → 自動抓商品 → 顯示含關稅價格 → 直接下單</span>
+        </div>
+        <div class="daiko-pain-item daiko-pain-good">
+          <span class="daiko-pain-icon">✅</span>
+          <span>不用等客服，24 小時都能完成代購</span>
+        </div>
+        <div class="daiko-pain-item daiko-pain-good">
+          <span class="daiko-pain-icon">✅</span>
+          <span>Amazon、Mercari、ZOZOTOWN、品牌官網都支援</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 三步驟流程 section band -->
+    <div class="daiko-section-band">
+    <!-- 三步驟流程 -->
+    <div class="daiko-steps">
+      <div class="daiko-step">
+        <div class="daiko-step-icon">🔗</div>
+        <div class="daiko-step-num">Step 1</div>
+        <div class="daiko-step-label">貼上連結</div>
+        <div class="daiko-step-desc">任何日本購物網站</div>
+      </div>
+      <div class="daiko-step-arrow">→</div>
+      <div class="daiko-step">
+        <div class="daiko-step-icon">🔍</div>
+        <div class="daiko-step-num">Step 2</div>
+        <div class="daiko-step-label">確認商品</div>
+        <div class="daiko-step-desc">自動抓取資訊、顯示含稅售價</div>
+      </div>
+      <div class="daiko-step-arrow">→</div>
+      <div class="daiko-step">
+        <div class="daiko-step-icon">✅</div>
+        <div class="daiko-step-num">Step 3</div>
+        <div class="daiko-step-label">完成下單</div>
+        <div class="daiko-step-desc">我們幫你購買並寄到台灣</div>
+      </div>
+    </div>
+
+    <!-- 折疊式比較區 -->
+    <div class="daiko-compare-wrap">
+      <button class="daiko-compare-toggle" onclick="this.parentElement.classList.toggle('open')">
+        <span>⚡ 為什麼選御用達？比一比</span>
+        <span class="daiko-compare-arrow">▼</span>
+      </button>
+      <div class="daiko-compare-body">
+        <div class="daiko-compare-grid">
+          <div class="daiko-compare-label"></div>
+          <div class="daiko-compare-us">御用達</div>
+          <div class="daiko-compare-them">其他平台</div>
+
+          <div class="daiko-compare-label">從貼連結到可付款</div>
+          <div class="daiko-compare-us daiko-compare-win">30 秒</div>
+          <div class="daiko-compare-them">數小時～隔天</div>
+
+          <div class="daiko-compare-label">需等人工報價</div>
+          <div class="daiko-compare-us daiko-compare-win">✅ 不需要</div>
+          <div class="daiko-compare-them">❌ 需要</div>
+
+          <div class="daiko-compare-label">24小時都能下單</div>
+          <div class="daiko-compare-us daiko-compare-win">✅ 可以</div>
+          <div class="daiko-compare-them">❌ 受客服時段限制</div>
+
+          <div class="daiko-compare-label">費用當下即顯示</div>
+          <div class="daiko-compare-us daiko-compare-win">✅ 即時透明</div>
+          <div class="daiko-compare-them">❌ 送出後才知道</div>
+
+          <div class="daiko-compare-label">包稅直送台灣</div>
+          <div class="daiko-compare-us daiko-compare-win">✅ 包含</div>
+          <div class="daiko-compare-them">⚠️ 關稅另計</div>
+        </div>
+      </div>
+    </div>
+    </div><!-- /daiko-section-band -->
+
+    <div class="daiko-bottom-ctas">
+      <a href="https://line.me/R/ti/p/@544kaytb" target="_blank" class="daiko-cta-card daiko-cta-b2b">
+        <span class="daiko-cta-icon">🏢</span>
+        <span class="daiko-cta-body">
+          <strong>企業戶・揪團主專屬優惠</strong>
+          <small>批量代購享折扣，歡迎聯繫客服洽談</small>
+        </span>
+        <span class="daiko-cta-arrow">→</span>
+      </a>
+      <div class="daiko-cta-row">
+        <div class="daiko-cta-note">
+          <span>⚠️</span>
+          <span>商品無法爬取或價格有誤？<a href="https://line.me/R/ti/p/@544kaytb" target="_blank">聯繫客服</a>協助處理</span>
+        </div>
+        <div class="daiko-cta-note">
+          <span>📋</span>
+          <span>詳細費率與說明請見下方費率表</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 1b: 手動輸入（爬取失敗時顯示） -->
+  <div class="daiko-section" id="step-manual" style="display:none;">
+    <div class="daiko-manual-card">
+      <h2 class="daiko-manual-title">📝 手動填寫商品資訊</h2>
+      <p class="daiko-manual-subtitle">無法自動取得此網站資訊，請按F5重試一次，如果超過兩次無法取得商品資訊，請手動填寫以下資訊</p>
+
+      <!-- Mercari 專屬提示（URL 含 mercari 時才顯示） -->
+      <div id="daiko-mercari-hint" style="display:none;margin-bottom:16px;padding:14px 16px;background:#fff8e6;border:1px solid rgba(240,165,0,.4);border-left:4px solid #f0a500;border-radius:10px;font-size:13.5px;line-height:1.75;color:#444;">
+        <strong style="color:#1e2d5a;display:block;margin-bottom:4px;">⚠ Mercari 用戶請注意</strong>
+        台灣版網址（<code style="background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:12px;">tw.mercari.com</code>）無法自動取得商品資訊。<br>
+        請先取得日本版連結（<code style="background:#f0f0f0;padding:1px 5px;border-radius:3px;font-size:12px;">jp.mercari.com/item/m...</code>）再重新貼上。<br>
+        <a href="/blogs/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC/mercari-daigo-link-guide-2026" target="_blank" style="color:#1e2d5a;font-weight:700;text-decoration:underline;">→ 如何取得正確的 Mercari 連結？</a>
+      </div>
+      <script>
+        (function(){
+          var url = document.getElementById('manual-url-display');
+          if(url && url.textContent && url.textContent.toLowerCase().indexOf('mercari') !== -1){
+            document.getElementById('daiko-mercari-hint').style.display = 'block';
+          }
+          // 也監聽動態更新
+          var obs = new MutationObserver(function(){
+            if(url.textContent.toLowerCase().indexOf('mercari') !== -1){
+              document.getElementById('daiko-mercari-hint').style.display = 'block';
+            } else {
+              document.getElementById('daiko-mercari-hint').style.display = 'none';
+            }
+          });
+          if(url) obs.observe(url, {childList:true, characterData:true, subtree:true});
+        })();
+      </script>
+
+      <div class="daiko-manual-url">
+        <span>🔗</span>
+        <span id="manual-url-display"></span>
+      </div>
+
+      <div class="daiko-form-group">
+        <label for="manual-title">商品名稱 <span class="required">*</span></label>
+        <input type="text" id="manual-title" placeholder="請貼上商品名稱" />
+      </div>
+
+      <div class="daiko-form-group">
+        <label for="manual-price">日幣售價（税込）<span class="required">*</span></label>
+        <div class="daiko-price-input-wrap">
+          <span class="daiko-price-prefix">¥</span>
+          <input type="number" id="manual-price" placeholder="例：5313" min="1" oninput="daikoCheckHighPrice(this.value)" />
+        </div>
+      </div>
+
+      <div class="daiko-form-group">
+        <label for="manual-image">商品圖片網址（選填）</label>
+        <input type="url" id="manual-image" placeholder="右鍵圖片 → 複製圖片網址" />
+        <p class="daiko-form-hint">在商品圖片上按右鍵，選「複製圖片網址」貼上</p>
+      </div>
+
+      <div class="daiko-form-group">
+        <label for="manual-note">備註（選填）</label>
+        <input type="text" id="manual-note" placeholder="例：要 L 號、黑色" />
+      </div>
+
+      <!-- 高單價動態警告 -->
+      <div id="daiko-highprice-warning" style="display:none;margin:12px 0;padding:12px 16px;background:#fff3cd;border:1.5px solid #f0c000;border-radius:8px;font-size:14px;color:#7a5c00;line-height:1.6;">
+        ⚠️ <strong>此商品日幣售價超過 ¥100,000</strong>，建議先聯繫客服確認後再下單。<br>
+        若您已聯繫客服確認可代購，可直接點「確認代購・製作商品頁」繼續。<br>
+        如有疑問，請透過 <a href="https://line.me/R/ti/p/@544kaytb" target="_blank" rel="noopener" style="color:#7a5c00;font-weight:700;">LINE @544kaytb</a> 聯絡我們。
+      </div>
+
+      <div id="manual-price-preview" class="daiko-price-box" style="display:none;">
+        <div class="daiko-price-row">
+          <span class="daiko-price-label">台幣參考</span>
+          <span id="manual-twd-price" class="daiko-price-twd"></span>
+        </div>
+      </div>
+
+      <div class="daiko-actions">
+        <button id="daiko-manual-btn" onclick="daikoSafeManualOrder()" class="daiko-btn-primary">
+          <span class="btn-text">確認代購・製作商品頁</span>
+          <span class="btn-loading" style="display:none;">商品頁製作中，請稍等...</span>
+        </button>
+        <button onclick="daikoReset()" class="daiko-btn-secondary">重新查詢</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2: 顯示商品資訊（自動抓取成功） -->
+  <div class="daiko-section" id="step-preview" style="display:none;">
+    <div class="daiko-product-card">
+      <div class="daiko-product-image">
+        <img id="preview-image" src="" alt="商品圖片" />
+      </div>
+      <div class="daiko-product-info">
+        <h2 id="preview-title" class="daiko-product-title"></h2>
+        <p id="preview-brand" class="daiko-product-brand"></p>
+
+        <!-- Variant 選擇器（有 variants 時才顯示） -->
+        <div id="variant-selector" class="daiko-variant-selector" style="display:none;">
+          <div id="variant-color-wrap" class="daiko-variant-group" style="display:none;">
+            <label class="daiko-variant-label">カラー（顏色）</label>
+            <div id="variant-color-options" class="daiko-variant-options"></div>
+          </div>
+          <div id="variant-size-wrap" class="daiko-variant-group" style="display:none;">
+            <label class="daiko-variant-label">サイズ（尺寸）</label>
+            <div id="variant-size-options" class="daiko-variant-options"></div>
+          </div>
+          <div id="variant-stock-status" class="daiko-variant-stock"></div>
+        </div>
+
+        <div class="daiko-price-box">
+          <div class="daiko-price-row">
+            <span class="daiko-price-label">台幣參考</span>
+            <span id="preview-twd-price" class="daiko-price-twd"></span>
+          </div>
+        </div>
+
+        <div class="daiko-fee-note">
+          <p>代購手續費包含：商品代購、品質確認、重新包裝</p>
+          <p>※ 國際運費最低計費重量 2kg（2kg 以內 ¥2,000，之後每增 0.5kg +¥500，等於 ¥1,000/kg），包稅；材積重在實重 3 倍內不收材積費，超過 3 倍才取較大者<br>
+          詳細運費說明請見下方費率表<br>
+          任何問題請聯繫官方LINE @544kaytb</p>
+        </div>
+
+        <div class="daiko-actions">
+          <button id="daiko-order-btn" onclick="daikoCreateOrder()" class="daiko-btn-primary daiko-btn-gold">
+            <span class="btn-text">確認代購・製作商品頁</span>
+            <span class="btn-loading" style="display:none;">商品頁製作中，請稍等...</span>
+          </button>
+          <button onclick="daikoReset()" class="daiko-btn-secondary">重新查詢</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: 完成 -->
+  <div class="daiko-section" id="step-done" style="display:none;">
+    <div class="daiko-done-card">
+      <div class="daiko-done-icon">🎉</div>
+      <h2 style="color:var(--dk-navy);font-weight:800;margin-bottom:8px;">商品頁已建立完成！</h2>
+      <p class="daiko-done-subtitle">前往商品頁確認規格、完成付款，我們收到訂單後馬上幫你代購！</p>
+      <a id="daiko-checkout-link" href="#" class="daiko-btn-primary daiko-btn-done">前往商品頁，立即下單 →</a>
+      <div class="daiko-done-divider">或</div>
+      <div class="daiko-done-tips">
+        <div class="daiko-done-tip">📦 付款後約 7-14 個工作天送達台灣</div>
+        <div class="daiko-done-tip">💬 有問題請聯絡 LINE：<strong>@544kaytb</strong></div>
+      </div>
+      <button onclick="daikoReset()" class="daiko-btn-secondary" style="margin-top:20px;">繼續查詢其他商品</button>
+    </div>
+  </div>
+
+  <!-- 成功案例 -->
+  <div class="daiko-section daiko-cases-section daiko-section-band" id="section-cases">
+    <h2 class="daiko-cases-heading">🛍 客人真實代購案例</h2>
+    <p class="daiko-cases-subheading">每天都有台灣客人成功代購日本商品，以下是幾個真實例子</p>
+    <div class="daiko-cases-grid">
+      <div class="daiko-case-card">
+        <div class="daiko-case-tag daiko-case-tag--fashion">服飾</div>
+        <div class="daiko-case-title">BAPE 迷彩上衣</div>
+        <div class="daiko-case-detail">台灣買不到的日本限定色號</div>
+        <div class="daiko-case-meta">
+          <span>¥42,000 → 代購完成</span>
+          <span>到貨 11 天</span>
+        </div>
+        <div class="daiko-case-reviewer">
+          <span class="daiko-case-avatar">👩🏻</span>
+          <span class="daiko-case-name">台北 林小姐</span>
+        </div>
+        <div class="daiko-case-review">⭐⭐⭐⭐⭐ 「第一次代購超順，商品和官網一模一樣！」</div>
+      </div>
+      <div class="daiko-case-card">
+        <div class="daiko-case-tag daiko-case-tag--food">食品</div>
+        <div class="daiko-case-title">YOKUMOKU 季節限定禮盒</div>
+        <div class="daiko-case-detail">台灣通路沒有進的限定款</div>
+        <div class="daiko-case-meta">
+          <span>¥5,400 → 代購完成</span>
+          <span>到貨 7 天</span>
+        </div>
+        <div class="daiko-case-reviewer">
+          <span class="daiko-case-avatar">👨🏻</span>
+          <span class="daiko-case-name">台中 陳先生</span>
+        </div>
+        <div class="daiko-case-review">⭐⭐⭐⭐⭐ 「貼連結馬上就能下單，真的太方便了！」</div>
+      </div>
+      <div class="daiko-case-card">
+        <div class="daiko-case-tag daiko-case-tag--shoes">鞋履</div>
+        <div class="daiko-case-title">Onitsuka Tiger 聯名款</div>
+        <div class="daiko-case-detail">快速售罄的聯名系列</div>
+        <div class="daiko-case-meta">
+          <span>¥18,700 → 代購完成</span>
+          <span>到貨 13 天</span>
+        </div>
+        <div class="daiko-case-reviewer">
+          <span class="daiko-case-avatar">👩🏻</span>
+          <span class="daiko-case-name">新竹 王小姐</span>
+        </div>
+        <div class="daiko-case-review">⭐⭐⭐⭐⭐ 「連結貼上去幾秒就幫我找好了，非常推薦！」</div>
+      </div>
+      <div class="daiko-case-card">
+        <div class="daiko-case-tag daiko-case-tag--outdoor">戶外</div>
+        <div class="daiko-case-title">Snow Peak 露營餐具組</div>
+        <div class="daiko-case-detail">Amazon JP 多件合併寄送省運費</div>
+        <div class="daiko-case-meta">
+          <span>¥27,800 → 代購完成</span>
+          <span>到貨 10 天</span>
+        </div>
+        <div class="daiko-case-reviewer">
+          <span class="daiko-case-avatar">👨🏻</span>
+          <span class="daiko-case-name">高雄 張先生</span>
+        </div>
+        <div class="daiko-case-review">⭐⭐⭐⭐⭐ 「多件商品合併寄送省運費，包裝也很好！」</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 中段錨定 CTA 帶 -->
+  <div class="daiko-mid-cta">
+    <div class="daiko-mid-cta-inner">
+      <div class="daiko-mid-cta-text">
+        <strong>還在等什麼？</strong>
+        <span>貼上日本商品連結，30 秒就能下單</span>
+      </div>
+      <button class="daiko-mid-cta-btn" onclick="document.getElementById('daiko-url').focus(); window.scrollTo({top:0,behavior:'smooth'})">
+        ⚡ 立即查詢 →
+      </button>
+    </div>
+  </div>
+
+  <!-- FAQ 常見問題 -->
+  <div class="daiko-section daiko-faq-section" id="section-faq">
+    <h2 class="daiko-faq-heading">❓ 常見問題</h2>
+    <div class="daiko-faq-list">
+      <div class="daiko-faq-item" onclick="daikoToggleFaq(this)">
+        <div class="daiko-faq-q">
+          <span>我不會日文，可以直接貼圖片嗎？</span>
+          <span class="daiko-faq-arrow">＋</span>
+        </div>
+        <div class="daiko-faq-a">可以！如果貼連結後系統無法自動抓取，頁面會顯示手動填寫表單，你只需要填商品名稱和日幣價格即可。如果連填寫都有困難，直接傳連結給 LINE 客服 <strong>@544kaytb</strong>，我們幫你處理。</div>
+      </div>
+      <div class="daiko-faq-item" onclick="daikoToggleFaq(this)">
+        <div class="daiko-faq-q">
+          <span>哪些商品無法代購？</span>
+          <span class="daiko-faq-arrow">＋</span>
+        </div>
+        <div class="daiko-faq-a">藥品、酒類、仿冒品、易燃易爆物等受限制商品無法代購。其他大部分商品（服飾、鞋子、生活雜貨、保健食品、電子產品、食玩等）都可以詢問，有疑問請先聯絡客服確認。</div>
+      </div>
+      <div class="daiko-faq-item" onclick="daikoToggleFaq(this)">
+        <div class="daiko-faq-q">
+          <span>費用怎麼計算？運費如何計算？</span>
+          <span class="daiko-faq-arrow">＋</span>
+        </div>
+        <div class="daiko-faq-a">代購手續費依商品日幣原價乘上費率（×1.15 ~ ×1.25），貼連結後系統會自動計算並顯示含稅的代購售價。國際運費在商品到達倉庫確認重量後另行請款，最低計費重量 2 公斤（2 公斤以內 ¥2,000），每多 0.5 公斤加收 ¥500。詳細費率請看頁面下方的費率表。</div>
+      </div>
+      <div class="daiko-faq-item" onclick="daikoToggleFaq(this)">
+        <div class="daiko-faq-q">
+          <span>下單後多久可以收到？</span>
+          <span class="daiko-faq-arrow">＋</span>
+        </div>
+        <div class="daiko-faq-a">一般商品約 7-14 個工作天可以到台灣，少數熱門商品或缺貨時可能稍微延遲。商品到倉庫後我們會主動通知你，整個流程都可以追蹤。</div>
+      </div>
+      <div class="daiko-faq-item" onclick="daikoToggleFaq(this)">
+        <div class="daiko-faq-q">
+          <span>可以一次買多件、合併寄送嗎？</span>
+          <span class="daiko-faq-arrow">＋</span>
+        </div>
+        <div class="daiko-faq-a">可以！建議在同一時期下多筆訂單，我們會在倉庫自動合併，幫你省下國際運費。合併寄送不需要額外申請，有問題也可以找客服確認。企業戶、揪團主有另外的優惠方案，歡迎私訊洽談。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 費用說明 -->
+  <div class="daiko-section daiko-info-section" id="section-info">
+    <div class="daiko-info-block">
+      <h2 class="daiko-info-heading">💰 代購手續費</h2>
+      <p class="daiko-info-desc">商品日幣原價依照以下費率收費，手續費包含：商品代購、品質確認、重新包裝、倉儲...等等相關服務。</p>
+      <table class="daiko-table">
+        <thead>
+          <tr>
+            <th>日幣原價區間</th>
+            <th style="text-align:center;">費用計算</th>
+            <th style="text-align:center;display:none;" id="fee-local-header" class="daiko-local-col"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>¥0 ~ ¥5,000</td><td style="text-align:center;">×1.25</td><td class="daiko-local-col daiko-local-fee" data-jpy-min="0" data-jpy-max="5000" style="text-align:center;color:#888;font-size:13px;"></td></tr>
+          <tr><td>¥5,001 ~ ¥10,000</td><td style="text-align:center;">×1.22</td><td class="daiko-local-col daiko-local-fee" data-jpy-min="5001" data-jpy-max="10000" style="text-align:center;color:#888;font-size:13px;"></td></tr>
+          <tr><td>¥10,001 ~ ¥20,000</td><td style="text-align:center;">×1.20</td><td class="daiko-local-col daiko-local-fee" data-jpy-min="10001" data-jpy-max="20000" style="text-align:center;color:#888;font-size:13px;"></td></tr>
+          <tr><td>¥20,001 ~ ¥30,000</td><td style="text-align:center;">×1.18</td><td class="daiko-local-col daiko-local-fee" data-jpy-min="20001" data-jpy-max="30000" style="text-align:center;color:#888;font-size:13px;"></td></tr>
+          <tr><td>¥30,001 以上</td><td style="text-align:center;">×1.15</td><td class="daiko-local-col daiko-local-fee" data-jpy-min="30001" data-jpy-max="" style="text-align:center;color:#888;font-size:13px;"></td></tr>
+        </tbody>
+      </table>
+      <p class="daiko-info-note">※ 最低手續費 ¥300，不足 ¥300 以 ¥300 計算。</p>
+      <div class="daiko-info-badge-wrap">
+        <div class="daiko-info-badge">✅ <strong>免費1個月倉儲</strong> — 可免費集運30天，合併訂單出貨，更划算。</div>
+        <div class="daiko-info-badge">✅ <strong>無重量限制</strong> — 無最低出貨重量限制，一件也能出貨。</div>
+        <div class="daiko-info-badge">✅ <strong>聯繫客服</strong> — 為了讓您有個愉快的購物經驗，有任何不明白的點，請先透過官方line和客服聯繫後再下單。</div>
+      </div>
+    </div>
+
+    <div class="daiko-info-block">
+      <h2 class="daiko-info-heading">📦 包稅空運</h2>
+      <p class="daiko-info-desc">商品寄達台灣的國際運費如下，以 0.5kg 為一個區間計算（每公斤 ¥1,000），最低計費重量 2kg：</p>
+      <table class="daiko-table">
+        <thead>
+          <tr>
+            <th>重量</th>
+            <th style="text-align:right;">運費</th>
+            <th style="text-align:right;display:none;" id="ship-local-header" class="daiko-local-col"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>2.0kg 以內（最低計費重量）</td><td style="text-align:right;font-weight:600;">¥2,000</td><td class="daiko-local-col daiko-local-ship" data-jpy="2000" style="text-align:right;color:#888;font-size:13px;"></td></tr>
+          <tr><td>2.1 ~ 2.5 kg</td><td style="text-align:right;font-weight:600;">¥2,500</td><td class="daiko-local-col daiko-local-ship" data-jpy="2500" style="text-align:right;color:#888;font-size:13px;"></td></tr>
+          <tr><td>2.6 ~ 3.0 kg</td><td style="text-align:right;font-weight:600;">¥3,000</td><td class="daiko-local-col daiko-local-ship" data-jpy="3000" style="text-align:right;color:#888;font-size:13px;"></td></tr>
+          <tr><td>3.1 ~ 3.5kg</td><td style="text-align:right;font-weight:600;">¥3,500</td><td class="daiko-local-col daiko-local-ship" data-jpy="3000" style="text-align:right;color:#888;font-size:13px;"></td></tr>
+          <tr><td>3.6 ~ 4.0 kg</td><td style="text-align:right;font-weight:600;">¥4,000</td><td class="daiko-local-col daiko-local-ship" data-jpy="3000" style="text-align:right;color:#888;font-size:13px;"></td></tr>
+          <tr><td>以此類推，每增加 0.5kg</td><td style="text-align:right;font-weight:600;">+¥500</td><td class="daiko-local-col daiko-local-ship" data-jpy="500" style="text-align:right;color:#888;font-size:13px;">+</td></tr>
+        </tbody>
+      </table>
+      <div class="daiko-info-badge-wrap">
+        <div class="daiko-info-badge">✅ <strong>包稅</strong> — 國際運費、關稅、台灣運費均已包含在運費內，無隱藏費用</div>
+        <div class="daiko-info-badge">✅ <strong>3 倍內不收材積</strong> — 材積重（長×寬×高÷6000）在實重 3 倍以內只收實重；超過 3 倍才取較大者計費</div>
+      </div>
+    </div>
+
+    <div class="daiko-info-block">
+      <h2 class="daiko-info-heading">📋 注意事項</h2>
+      <div class="daiko-info-desc">
+        <p>・下單後約 <strong>7-14 個工作天</strong>到貨</p>
+        <p>・商品價格以日幣結算，結帳時會顯示台幣參考價格</p>
+        <p>・國際運費在商品到達倉庫秤重後另行請款。若商品體積或重量較大，我們會在請款前主動透過 LINE 通知您預估金額，確認後再進行收費，不會在未告知的情況下直接扣款。如有疑問，歡迎下單前先透過官方 LINE 詢問客服預估運費。</p>
+        <p>・有任何問題歡迎聯繫官方 LINE <strong>@544kaytb</strong></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+{{ 'daigo.css' | asset_url | stylesheet_tag }}
+
+<style>
+.daiko-seo-hub {
+  max-width: 860px;
+  margin: 48px auto 0;
+  padding: 28px 32px;
+  background: #f9f7f4;
+  border: 1px solid #e8e3da;
+  border-top: 3px solid #c0392b;
+  border-radius: 8px;
+  font-family: 'PingFang TC', 'Microsoft JhengHei', -apple-system, sans-serif;
+}
+.daiko-seo-hub-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: #aaa;
+  margin: 0 0 12px;
+}
+.daiko-seo-hub-divider {
+  border: none;
+  border-top: 1px solid #e8e3da;
+  margin: 18px 0 14px;
+}
+.daiko-seo-hub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 4px;
+}
+.daiko-seo-hub-grid a {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #e8e3da;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111 !important;
+  text-decoration: none !important;
+  transition: border-color .2s, box-shadow .2s;
+}
+.daiko-seo-hub-grid a:hover {
+  border-color: #c0392b;
+  box-shadow: 0 2px 8px rgba(192,57,43,.1);
+  color: #c0392b !important;
+}
+.daiko-seo-hub-grid a::before {
+  content: '→';
+  color: #c0392b;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.daiko-seo-hub-note {
+  font-size: 12px;
+  color: #bbb;
+  margin: 18px 0 0;
+}
+</style>
+
+<div class="daiko-seo-hub">
+  <p class="daiko-seo-hub-title">購物平台代購</p>
+  <ul class="daiko-seo-hub-grid">
+    <li><a href="/pages/amazon%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">Amazon 日本代購</a></li>
+    <li><a href="/pages/zozotown-%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">ZOZOTOWN 代購</a></li>
+    <li><a href="/pages/mercari%E4%BB%A3%E8%B3%BC">Mercari 代購</a></li>
+    <li><a href="/pages/pages-japan-limited-products">日本限定商品代購</a></li>
+    <li><a href="/pages/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">日本代購說明</a></li>
+    <li><a href="/pages/%E6%97%A5%E6%9C%AC%E7%B6%B2%E7%AB%99%E6%80%8E%E9%BA%BC%E8%B2%B7-%E6%9C%80%E7%B0%A1%E5%96%AE%E7%9A%84%E4%BB%A3%E8%B3%BC%E6%96%B9%E6%B3%95">日本網站怎麼買？</a></li>
+    <li><a href="/pages/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">日本代購推薦</a></li>
+  </ul>
+  <hr class="daiko-seo-hub-divider">
+  <p class="daiko-seo-hub-title">品牌代購</p>
+  <ul class="daiko-seo-hub-grid">
+    <li><a href="/pages/bape-%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">BAPE 代購</a></li>
+    <li><a href="/pages/human-made-%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">Human Made 代購</a></li>
+    <li><a href="/pages/neighborhood-%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC">NEIGHBORHOOD 代購</a></li>
+    <li><a href="/pages/%E6%97%A5%E6%9C%AC%E4%BB%A3%E8%B3%BC-wtaps">WTAPS 代購</a></li>
+    <li><a href="/pages/supreme-e6-97-a5-e6-9c-ac-e4-bb-a3-e8-b3-bc">Supreme 代購</a></li>
+    <li><a href="/pages/beams-e6-97-a5-e6-9c-ac-e4-bb-a3-e8-b3-bc">BEAMS 代購</a></li>
+    <li><a href="/pages/visvim-proxy">visvim 代購</a></li>
+  </ul>
+  <p class="daiko-seo-hub-note">GOYOUTATI 支援 Amazon Japan、Mercari、ZOZOTOWN 等日本購物平台，只要貼上商品連結即可快速代購。</p>
+</div>
+
+
+
+
+<script>
+  /* ── DAIGO 設定（如需修改 API endpoint 或金鑰，只改這裡）── */
+  window.DAIKO_CONFIG = {
+    api_base: 'https://goyoutatidaigo.zeabur.app',
+    api_key:  'bJJZ9ngtCgYbALjbL7xlrTLCFPuqCqpwshssB0I0PKU'
+  };
+
+  /* ── tw.mercari.com 攔截器 ──
+     daigo.js 載入後覆寫 daikoSearch，
+     偵測到台灣版 Mercari 網址直接跳手動表單 + 顯示提示，不送 API 請求。
+  ── */
+  // ── 高單價提醒函數（方案 B：只警告，不擋下單）──
+  window.daikoCheckHighPrice = function(val) {
+    var price = parseFloat(val) || 0;
+    var warn  = document.getElementById('daiko-highprice-warning');
+    // 只顯示警告文字，不再 disable 按鈕（讓客人能繼續下單）
+    if (price > 100000) {
+      if (warn) warn.style.display = 'block';
+    } else {
+      if (warn) warn.style.display = 'none';
+    }
+  };
+
+  window.daikoSafeManualOrder = function() {
+    var price = parseFloat((document.getElementById('manual-price') || {}).value) || 0;
+    if (price > 100000) {
+      // 用 confirm() 給客人選擇：已聯繫客服繼續下單 / 取消
+      var ok = confirm(
+        '⚠️ 此商品日幣售價超過 ¥100,000\n\n' +
+        '建議先透過 LINE @544kaytb 聯繫客服確認，再行下單。\n\n' +
+        '如您已聯繫過客服並確認可代購，請點「確定」繼續下單。\n' +
+        '如尚未聯繫客服，請點「取消」先聯繫客服。'
+      );
+      if (!ok) return;
+    }
+    if (typeof window.daikoManualOrder === 'function') window.daikoManualOrder();
+  };
+  // ────────────────────────────────────────────────────────────
+
+  window.addEventListener('load', function () {
+    var _orig = window.daikoSearch;
+    window.daikoSearch = function () {
+      var url = (document.getElementById('daiko-url') || {}).value || '';
+      // ── 封鎖網站清單（不支援代購，附原因說明）
+      // 與後端 scrapers/base.py 的 BLOCKED_DOMAINS 對齊
+      var BLOCKED_SITES = [
+        {
+          pattern: /duty-free-japan\.jp/i,
+          msg: '⚠ 此商品來自 Duty Free Japan（日本免稅店），商品需於機場現場取貨，無法透過代購服務寄送，請見諒。\n\n如需代購其他日本商品，歡迎改用 Amazon JP、ZOZOTOWN 等購物網站，或私訊 LINE 客服詢問。'
+        },
+        {
+          pattern: /tw\.mercari\.com/i,
+          msg: '⚠ 您貼上的是 Mercari 台灣版（tw.mercari.com）的連結。\n\nMercari 台灣版為本地二手平台，非日本商品，無法提供代購服務。\n\n若要代購日本 Mercari 商品，請至 jp.mercari.com 取得正確連結後再試一次，或私訊 LINE 客服協助查找。'
+        },
+        {
+          pattern: /bibian\.co\.jp/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /dokodemo\.world/i,
+          msg: '⚠ dokodemo（どこでも）為日本代購轉送平台，本服務不代購其他代購平台的商品。\n\n如需代購，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /hoka\.com/i,
+          msg: '⚠ HOKA 官網明文規定禁止轉載資訊，在我們取得授權前，暫時無法抓取商品資料。\n\n如需代購 HOKA 商品，請於 LINE @544kaytb 直接傳送商品截圖、款式、尺寸與顏色，我們將為您手動報價並建立訂單。\n\n造成不便敬請見諒。'
+        },
+        {
+          // 嚴格 amazon.com 匹配，避免誤殺 amazon.co.jp / amazon.com.tw
+          pattern: /amazon\.com(?![a-z\.])/i,
+          msg: '⚠ 您貼上的是 Amazon 美國站（amazon.com）的連結，本服務僅代購日本商品。\n\n請至 Amazon 日本站（amazon.co.jp）挑選商品後再試一次。'
+        },
+        // ── 其他代購平台（本服務不代購其他代購商）──
+        {
+          pattern: /tokukai\.com/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /letao\.com\.tw/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /zenmarket\.jp/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /daigobang\.com/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /go1buy1\.com/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /jpgoodbuy\.com/i,
+          msg: '⚠ 此商品來自其他日本代購平台，本服務不代購其他代購平台的商品。\n\n如需代購日本商品，請直接提供日本原始商店（Amazon JP、ZOZOTOWN 等）的商品連結。'
+        },
+        {
+          pattern: /buyma\.com/i,
+          msg: '⚠ BUYMA 為日本個人代購（Personal Shopper）平台，本服務不代購其他代購平台的商品。\n\nBUYMA 上的商品本身就是賣家代購的，建議直接提供商品原本品牌的官方網站連結，可省下中間代購費用。\n\n如需代購日本商品，請改用 Amazon JP、ZOZOTOWN 等購物網站。'
+        },
+        {
+          pattern: /buyee\.jp/i,
+          msg: '⚠ Buyee 為日本代購／轉運平台，本服務不代購其他代購平台的商品。\n\nBuyee 上的商品多來自 Mercari、Yahoo 拍賣、樂天等網站，建議直接提供原始網站連結（例如 jp.mercari.com 的商品連結），可省下中間代購費用。'
+        },
+      ];
+      for (var _i = 0; _i < BLOCKED_SITES.length; _i++) {
+        if (BLOCKED_SITES[_i].pattern.test(url)) {
+          alert(BLOCKED_SITES[_i].msg);
+          return;
+        }
+      }
+
+      if (typeof _orig === 'function') _orig();
+    };
+  });
+</script>
+{%- comment -%}
+  ── daigo ?url= 預填 ──────────────────────────────────────────────
+  用途：文章裡的「幫我買這個 →」按鈕帶著日本站商品網址過來，
+        自動填入 #daiko-url，讓讀者不用回原站複製連結。
+
+  貼在哪：sections/daigo.liquid，放在既有那段
+          （定義 window.DAIKO_CONFIG / daikoCheckHighPrice 的）
+          <script> 之後，緊接著貼上整段即可。不要動 assets/daigo.js。
+
+  刻意不自動送出：
+    這些 ?url= 連結會被 Googlebot 爬。自動觸發 daikoSearch() 等於
+    每被爬一次就打一次 /api/scrape（會開 Selenium）。所以只填不送，
+    讀者自己按「開始代購」。文章端的連結另外要加 rel="nofollow"。
+
+  網域比對一律走 hostMatches()：完整網域或其子網域。
+  絕對不可以改成 host.indexOf(d) !== -1 —— base.py 的註解記著，
+  第一版用子字串比對誤擋了 7 家正常商店（"t.co" 命中 tocco-closet.co.jp）。
+{%- endcomment -%}
+
+<script>
+(function () {
+  'use strict';
+
+  /* 有專屬 scraper 的網域（反推自 scrapers/base.py detect_platform） */
+  var ALLOW = [
+    'amazon.co.jp','amazon.jp','amzn.asia','amzn.to',
+    'rakuten.co.jp','zozo.jp','zozotown.jp',
+    'mercari.com',
+    'uniqlo.com','gu-global.com','muji.com','beams.co.jp',
+    'neighborhood.jp','wtaps.com','humanmade.jp','supreme.com','visvim.tv',
+    'newbalance.jp','adidas.jp','snkrdunk.com',
+    'amiami.jp','p-bandai.jp','animate-onlineshop.jp','pokemoncenter-online.com',
+    'takaratomy.co.jp','takaratomymall.jp','nijisanji.jp',
+    'hardoff.co.jp','biccamera.com',
+    /* 二手平台：與 base.py 的 _SECONDHAND_HOSTS 及四則硬擋訊息裡的
+       _ALT_CHANNELS 對齊 —— 訊息叫客人「改貼駿河屋／PayPay フリマ」，
+       白名單沒有的話客人照做也貼不進來。
+       ⚠️ auctions.yahoo.co.jp 刻意不列：該站競標與即決混在同一種網址，
+          generic 取的是現在価格不是即決価格（實測低估 ¥9,000／¥1,100），
+          即決 scraper 寫好之前不主動導流。理由同 base.py 的同名註解。 */
+    'suruga-ya.jp','paypayfleamarket.yahoo.co.jp','mandarake.co.jp',
+    /* Yahoo!ショッピング：6 個月 5 單 ¥121,418，2026-09-07 補上卡片時一併加。
+       同樣不含 auctions.yahoo.co.jp（理由見上）。 */
+    'store.shopping.yahoo.co.jp',
+    'palcloset.jp','grail.bz','shop-list.com','shop-shimamura.com',
+    'bellemaison.jp','daytona-park.com','runway-webstore.com','graniph.com',
+    'nanouniverse.jp','ancellm.com',
+    'fanatics.jp','softbankhawksstore.jp','npb.or.jp',
+    'disney.co.jp','yoshidakaban.com','vermicular.jp',
+    'marukyu-koyamaen.co.jp','mazdacollection.jp','yslb.jp','ec-store.net'
+  ];
+
+  /* 封鎖清單優先於白名單（同步自 base.py BLOCKED_DOMAINS） */
+  var DENY = [
+    'tw.mercari.com','amazon.com','hoka.com','duty-free-japan.jp',
+    'bibian.co.jp','dokodemo.world','zenmarket.jp','tokukai.com',
+    'letao.com.tw','daigobang.com','go1buy1.com'
+  ];
+
+  function hostMatches(host, domain) {
+    return host === domain || host.slice(-(domain.length + 1)) === '.' + domain;
+  }
+
+  function pickUrl() {
+    var raw;
+    try {
+      raw = new URLSearchParams(window.location.search).get('url');
+    } catch (e) { return null; }
+    if (!raw) return null;
+
+    var u;
+    try { u = new URL(raw); } catch (e) { return null; }
+
+    /* javascript: / data: / http: 一律拒絕 */
+    if (u.protocol !== 'https:') return null;
+
+    var host = u.hostname.toLowerCase().replace(/^www\./, '');
+
+    var i;
+    for (i = 0; i < DENY.length; i++) {
+      if (hostMatches(host, DENY[i])) return null;
+    }
+    for (i = 0; i < ALLOW.length; i++) {
+      if (hostMatches(host, ALLOW[i])) return u.href;
+    }
+    return null;
+  }
+
+  function fill() {
+    var href = pickUrl();
+    if (!href) return;
+
+    var input = document.getElementById('daiko-url');
+    if (!input) return;
+
+    input.value = href;
+    /* 讓既有監聽器（若有）知道值變了 */
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    /* 提示條：用 scoped id，避免撞 daigo 流程的固定 ID */
+    var tip = document.createElement('div');
+    tip.id = 'gpfill-notice';
+    tip.setAttribute('style',
+      'display:block;width:100%;box-sizing:border-box;' +
+      'margin:10px 0 0;padding:12px 14px;background:#fff8e6;' +
+      'border:1px solid rgba(240,165,0,.4);border-left:4px solid #f0a500;' +
+      'border-radius:10px;font-size:13.5px;line-height:1.7;color:#444;');
+    tip.innerHTML = '<strong style="color:#1e2d5a;">已為你帶入商品連結</strong><br>' +
+                    '確認網址正確後，按下方按鈕開始代購。';
+
+    /* ★ 輸入框的直接 parent 是 flex 那一列（輸入框＋「貼上」按鈕）。
+       插在裡面會變成第三個 flex 項目，把輸入框擠成一小條 —— 手機版實測過。
+       所以先往上爬出所有 flex/grid 容器，再插在那一整列的後面。 */
+    var row = input;
+    while (row.parentNode && row.parentNode !== document.body) {
+      var disp = '';
+      try { disp = window.getComputedStyle(row.parentNode).display; } catch (e) {}
+      if (disp !== 'flex' && disp !== 'inline-flex' &&
+          disp !== 'grid' && disp !== 'inline-grid') break;
+      row = row.parentNode;
+    }
+    if (row.parentNode) {
+      row.parentNode.insertBefore(tip, row.nextSibling);
+    }
+
+    try {
+      input.focus({ preventScroll: true });
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+      input.focus();
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fill);
+  } else {
+    fill();
+  }
+})();
+</script>
+
+<script src="{{ 'daigo.js' | asset_url }}" defer></script>
