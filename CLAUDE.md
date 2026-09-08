@@ -567,6 +567,48 @@ text = TAG_RE.sub(" ", src)
 （實測差異：222 處 vs 225 處、40 份 vs 42 份文件。數字不大，
 但那 3 處剛好有一處被排進了「要人工改」的清單。）
 
+### 🔴🔴 body 超過幾千字就不要手抄 —— 先查有沒有「從檔案送出」的路徑
+
+**這是流程問題，不是手滑。** 手抄的錯誤率不會因為小心而降到零，
+只會因為量大而必然發生；把內容留在檔案裡、全程不經過對話文字，錯誤率才是真的零。
+
+改文章／頁面之前先確認用哪把 token（2026-09-08 實測）：
+
+| token | 來源 | 對 articles |
+|---|---|---|
+| `SHOPIFY_ACCESS_TOKEN` | `daigo/.env` | ❌ `{"message":"Access denied for articles field.","code":"ACCESS_DENIED"}` |
+| `SHOPIFY_TOKEN`（`shpca_`） | `change/gyt-content-ops/.env` | ✅ 5 個 scope：`read_content`／`write_content`／`read_online_store_pages`／`write_online_store_pages`／`read_translations` |
+| Shopify 連接器（`mcp__claude_ai_Shopify__*`） | 商家身分 | ✅ 但 body 必須打進對話＝手抄 |
+
+**文章與頁面的內容改動一律走 `gyt-content-ops` 那把，從本機檔案送。**
+連接器沒有「從檔案送」的路：`stagedUploadsCreate` 可以上傳，
+但 `bulkOperationRunMutation` 被安全政策擋下
+（`{"blocked":true,"matched":"bulkOperationRunMutation","category":"destructive"}`）。
+
+正確的作法是**讀回來 → 在記憶體裡單點替換 → 送回去 → 再讀回來比對**，
+一個字都不打（範例見 `scratchpad/audit/edit_article.py` 的 `EDITS` 表）。
+
+#### 附帶規則：真的要逐字送中文時，不要用 `\uXXXX` 逃脫碼，直接寫字元
+
+2026-09-08 六篇文章走連接器手抄（body 合計 135,103 字元，含三次重送實際打了約 228,000 字元），
+**五個錯字全部是記錯碼位**，沒有一個是打錯字：
+
+```
+瑕 U+7455 → 寫成 U+7635（瘵）   2 處
+鋪 U+92EA → 寫成 U+8216（舖）   3 處
+梱 U+68B1 → 寫成 U+6885（梅）   1 處
+攤 U+6524 → 寫成 U+651E（攞）   1 處
+袒 U+8892 → 寫成 U+88AD（袭）   1 處
+```
+
+錯字在正式頁面上活了 8–9 分鐘才被回讀抓到。最後一篇改成直接寫中文字元，一次零錯字。
+**JSON 字串本來就吃 UTF-8，用逃脫碼沒有任何好處，只是多開一個錯誤來源。**
+
+★ **逐字回讀只證明「送出的跟草稿一致」，證明不了草稿本身是對的。**
+草稿如果是腳本從線上原文改出來的，未改動段落就有原文背書；
+草稿如果是手寫的，還要另外做字元合理性檢查
+（新引入字元、全站語料稀有字、簡繁混用 —— 見 `scratchpad/audit/charcheck.py`）。
+
 ### 🔴🔴 `SHOPIFY_ACCESS_TOKEN` 沒有 `read_all_orders`，跨月份訂單分析一律不能用它
 
 **超過 60 天的訂單查詢會靜默只回最近 60 天，不報錯、不警告。**
