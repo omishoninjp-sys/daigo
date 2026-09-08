@@ -157,6 +157,12 @@ BRAKE_SCAN_HOUR_UTC = _int_env("BRAKE_SCAN_HOUR_UTC", 2)   # 2 UTC = 台灣早�
 #   token 沒有 read_all_orders，設再多也只會靜默回 60 天。
 BRAKE_SCAN_DAYS = _int_env("BRAKE_SCAN_DAYS", 30)
 
+# 人工接手用的 LINE 官方帳號 ID（handoff.py 用它組深連結）
+# ★ 這個字串在 scrapers/base.py 的六則對客訊息裡也是寫死的 ——
+#   要改的話兩邊都要改。放進 config 是因為它現在同時被**訊息文字**
+#   與**可點的連結**用到，不再只是一句話裡的字。
+LINE_OA_ID = os.getenv("LINE_OA_ID", "@544kaytb").strip()
+
 
 # ★ 沒設定的變數彙總成一行 —— 逐條印會在每次啟動洗掉九行，
 #   但完全不印就沒辦法回答「線上現在到底用哪個值」。

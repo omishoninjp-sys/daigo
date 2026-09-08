@@ -285,6 +285,31 @@ def note_platform(platform_id: str) -> None:
         print(f"[ScrapeLog] note_platform 失敗（略過）: {type(e).__name__}: {e}")
 
 
+def current_state() -> dict | None:
+    """
+    這次爬取到目前為止收集到的狀態（**唯讀副本**），沒有就回 None。
+
+    用途：端點層要能分辨「爬不到」是哪一種爬不到。
+    2026-09-08 之前 `if not product.title` 一律回「無法從此連結抓取商品資訊」，
+    於是商品已經 404 下架的連結跟「網站擋我們」「解析壞了」長得一模一樣，
+    客人只好一直重貼 —— 實測 zozo.jp 的 /shop/ellnoloset/goods/110151716/
+    在 2026-09-04 六小時內被同一條路徑重試 **13 次**，13 次全是 HTTP 404。
+
+    ★ 回的是 copy，呼叫端改不到監控自己的狀態。
+    ★ 只在「這次真的有跑爬取」時有值：快取命中與 in-flight 共享不會呼叫
+      start()，那兩條路回 None，呼叫端要退回原本的通用訊息。
+      **這是刻意的** —— 拿別次爬取的狀態去解釋這一次，比沒有更糟。
+    """
+    try:
+        state = _ctx.get()
+        if not state:
+            return None
+        return dict(state)
+    except Exception as e:
+        print(f"[ScrapeLog] current_state 失敗（略過）: {type(e).__name__}: {e}")
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────
 # note_error 當下就把分類算好，不要事後拿字串去猜
 # ─────────────────────────────────────────────────────────────────────

@@ -31,6 +31,24 @@ from seo_title import generate_seo_title
 import scrape_monitor
 import scrape_digest
 import brake_log     # 重複下單煞車第一階段：只記錄，不擋任何東西
+from handoff import line_handoff_url
+
+
+# ★ 商品頁 404/410 —— 「客人再貼一百次也不會變」的那一種失敗。
+#   狀態從 scrape_monitor 的本次爬取狀態拿（同一個 coroutine 的 contextvar）。
+#   快取命中／in-flight 共享時 current_state() 回 None → 這裡回 False，
+#   退回原本的通用訊息。**不猜**：拿別次爬取的狀態解釋這一次比沒有更糟。
+_GONE_HTTP_STATUS = (404, 410)
+
+
+def _scrape_hit_not_found() -> bool:
+    try:
+        state = scrape_monitor.current_state()
+        if not state:
+            return False
+        return state.get("http_status") in _GONE_HTTP_STATUS
+    except Exception:
+        return False
 print(f"[Config] DAIGO_COLLECTION_ID = '{DAIGO_COLLECTION_ID}'")
 print(f"[Config] CACHE_TTL = {CACHE_TTL}s, MAX_CONCURRENT = {MAX_CONCURRENT_SCRAPES}, QUEUE_TIMEOUT = {SCRAPE_QUEUE_TIMEOUT}s")
 print(f"[Config] DAIGO_AUTO_DELETE_DAYS = {DAIGO_AUTO_DELETE_DAYS} 天")
@@ -402,9 +420,12 @@ class ScrapeResponse(BaseModel):
     # 🔴 上一版註解寫「線上 daigo.js 全檔沒有 blocked 這個字」——
     #    那在 2026-09-07 是對的，但 theme 之後更新過（19,659 → 20,802 bytes），
     #    現在四則硬擋訊息**確實會顯示給客人**。跨層事實會過期，日期要跟著寫。
-    # ⚠️ 後端目前**沒有**回 handoff_url 這個欄位，所以那條 LINE 連結永遠不會出現。
-    #    （2026-09-08 查 main.py 全檔：ScrapeResponse／CreateOrderResponse 都沒有它。）
     blocked: bool = False
+    # 人工接手深連結（handoff.line_handoff_url）。**每一條失敗路徑都會帶**。
+    # 2026-09-08 之前這個欄位不存在，所以前端那顆
+    # 「用 LINE 幫我處理這件商品 →」按鈕從來沒有出現過。
+    # 拿不到可用網址時是 None，前端 `if (handoffUrl)` 會跳過。
+    handoff_url: str | None = None
     # soft 品類的提醒。**不影響 success**，只是把判定結果帶出來給監控與後台看。
     # ⚠️ 線上 daigo.js 不讀這個欄位（同上實測），客人看不到 —— 不要當成對客訊息用。
     notice: str | None = None
@@ -430,6 +451,7 @@ class CreateOrderResponse(BaseModel):
     # 前端（daikoCreateOrder / daikoManualOrder）在 success=False 時會顯示 error，
     # 這正是我們要的行為，不需要動 theme。
     soft: bool = False
+    handoff_url: str | None = None   # 語意同 ScrapeResponse.handoff_url
 class SearchRequest(BaseModel):
     query: str
     source: str = "rakuten"
@@ -569,7 +591,12 @@ async def scrape_product(req: ScrapeRequest):
         # ★ 先檢查封鎖網站（在 scrape 之前，避免浪費 driver 資源）
         from scrapers.base import (detect_blocked, detect_invalid_link,
                                     detect_restricted_host, detect_restricted_category,
-                                    detect_sentinel_price)
+                                    detect_sentinel_price, MSG_PRODUCT_GONE)
+        # ★ 人工接手連結：**每一條失敗路徑都帶**，不是只有某幾種。
+        #   前端 showError(msg, handoff_url) 早就支援了，後端一直沒送
+        #   （2026-09-08 查 main.py 全檔：這個欄位以前不存在），
+        #   所以每一則「麻煩用 LINE 傳給我們」都沒有可以點的連結。
+        _ho = line_handoff_url(url)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站: {url[:80]}")
@@ -577,6 +604,7 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,
                 error=blocked_reason,
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         # ★ 非商品頁連結（圖片直連／搜尋結果／短網址／本站自己）擋在爬取之前，
@@ -592,6 +620,7 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,
                 error=invalid_reason,
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         # ★ 純網域硬擋：**一定要擺在爬取之前**。這些官方站爬不出 title
@@ -603,13 +632,35 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,
                 error=host_restricted[1],
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         product: ProductInfo = await scrape_with_queue(url)
         if not product.title:
+            # ★ 分辨「商品不存在」與「我們抓不到」。
+            #   404/410 是**客人重貼一百次也不會變**的那一種，通用訊息
+            #   「無法從此連結抓取商品資訊」把兩件事混成一句話，客人只能重試 ——
+            #   2026-09-04 實測一條 zozo.jp 連結被同一個人重試 13 次，13 次全 404。
+            #
+            # 🔴 這裡回 blocked=True 是**必要的**，不是順手加的：
+            #    前端（2026-09-08 抓線上 daigo.js 實測）只有 data.blocked 那條路
+            #    會走 showError(error, handoff_url)；blocked=false 一律
+            #    showManualForm()，error 根本不會顯示給客人看。
+            #    而 404 的商品**本來就不該讓客人手動補資料建單** ——
+            #    那正是「建了一件買不到的商品，最後取消」的來源。
+            if _scrape_hit_not_found():
+                print(f"[API] 🪦 商品頁 404/410: {url[:80]}")
+                return ScrapeResponse(
+                    success=False,
+                    blocked=True,
+                    error=MSG_PRODUCT_GONE,
+                    handoff_url=_ho,
+                    queue_info={"active": _active_count, "waiting": _queue_count},
+                )
             return ScrapeResponse(
                 success=False,
                 error="無法從此連結抓取商品資訊",
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         # ★ 品類攔截：要有 title 才判斷得出來，所以擺在 scrape 之後
@@ -621,6 +672,7 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,          # 前端已支援：顯示訊息、不切手動表單
                 error=restricted[1],
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         # ★ 哨兵價格：與 detect_restricted_category 並排的一道獨立檢查。
@@ -633,6 +685,7 @@ async def scrape_product(req: ScrapeRequest):
                 success=False,
                 blocked=True,
                 error=sentinel[1],
+                handoff_url=_ho,
                 queue_info={"active": _active_count, "waiting": _queue_count},
             )
         pricing = calculate_selling_price(product.price_jpy) if product.price_jpy else None
@@ -643,6 +696,9 @@ async def scrape_product(req: ScrapeRequest):
         return ScrapeResponse(
             success=True, product=product.to_dict(), pricing=pricing,
             notice=restricted[1] if restricted else None,
+            # soft 的商品客人不能自己結帳，只能詢問 —— 這裡就要給接手連結。
+            # 成功且非 soft 時是 None（客人不需要人工接手）。
+            handoff_url=_ho if (restricted and restricted[0] == "soft") else None,
             queue_info={"active": _active_count, "waiting": _queue_count},
         )
     except HTTPException:
@@ -656,11 +712,16 @@ async def scrape_product(req: ScrapeRequest):
             success=False,
             blocked=is_blocked,
             error=msg,
+            handoff_url=line_handoff_url(str(req.url).strip()),
             queue_info={"active": _active_count, "waiting": _queue_count},
         )
     except Exception as e:
+        # ★ 逾時走這條（scrape_with_queue 的 60 秒 TimeoutError 會被包成
+        #   HTTPException 或原樣上來）。這是「爬取失敗」那一類，一定要給接手連結：
+        #   客人此時手上只有一條貼不進來的網址，沒有別的辦法。
         print(f"[API] scrape error: {traceback.format_exc()}")
-        return ScrapeResponse(success=False, error=f"爬取失敗：{str(e) or type(e).__name__}")
+        return ScrapeResponse(success=False, error=f"爬取失敗：{str(e) or type(e).__name__}",
+                              handoff_url=line_handoff_url(str(req.url).strip()))
 @app.post("/api/create-order", response_model=CreateOrderResponse, dependencies=[Depends(verify_public_key)])
 async def create_order(req: CreateOrderRequest):
     try:
@@ -668,7 +729,8 @@ async def create_order(req: CreateOrderRequest):
         # ★ 先檢查封鎖網站
         from scrapers.base import (detect_blocked, detect_invalid_link,
                                     detect_restricted_host, detect_restricted_category,
-                                    detect_sentinel_price)
+                                    detect_sentinel_price, MSG_PRODUCT_GONE)
+        _ho = line_handoff_url(url)
         blocked_reason = detect_blocked(url)
         if blocked_reason:
             print(f"[API] 🚫 封鎖網站（建單嘗試）: {url[:80]}")
@@ -676,6 +738,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=blocked_reason,
+                handoff_url=_ho,
             )
         # ★ 非商品頁連結，同 /api/scrape（blocked=True 的理由也同）
         invalid_reason = detect_invalid_link(url)
@@ -685,6 +748,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=invalid_reason,
+                handoff_url=_ho,
             )
         # ★ 純網域硬擋，擺在爬取之前，理由同 /api/scrape
         host_restricted = detect_restricted_host(url)
@@ -694,6 +758,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=host_restricted[1],
+                handoff_url=_ho,
             )
         # 即時價格平台：強制重抓，不從 cache 拿（價格可能秒變）
         # 一般平台：先試 cache，沒有才爬
@@ -706,9 +771,16 @@ async def create_order(req: CreateOrderRequest):
                 print(f"[Cache] ❌ 未命中，重新爬取: {url[:60]}")
                 product = await scrape_with_queue(url)
         if not product.title:
-            return CreateOrderResponse(success=False, error="無法抓取商品資訊")
+            # 同 /api/scrape：404/410 給專屬訊息，其餘維持通用訊息。
+            if _scrape_hit_not_found():
+                print(f"[API] 🪦 商品頁 404/410（建單嘗試）: {url[:80]}")
+                return CreateOrderResponse(success=False, blocked=True,
+                                           error=MSG_PRODUCT_GONE, handoff_url=_ho)
+            return CreateOrderResponse(success=False, error="無法抓取商品資訊",
+                                       handoff_url=_ho)
         if not product.price_jpy:
-            return CreateOrderResponse(success=False, error="無法偵測到商品價格")
+            return CreateOrderResponse(success=False, error="無法偵測到商品價格",
+                                       handoff_url=_ho)
         # ★ 同上。這裡是最後一道 —— cache 命中時不會重跑 /api/scrape，
         #   所以不能只靠上面那道。
         restricted = detect_restricted_category(product.title, url)
@@ -718,6 +790,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=restricted[1],
+                handoff_url=_ho,
             )
         # ★ 哨兵價格，同 /api/scrape。cache 命中時不會重跑 scrape，
         #   所以這裡是最後一道，不能省。
@@ -729,6 +802,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False,
                 blocked=True,
                 error=sentinel[1],
+                handoff_url=_ho,
             )
         # ★ soft：商品照建，但不發布到線上商店。
         is_soft = bool(restricted and restricted[0] == "soft")
@@ -773,6 +847,7 @@ async def create_order(req: CreateOrderRequest):
                 success=False, soft=True,
                 product_id=result["product_id"], admin_url=result["admin_url"],
                 error=restricted[1],
+                handoff_url=_ho,
             )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
@@ -789,17 +864,20 @@ async def create_order(req: CreateOrderRequest):
             success=False,
             blocked=is_blocked,
             error=msg,
+            handoff_url=line_handoff_url(str(req.url).strip()),
         )
     except Exception as e:
         print(f"[API] create-order error: {traceback.format_exc()}")
-        return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
+        return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}",
+                                   handoff_url=line_handoff_url(str(req.url).strip()))
 @app.post("/api/create-manual", response_model=CreateOrderResponse, dependencies=[Depends(verify_public_key)])
 async def create_manual_order(req: ManualOrderRequest):
     try:
+        _ho = line_handoff_url((req.source_url or "").strip())
         if not req.title:
-            return CreateOrderResponse(success=False, error="請填寫商品名稱")
+            return CreateOrderResponse(success=False, error="請填寫商品名稱", handoff_url=_ho)
         if req.price_jpy <= 0:
-            return CreateOrderResponse(success=False, error="價格錯誤")
+            return CreateOrderResponse(success=False, error="價格錯誤", handoff_url=_ho)
         # ★ 客人填的是「日本原價」，售價一律由伺服器套用跟爬取那條同一套 pricing。
         #   以前是 create_daigo_product(price_jpy=req.price_jpy) —— 客人填多少就是
         #   最終售價，完全跳過 pricing.py。前端只有「超過 ¥100,000 顯示警告」而且
@@ -818,6 +896,7 @@ async def create_manual_order(req: ManualOrderRequest):
                     success=False,
                     blocked=True,
                     error=blocked_reason,
+                    handoff_url=_ho,
                 )
             # ★ 純網域硬擋。這條是手動路徑漏洞的主要補丁：
             #   標題是客人自己打的，打中文泛稱就繞得過關鍵字規則，但繞不過網域。
@@ -828,6 +907,7 @@ async def create_manual_order(req: ManualOrderRequest):
                     success=False,
                     blocked=True,
                     error=host_restricted[1],
+                    handoff_url=_ho,
                 )
         # ★ 手動表單的標題是客人自己打的，一樣要擋 ——
         #   否則爬取失敗的卡牌會從這條路溜進來。
@@ -841,6 +921,7 @@ async def create_manual_order(req: ManualOrderRequest):
                 success=False,
                 blocked=True,
                 error=restricted[1],
+                handoff_url=_ho,
             )
         # ★ 哨兵價格。這條路徑填價的是**客人**（爬取失敗時的手動表單），
         #   所以一樣要檢查 —— 客人把「999999」當佔位填進來的情況跟爬蟲抓錯一樣可能。
@@ -852,6 +933,7 @@ async def create_manual_order(req: ManualOrderRequest):
                 success=False,
                 blocked=True,
                 error=sentinel[1],
+                handoff_url=_ho,
             )
         is_soft = bool(restricted and restricted[0] == "soft")
         seo = await generate_seo_title(
@@ -892,6 +974,7 @@ async def create_manual_order(req: ManualOrderRequest):
                 success=False, soft=True,
                 product_id=result["product_id"], admin_url=result["admin_url"],
                 error=restricted[1],
+                handoff_url=_ho,
             )
         return CreateOrderResponse(
             success=True, product_id=result["product_id"],
@@ -899,7 +982,8 @@ async def create_manual_order(req: ManualOrderRequest):
         )
     except Exception as e:
         print(f"[API] create-manual error: {traceback.format_exc()}")
-        return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}")
+        return CreateOrderResponse(success=False, error=f"建立商品失敗：{str(e)}",
+                                   handoff_url=line_handoff_url((req.source_url or "").strip()))
 @app.post("/api/search", response_model=SearchResponse, dependencies=[Depends(verify_public_key)])
 async def search_products(req: SearchRequest):
     try:

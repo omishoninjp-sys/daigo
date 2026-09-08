@@ -107,12 +107,51 @@ BLOCKED_DOMAINS = {
 def detect_blocked(url: str) -> str | None:
     """
     若 URL 屬於封鎖清單，回傳原因說明字串；否則回傳 None。
+
+    🔴 2026-09-08：由 `if domain in host` 改成 `_host_matches`。
+       舊寫法與 CLAUDE.md「網域比對絕不可用 in」直接牴觸，只是還沒被踩到 ——
+       對 295 個真實網域回測**誤擋 0**，所以它一直看起來沒問題。
+       但機制上這幾個正常網域都會被誤擋（回測樣本裡剛好都沒有）：
+         amazon.com  → amazon.com.tw、amazon.com.au、amazon.com.br
+         hoka.com    → hoka.com.tw、hoka.com.au
+         buyee.jp    → xbuyee.jp、mybuyee.jp
+         buyma.com   → notbuyma.com、buyma.com.tw
+       這正是 `t.co` 誤擋 7 家商店的同一種病，只是換了一張清單。
+       **「目前沒有誤擋」不等於「這個寫法是對的」** —— 前者是語料的巧合，
+       後者才是機制。改完的回測見 tests/verify_invalid_link.py。
     """
     host = (urlparse(url).hostname or "").lower()
     for domain, reason in BLOCKED_DOMAINS.items():
-        if domain in host:
+        if _host_matches(host, domain):
             return reason
     return None
+
+
+# ── 商品頁 404／410：專屬訊息 ─────────────────────────────────
+#
+# 2026-09-08 實測（線上 scrape_log 近 12 天 1,039 筆）：
+#   404/410 共 32 筆 —— zozo.jp 26、store.shopping.yahoo.co.jp 2、
+#   style-mixer.smart-ec.io 2、suruga-ya.jp 2。
+#   最極端的一筆：zozo.jp /sp/shop/ellnoloset/goods/110151716/
+#   在 2026-09-04 的 10:18–16:17 之間被重試 **13 次**，13 次全是 404。
+#   同一件商品的 `/sp/` 與非 `/sp/` 兩種寫法都試過，都是 404
+#   （所以不是我們的網址正規化壞掉 —— `/sp/` 路徑同期有 32 筆成功）。
+#
+# 🔴 客人會重試 13 次，是因為他收到的訊息是「無法從此連結抓取商品資訊」——
+#    那句話**沒有告訴他發生什麼事，也沒有告訴他該怎麼辦**，
+#    於是唯一想得到的動作就是再貼一次。
+#
+# ⚠️ 這則刻意只認 HTTP 404/410，**不認 gone_hint**（頁面內容出現「販売終了」
+#    「sold out」那類字樣）。那組字在正常商品頁上也會出現（例如某個尺寸完售），
+#    範圍大很多而且沒有回測語料。要擴大前先拿資料，同 CLAUDE.md 的子字串教訓。
+MSG_PRODUCT_GONE = (
+    "這個商品頁在日本站上已經不存在了（回應 404），通常是商品下架、售完，"
+    "或賣家換了網址 —— 再貼一次同一條連結還是會一樣，"
+    "所以先不用重試。"
+    "如果你還想要這件商品，麻煩用 LINE @544kaytb 把連結傳給我們，"
+    "我們幫你找找看還有沒有別的地方買得到；"
+    "或者回到該商店重新搜尋商品名稱，取得新的網址再貼一次。"
+)
 
 
 # ============ 非商品頁連結攔截 ============
