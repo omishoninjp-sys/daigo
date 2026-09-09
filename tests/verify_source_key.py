@@ -299,6 +299,17 @@ def main():
     check("★ 但 Mercari 照樣算得出 key（第一階段要有資料才判斷得出來）",
           key("https://jp.mercari.com/item/m123") == "jp.mercari.com#m123")
 
+    # ── 2026-09-08 事故的實際網址：語系前綴不可以算成兩件商品 ──────────
+    # 客人在 Mercari 的寶可夢卡牌頁上被硬擋，六分鐘內重試五次：
+    # 前四次是 /zh-TW/item/m26961089339，第五次把 /zh-TW 拿掉再試一次
+    # （以為是網址格式的問題）。這兩種寫法**必須是同一個 key** ——
+    # 否則煞車會把同一件商品的重試算成兩件不同商品，
+    # 「同一個人反覆撞同一道牆」這個訊號就看不出來了。
+    _zh = key("https://jp.mercari.com/zh-TW/item/m26961089339")
+    _bare = key("https://jp.mercari.com/item/m26961089339")
+    check("★ 事故回歸：/zh-TW 與無語系前綴同 key",
+          _zh == _bare == "jp.mercari.com#m26961089339", f"{_zh} vs {_bare}")
+
     print("\n" + "=" * 74)
     print("I. 規則版本要跟著行為走")
     print("=" * 74)

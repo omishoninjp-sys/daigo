@@ -167,6 +167,90 @@ check("1kuji.com 仍然是純網域 hard", r is not None and r[0] == "hard", f"�
 r = _drh("https://jp.mercari.com/item/m123")
 check("Mercari 不在純網域硬擋表", r is None, f"實際回傳 {r}")
 
+# ── 3-4. 二手豁免適用於**每一條標題關鍵字規則**（2026-09-09）──
+#
+# 🔴 這一組釘的是 2026-09-07 的實際事故：豁免機制當天就寫好了，
+#    但只套在一番賞一條上。46 小時後客人在 Mercari 的寶可夢卡牌商品頁上
+#    收到「請改貼 Mercari 上的現貨連結」—— 叫他去 Mercari，然後擋掉 Mercari。
+#    jp.mercari.com/item/m26961089339（¥8,999），六分鐘內重試五次。
+#
+# ★ 三個方向都要驗，缺一個這組就沒有意義：
+#     二手網域 + 命中 → 放行（新行為）
+#     官方網域 + 命中 → 照擋（回歸；只驗第一項的話，把規則整條刪掉也會過）
+#     沒有網址     + 命中 → 照擋（判斷不出來就不放行，同一番賞）
+POKE_CARD = "ポケモンカードゲーム 拡張パック メガブレイブ BOX シュリンク付き"
+OP_CARD = "ONE PIECEカードゲーム 世界最強の男 BOX"
+CHUSEN_T = "【抽選販売】ポケモンセンターオリジナル ぬいぐるみ"
+CHUSEN_ONLY = "抽選販売 スニーカー 27cm"        # 不含卡牌字樣，單驗抽選那條
+SOFTWARN = "予約 フィギュア 2026年12月お届け予定"
+
+SECOND_EXEMPT_CASES = [
+    # (標題, 網址, 期望, 說明)
+    (POKE_CARD, "https://jp.mercari.com/item/m26961089339", None,
+     "寶可夢卡牌 @ Mercari（事故原案）"),
+    (POKE_CARD, "https://jp.mercari.com/zh-TW/item/m26961089339", None,
+     "寶可夢卡牌 @ Mercari /zh-TW 語系前綴（客人第 1–4 次試的形式）"),
+    (POKE_CARD, "https://www.suruga-ya.jp/product/detail/220304023", None,
+     "寶可夢卡牌 @ 駿河屋"),
+    (POKE_CARD, "https://paypayfleamarket.yahoo.co.jp/item/z1", None,
+     "寶可夢卡牌 @ PayPay フリマ"),
+    (OP_CARD, "https://jp.mercari.com/item/m1", None, "航海王卡牌 @ Mercari"),
+    (OP_CARD, "https://www.suruga-ya.jp/product/detail/1", None, "航海王卡牌 @ 駿河屋"),
+    (CHUSEN_T, "https://jp.mercari.com/item/m2", None, "抽選（卡牌）@ Mercari"),
+    (CHUSEN_ONLY, "https://jp.mercari.com/item/m3", None, "抽選（非卡牌）@ Mercari"),
+    (SOFTWARN, "https://jp.mercari.com/item/m4", None, "予約／お届け予定 @ Mercari"),
+
+    # 回歸：官方通路一件都不可以放掉
+    (POKE_CARD, "https://www.pokemoncenter-online.com/x", "hard",
+     "回歸：寶可夢卡牌 @ Pokémon Center 仍 hard"),
+    (POKE_CARD, "https://www.amazon.co.jp/dp/B0XXXX", "hard",
+     "回歸：寶可夢卡牌 @ Amazon 仍 hard"),
+    (POKE_CARD, "https://www.30th.pokemon-card.com/x", "hard",
+     "回歸：寶可夢卡牌 @ 30th 官方站仍 hard"),
+    (OP_CARD, "https://p-bandai.jp/item/x", "soft",
+     "回歸：航海王卡牌 @ P-Bandai 仍 soft"),
+    (CHUSEN_ONLY, "https://takaratomymall.jp/x", "hard",
+     "回歸：抽選 @ 官方商城仍 hard"),
+    (SOFTWARN, "https://www.rakuten.co.jp/x", "soft",
+     "回歸：予約 @ 一般通路仍 soft"),
+
+    # 回歸：沒有網址（手動建單）判斷不出來 → 照擋
+    (POKE_CARD, "", "hard", "無網址：寶可夢卡牌照 hard"),
+    (OP_CARD, "", "soft", "無網址：航海王卡牌照 soft"),
+    (CHUSEN_ONLY, "", "hard", "無網址：抽選照 hard"),
+    (SOFTWARN, "", "soft", "無網址：予約照 soft"),
+
+    # 子字串誤命中的反例：網域含 mercari / suruga 字樣但不是那些站
+    (POKE_CARD, "https://mercari-fan.example.jp/item/1", "hard",
+     "假 mercari 網域 → 不豁免"),
+    (POKE_CARD, "https://suruga-ya.jp.evil.example.com/x", "hard",
+     "假 suruga-ya 網域 → 不豁免"),
+]
+for t, u, want, why in SECOND_EXEMPT_CASES:
+    r = detect_restricted_category(t, u)
+    got = r[0] if r else None
+    check(f"二手豁免：{why}", got == want, f"期望 {want}，實際回傳 {r}")
+
+# ★ 語系前綴的兩種寫法必須得到**同一個結果，而且是放行** ——
+#   客人第五次就是把 /zh-TW 拿掉再試一次，以為是網址格式的問題。
+#
+# 🔴 只斷言 `_a == _b` 是**空的斷言**：豁免整條拿掉時兩邊同樣是 hard，仍然相等。
+#    2026-09-09 的缺陷注入抓到這一點 —— 注入「寶可夢那條拿掉豁免」時，
+#    這條照樣綠。所以一定要連值一起釘死。
+#    （CLAUDE.md：負向驗證全綠時先懷疑測試，fixture 要讓待驗的差異真的出現。）
+_a = detect_restricted_category(POKE_CARD, "https://jp.mercari.com/item/m26961089339")
+_b = detect_restricted_category(POKE_CARD, "https://jp.mercari.com/zh-TW/item/m26961089339")
+check("二手豁免：/zh-TW 與無語系前綴結果一致，且都放行",
+      _a is None and _b is None, f"{_a} vs {_b}")
+
+# ★ 網域類規則不受豁免影響（它們本來就碰不到二手網域，這裡釘住不要被順手改壞）
+r = detect_restricted_category("ベイブレードX BX-46 ランダムブースター",
+                               "https://takaratomymall.jp/x")
+check("網域規則：BEYBLADE 官方商城仍 hard", r is not None and r[0] == "hard", f"實際 {r}")
+r = detect_restricted_category("ぬいぐるみ 受注 ピカチュウ",
+                               "https://www.pokemoncenter-online.com/x")
+check("網域規則：Pokémon Center 受注仍 soft", r is not None and r[0] == "soft", f"實際 {r}")
+
 # ── 4. BEYBLADE 只擋官網 ──
 BEY_CASES = [
     ("ベイブレードX BX-35 スターター", "https://beyblade.takaratomy.co.jp/item/1", True,

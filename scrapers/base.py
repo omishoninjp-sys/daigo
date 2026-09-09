@@ -755,6 +755,30 @@ _SECONDHAND_HOSTS = (
 #    沒有專屬 scraper 抓得到那個欄位：實測 generic 取的是現在価格／開始時の価格，
 #    PING 那筆少 ¥9,000、EIZO 那筆少 ¥1,100（低估售價，客人不會來反映）。
 #    → 即決 scraper 寫好、能取到即決価格之後，再把這行加回來。
+
+
+def _is_secondhand(host: str) -> bool:
+    """這個網域上的商品是不是「賣家手上已經有的現貨」。
+
+    ★ 這是**所有標題關鍵字規則**的共同豁免條件，不是某一條的特例。
+      每一條標題規則的前提都是「官方通路搶不到／參加不了」：
+        一番賞 → 店頭限量抽選，線上取得不了
+        寶可夢卡牌／航海王卡牌 → 官方抽選／限量，開賣即完售
+        抽選販售 → 中籤才能買，我們無法代為參加
+        予約／受注生産 → 日本端還沒生產，交期由賣家決定
+      這些前提**在二手平台上一律不成立** —— 東西已經在賣家手上、固定價格、
+      貼連結就買得到。所以豁免的依據是同一句話，不是四句話。
+
+    🔴 2026-09-07 的教訓：這個豁免當天就寫好了、註解也寫明了理由，
+       但**只套在一番賞一條上**。46 小時後客人在 Mercari 的寶可夢卡牌頁上，
+       收到一則叫他「請改貼 Mercari 上的現貨連結」的錯誤訊息
+       （jp.mercari.com/item/m26961089339，六分鐘內重試五次，
+        第五次把 /zh-TW 拿掉再試，以為是網址格式的問題）。
+       **寫下一條規則的理由時要問「這個理由還適用於哪裡」。**
+    """
+    return bool(host) and any(_host_matches(host, d) for d in _SECONDHAND_HOSTS)
+
+
 _ICHIBAN = re.compile(r"一番くじ|一番賞|イチバンくじ", re.I)
 # ⚠️ 這則是**純網域硬擋**（1kuji.com）在用的，不是標題規則在用的。
 #    1kuji.com 整站 100% 一番賞、12 個月請到款 0 元，整域擋沒有營收損失。
@@ -802,6 +826,18 @@ _MSG_CHUSEN = (
     "這個商品頁是日本官方的「抽選販售」（抽籤制），中籤才能購買，"
     "我們無法代為參加抽選。若之後開放一般販售，再麻煩你重新貼連結。"
 )
+# ★ 二手豁免的依據分級（照 _SECONDHAND_HOSTS 的 (a)/(b) 分法）：
+#   一番賞、寶可夢卡牌、航海王卡牌 → (a) 有實例
+#       一番賞：2026-09 全站回測 32 筆硬擋裡 3 筆是二手平台連結
+#       寶可夢卡牌：2026-09-08 jp.mercari.com/item/m26961089339（¥8,999）
+#                   實際被擋，客人重試 5 次
+#   抽選販售 → (b) **零成交佐證**。2026-09-09 查證：366 件二手網域商品裡，
+#       用寬鬆關鍵字（抽選／当選／中籤／応募／抽獎）搜出 0 件；
+#       12 個月訂單裡命中 _CHUSEN 的只出現在 remu2024.official.ec 與
+#       pokemoncenter-online.com，都是官方站。
+#       仍然加豁免的理由是**代價不對稱**：誤擋的成本看不見（客人默默離開，
+#       不會來反映），誤放的成本是多一次人工確認。不對稱就往放行倒。
+#       ⚠️ 這條沒有資料背書，日後要收緊的話從這條開始。
 
 # ── 軟擋網域：整站不硬擋，但不開放自助結帳 ─────────────────────
 #
@@ -984,14 +1020,20 @@ def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | N
     ★ 判斷順序：**hard 全部先跑完，才輪到 soft**（2026-09-08 起）。
       同一個標題可能同時命中兩層（例：一番賞 + 抽選販売），
       hard 在前才不會被先命中的 soft 蓋掉。
+
+    ★ 二手豁免：**每一條標題關鍵字規則都豁免**（2026-09-09 起，見 _is_secondhand）。
+      網域類規則（BEYBLADE 兩條、_SOFT_HOSTS、Pokémon Center 受注）不需要豁免 ——
+      二手網域本來就不會命中官方網域，加了也是死碼。
+      🔴 網址是空的（手動建單沒填來源）時**不豁免** —— 判斷不出來就照擋。
     """
     if not title:
         return None
     haystack = f"{title} {url or ''}"
     host = _restricted_host(url)
+    secondhand = _is_secondhand(host)
 
     # ───────── hard：整件不接 ─────────
-    if _is_pokemon_card(haystack):
+    if _is_pokemon_card(haystack) and not secondhand:
         return ("hard", _MSG_POKEMON_CARD)
 
     # 純網域：官方專門站整域擋，takaratomy.co.jp 其餘商品不受影響
@@ -1003,16 +1045,14 @@ def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | N
             and _BEYBLADE_MODEL.search(haystack)):
         return ("hard", _MSG_BEYBLADE)
 
-    if _CHUSEN.search(haystack):
+    if _CHUSEN.search(haystack) and not secondhand:
         return ("hard", _MSG_CHUSEN)
 
     # ───────── soft：商品頁照建，但不上架 ─────────
-    # 一番賞：二手平台上的是現貨，買得到 → 完全豁免（連 soft 都不掛）
-    if _ICHIBAN.search(haystack):
-        if not any(_host_matches(host, d) for d in _SECONDHAND_HOSTS):
-            return ("soft", _MSG_ICHIBAN_SOFT)
+    if _ICHIBAN.search(haystack) and not secondhand:
+        return ("soft", _MSG_ICHIBAN_SOFT)
 
-    if _ONEPIECE_CARD.search(haystack):
+    if _ONEPIECE_CARD.search(haystack) and not secondhand:
         return ("soft", _MSG_ONEPIECE)
 
     for domain, msg in _SOFT_HOSTS:
@@ -1023,9 +1063,10 @@ def detect_restricted_category(title: str, url: str = "") -> tuple[str, str] | N
             and _JUCHU_BARE.search(haystack)):
         return ("soft", _MSG_POKECEN_JUCHU)
 
-    for pattern, reason in _SOFT_WARNING:
-        if pattern.search(haystack):
-            return ("soft", reason)
+    if not secondhand:
+        for pattern, reason in _SOFT_WARNING:
+            if pattern.search(haystack):
+                return ("soft", reason)
     return None
 
 
