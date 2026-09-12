@@ -82,15 +82,16 @@ def _note_price_candidates(picked: dict, cand_vals: dict = None) -> None:
         pass
 
 
-def _note_page_settled(size):
-    """回報「瀏覽器把頁面載完了，多大」。**只有事實，沒有判斷。**
-    要不要因此判定『兩條路都不通』由 scrape_monitor 決定 ——
-    那需要 httpx 的狀態碼，而狀態碼是監控自己記的，爬取這邊不需要知道。"""
+def _note_page_settled(size) -> bool:
+    """回報「瀏覽器把頁面載完了，多大」，拿回「是不是兩條路都不通」。
+    **這邊只有事實，判斷在 scrape_monitor** —— 那需要 httpx 的狀態碼，
+    而狀態碼是監控自己記的，爬取這邊從頭到尾不碰它。
+    監控爆掉 → False → 頁面照舊往下傳（退回 2026-09-12 之前的行為）。"""
     try:
         import scrape_monitor
-        scrape_monitor.note_page_settled(size)
+        return bool(scrape_monitor.note_page_settled(size))
     except Exception:
-        pass
+        return False
 
 
 def _note_source(name):
@@ -220,7 +221,15 @@ class GenericMixin:
                         #   ★ 不用字串比對判斷擋頁 —— 見 _has_block_markers 的說明。
                         #     這裡只看「還在不在變」，慢慢渲染的真頁面長度每次都不同，行為不變。
                         if len(html) == prev_len:
-                            self._note_selenium_settled(html)
+                            if self._note_selenium_settled(html):
+                                # ★ 2026-09-12：兩條路都不通 → 丟掉擋頁，回空字串。
+                                #   不丟的話 og/generic 解析會把擋頁的 <title>
+                                #   （dior fashion 是 "Page unavailable"）當成商品標題，
+                                #   /api/scrape 回 success=true、前端進預覽頁、還進快取。
+                                #   空字串走的是既有失敗路徑：無 title → 前端手動表單。
+                                print(f"[Generic] 🚫 軟性擋頁（httpx 被擋 + 瀏覽器只載到 "
+                                      f"{len(html)} bytes），放棄這頁: {url[:60]}")
+                                return ""
                             return html
                         prev_len = len(html)
                     return html
@@ -234,13 +243,15 @@ class GenericMixin:
         return ""
 
     @staticmethod
-    def _note_selenium_settled(html: str) -> None:
+    def _note_selenium_settled(html: str) -> bool:
         """
         頁面載完但小於 5000 —— 回報**事實**給監控，判斷不在這裡做。
+        回傳「是不是兩條路都不通」（True = 呼叫端要丟掉這頁）。
 
         ★ 大小交給 scrape_monitor.note_page_settled()：「是不是兩條路都不通」
           要配合 httpx 的狀態碼才判斷得出來，而那個狀態碼是監控自己記的。
-          爬取路徑不需要知道監控的存在，判斷就留在監控那邊。
+          爬取路徑只拿回傳值，判斷仍然只在監控那一處（不另立第二個判斷點）。
+          監控爆掉 → False → 頁面照舊往下傳。
 
         ★ challenge 特徵仍然回報，但**訊息只講它真正驗證到的事**。
           原本這裡寫「Selenium 也被擋」是誇大的 —— 它只驗證了「有沒有
@@ -249,10 +260,11 @@ class GenericMixin:
           但同一個網址在住宅 IP 拿得到完整商品頁 —— **確實被擋，只是不自報**。
           訊息與證據不符的話，看 log 的人會做出錯的採購決定。
         """
+        both_blocked = False
         try:
-            _note_page_settled(len(html or ""))
+            both_blocked = _note_page_settled(len(html or ""))
         except Exception:
-            pass          # 訊號壞掉不可以影響抓取結果
+            both_blocked = False      # 訊號壞掉 → 退回舊行為，不可以讓抓取多失敗
         try:
             if _has_block_markers(html):
                 print("[Generic] ⚠️ Selenium 取得的頁面命中 challenge 特徵")
@@ -261,6 +273,7 @@ class GenericMixin:
                             "Selenium")
         except Exception:
             pass
+        return both_blocked
 
     # ============================================================
     # Extractors（通用解析器）

@@ -244,7 +244,9 @@ def test_both_paths_blocked():
           "兩條路都不通" in s, s[:90])
     check("訊息帶得出狀態碼與實際大小",
           "403" in s and "KB" in s, s[:90])
-    check("★ 訊息直接回答「要不要買住宅代理」", "住宅代理" in s, s[:90])
+    # 2026-09-12 改：代理已否決，訊息改講「自動抓取做不到、走手動表單」
+    check("★ 訊息直接講處置（走手動表單），不再問要不要買代理",
+          "手動表單" in s and "才抓得到" not in s, s[:120])
 
     # ② 瀏覽器過得去 → 不判定（買了代理也沒有多賺）
     s = _signal(403, 20000)
@@ -341,6 +343,72 @@ def test_settled_failsafe():
         g._note_page_settled = orig
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 「兩條路都不通」從訊號升格為判斷（2026-09-12）
+# ═══════════════════════════════════════════════════════════════════
+def _fetch_with_status(status, pages, url="https://www.dior.com/ja_jp/fashion/products/X"):
+    """httpx 記狀態碼 → Selenium 輪詢 → 回 (html, reads)。status=None 表示沒拿到回應。"""
+    sm.start(url)
+    if status is not None:
+        sm.note_http(status)
+    html, drv, reads = fetch(pages, url)
+    return html, reads
+
+
+def test_soft_block_returns_empty():
+    print()
+    print("【12】★ 軟性擋頁：httpx 401/403 + 瀏覽器穩定 <5KB → 回空字串，不把擋頁當內容往下傳")
+    # 2026-09-12 正式站實測 dior fashion：httpx 403、Selenium 穩定 0.9KB 的
+    # "Page unavailable"，<title> 被 og/generic 解析抽成商品標題，
+    # /api/scrape 回 success=true, title="Page unavailable"，還被快取 30 分鐘。
+    soft = page(3000, "Page unavailable")
+    html, reads = _fetch_with_status(403, [soft] * 6)
+    check("★ 403 + 穩定 3KB → 回空字串", html == "", f"{len(html)} 字元")
+    check("仍然第 2 次就跳出（不多花時間）", reads == 2, f"{reads} 次")
+    html, reads = _fetch_with_status(401, [soft] * 6)
+    check("401 同樣回空字串", html == "", f"{len(html)} 字元")
+
+    # 邊界全部沿用 note_page_settled 既有判準，不另立門檻
+    html, reads = _fetch_with_status(200, [soft] * 6)
+    check("★ 200 + 穩定 3KB → 照回 html（頁面小只是頁面小）", html == soft)
+    html, reads = _fetch_with_status(403, [page(5000)] * 6)
+    check("★ 403 + 穩定剛好 5000B → 照回 html（不算小）", len(html) == 5000, f"{len(html)}")
+    html, reads = _fetch_with_status(403, [page(n) for n in (1000, 2000, 3000, 4000, 4500, 4800)])
+    check("★ 403 + 六圈都在變 → 照回最後的 html（不穩定就不判）", len(html) == 4800,
+          f"{len(html)} / {reads} 次")
+    html, reads = _fetch_with_status(429, [soft] * 6)
+    check("429 + 穩定 3KB → 照回 html（節流不是擋，沿用代理那份清單）", html == soft)
+    html, reads = _fetch_with_status(None, [soft] * 6)
+    check("沒有 httpx 狀態碼 → 照回 html（資訊不足不判）", html == soft)
+    html, reads = _fetch_with_status(403, [page(3000, "商品名 ¥1,980"), page(20000)])
+    check("403 但瀏覽器最後拿到 20KB → 照回（Selenium 過得去）", len(html) == 20000)
+
+    # ★ 回傳值契約：判斷仍然只在 scrape_monitor 一處，generic 只用回傳值
+    sm.start("https://www.dior.com/x"); sm.note_http(403)
+    check("★ note_page_settled 命中回 True", sm.note_page_settled(3000) is True)
+    check("note_page_settled 未命中回 False", sm.note_page_settled(20000) is False)
+    sm._ctx.set(None)
+    check("★ 沒有 ctx 回 False（不是 None）", sm.note_page_settled(3000) is False)
+    check("size 不是數字回 False", sm.note_page_settled("x") is False)
+
+    # ★ fail-safe 方向：監控爆掉 → 退回今天的行為（擋頁往下傳），不會讓抓取多失敗
+    import scrapers.generic as g
+    orig = sm.note_page_settled
+    sm.note_page_settled = lambda n: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        html, reads = _fetch_with_status(403, [soft] * 6)
+        check("★ note_page_settled 爆掉 → 照回 html（退回舊行為，不是多失敗）", html == soft)
+        check("generic 的包裝回 False 不是 raise", g._note_page_settled(3000) is False)
+    finally:
+        sm.note_page_settled = orig
+
+    # 訊息要準：它只知道「自動抓取兩條路都不通」，不知道人買不買得到
+    s = _signal(403, 3000, "Page unavailable")
+    check("★ 訊息講「自動抓取」做不到，不宣稱這家店買不到",
+          "自動抓取" in s and "買不到" not in s and "做不到" not in s.replace("自動抓取做不到", ""), s[:120])
+    check("★ 訊息不再建議買住宅代理（已否決）", "才抓得到" not in s and "已否決" in s, s[:120])
+
+
 def main_():
     print("=" * 74)
     print("Selenium 輪詢：頁面大小穩定就停")
@@ -356,6 +424,7 @@ def main_():
     test_signal_layering()
     test_module_boundary()
     test_settled_failsafe()
+    test_soft_block_returns_empty()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

@@ -28,7 +28,8 @@ Source 端（選填，能提供就提供，classification 會更準）：
     scrape_monitor.note_http(resp.status_code, resp.text)
     scrape_monitor.note_source("YahooStoreHttpxSource")
     scrape_monitor.note_gone()        # 確定查無／下架（API 回 200 空清單也算）
-    scrape_monitor.note_page_settled(len(html))   # 瀏覽器把頁面載完了，多大
+    if scrape_monitor.note_page_settled(len(html)):   # 瀏覽器把頁面載完了，多大
+        html = ""                                     # True = 兩條路都不通，丟掉擋頁
 """
 import os
 import re
@@ -173,20 +174,24 @@ def note_gone() -> None:
 # A「這次失敗是被擋造成的嗎」→ failure_kind 用這份
 _BLOCKED_HTTP_STATUS = (401, 403, 429)
 
-# B「要不要買住宅代理」→ note_page_settled 用這份
-#   ★ 429 刻意不在裡面：那是節流，重試就會過，買代理沒有用。
+# B「兩條路都不通（自動抓取做不到）」→ note_page_settled 用這份
+#   ★ 429 刻意不在裡面：那是節流，重試就會過，不是擋。
 #     這份必須是 A 的子集 —— 測試有釘。
+#   （這份原本的問題是「要不要買住宅代理」；代理 2026 已否決，
+#     2026-09-12 起這個判斷改成控制流，見 note_page_settled。名字沿用。）
 _PROXY_NEEDED_HTTP_STATUS = (401, 403)
 _SETTLED_SMALL_BYTES = 5000
 
 
-def note_page_settled(size) -> None:
+def note_page_settled(size) -> bool:
     """
     瀏覽器那條路把頁面載完了，內容有多大。**呼叫端只回報事實，判斷在這裡做。**
+    回傳「是不是兩條路都不通」—— 命中 True，其餘一律 False。
 
     ★ 為什麼判斷放這裡：爬取路徑（scrapers/generic.py）不需要知道 httpx
       拿到什麼狀態碼 —— 那是監控自己用 note_http 記下來的。兩個訊號在這裡
-      合流，爬取那邊仍然不知道監控的存在，監控壞掉也影響不到抓取。
+      合流，爬取那邊只拿回傳值，從頭到尾不碰狀態碼、不讀監控狀態
+      （tests/verify_selenium_poll.py【10】釘著）。
 
     🔴 判準是**結構**不是字串（2026-09-03）：
       httpx 拿 401/403 **且** 瀏覽器載完仍不到 5KB → 兩條路都不通。
@@ -198,29 +203,46 @@ def note_page_settled(size) -> None:
       所以不能靠特徵字：枚舉軟性擋頁的說法救得了 dior，救不了下一家。
       （同一個病早上才踩過：generic 取價用 min() 挑候選，換一家就崩。）
 
-    ★ 這是訊號不是控制流：failure_kind 本來就會因為 403 判成 blocked，
-      這裡只是把「值不值得買住宅代理」這個問題回答清楚 ——
-      httpx 被擋但瀏覽器過得去的網域，買了代理也沒有多賺。
+    ★ 2026-09-12 起這個判斷**也是控制流**：generic 拿到 True 就把 Selenium
+      的結果丟掉、回空字串，不再把擋頁當內容往下解析。
+      起因：dior fashion 的 0.9KB 擋頁 <title> 是 "Page unavailable"，
+      og/generic 解析把它抽成商品標題，/api/scrape 回 success=true、
+      前端進預覽頁、還被快取 30 分鐘（main.py 有 title 就寫快取）。
+      影響範圍（2026-09-12 拉近 30 天 1,350 筆核對）：命中這個判準的 15 筆
+      + 當天 dior 那筆全部 ok=False —— 沒有任何一筆「判定不通但仍抓出真商品」，
+      所以升格成控制流零誤殺。
+      fail-safe 方向：這支爆掉／沒 ctx／size 不是數字 → False → generic 照舊
+      把頁面往下傳 = **退回 2026-09-12 之前的行為**，不會讓抓取多失敗。
+
+    ★ 訊息只講它知道的事：「自動抓取兩條路都不通」。它**不知道**這家店
+      人買不買得到 —— abc-mart / loft / gunze 都命中過，那些店人去買是通的，
+      客人走手動表單、人工代買就好。永遠不通的（dior fashion）要在爬取之前
+      用 detect_restricted_* 明擋、給客人明確訊息，不該靠這裡
+      （2026-09-12 這條改動時**還沒加**，另案處理）。
+      住宅代理 2026 實測太慢已否決（config.PROXY_URL 的說明），訊息不再建議買。
     """
     try:
         state = _ctx.get()
         if state is None:
-            return
+            return False
         try:
             n = int(size)
         except (TypeError, ValueError):
-            return
+            return False
         if n >= _SETTLED_SMALL_BYTES:
-            return                      # 瀏覽器拿得到內容 → 不是兩邊都不通
+            return False                # 瀏覽器拿得到內容 → 不是兩邊都不通
         status = state.get("http_status")
         if status not in _PROXY_NEEDED_HTTP_STATUS:
-            return                      # 沒有被擋的狀態碼 → 頁面小只是頁面小
+            return False                # 沒有被擋的狀態碼 → 頁面小只是頁面小
         note_error(f"兩條路都不通：httpx HTTP {status}，瀏覽器載完仍只有 "
-                   f"{n / 1024:.1f}KB —— 這個網域要住宅代理才抓得到", "Blocked")
+                   f"{n / 1024:.1f}KB —— 自動抓取做不到（住宅代理已否決），"
+                   f"這筆走手動表單", "Blocked")
         print(f"[ScrapeLog] 🔴 兩條路都不通（httpx {status} + 瀏覽器 {n} bytes）"
-              f"—— 這個網域需要住宅代理")
+              f"—— 自動抓取做不到，改走手動表單")
+        return True
     except Exception as e:
         print(f"[ScrapeLog] note_page_settled 失敗（略過）: {type(e).__name__}: {e}")
+        return False
 
 
 def note_price_candidates(picked: dict, cand_vals: dict = None) -> None:

@@ -322,7 +322,15 @@ Runtime Logs 確認有 `[Cleanup] 完成：掃描 N 件，刪除 N 件…` 那�
 **「售價 == 原價 + fee(原價)」只證明沒人改過，不證明原價是對的**，不可當正確性判準；
 真正的錯價要靠重跑爬取比對。
 
-**ZOZOTOWN 在 Zeabur 機房 IP 會被 Akamai 擋。** 需要住宅代理或辦公室 IP。
+**住宅代理已否決，`PROXY_URL` 留空是「已否決」不是「還沒填」。**
+實測過爬取速度慢到不可接受（`config.py` 的說明）。所以「這個網站要代理才抓得到」
+不是待辦，是**做不到**：httpx 401/403 + Selenium 載完仍 <5KB 的網站
+（2026-09-12 近 30 天實測：dior fashion／cos／gunze／chanel／loft／abc-mart／fighters）
+一律走客人手動表單、人工代買；永遠不通的才用 `detect_restricted_*` 明擋。
+
+**ZOZOTOWN 已不受 Akamai 影響**：`platform_zozotown.py` 先走 Yahoo 官方店 SSR
+（2026-09-12 拉近 30 天：139 筆、105 筆成功全走 `ZozoYahooSource`），
+機房 IP 被擋是舊版直爬 zozo.jp 的事。
 
 **`/api/scrape` 有快取。** 測試一定要用沒抓過的新連結，或先刪掉舊商品。
 
