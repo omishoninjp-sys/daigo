@@ -280,8 +280,26 @@ class GenericMixin:
     # ============================================================
     def _extract_json_ld(self, soup, product: ProductInfo):
         for script in soup.find_all("script", type="application/ld+json"):
+            raw = script.string or ""
             try:
-                data = json.loads(script.string or "")
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                # ★ 解析失敗也要留痕：不然「頁面沒有 ProductGroup」與「有但壞掉」
+                #   在紀錄裡長得一樣，線上診斷會指錯方向。
+                if '"ProductGroup"' in raw:
+                    _note_error(f"JSON-LD 含 ProductGroup 但解析失敗（{len(raw)} bytes）: {e}",
+                                "generic:jsonld")
+                continue
+            try:
+                # ★ ProductGroup（schema.org 的多變體商品）先攔：hasVariant 裡每個變體
+                #   各自帶 color/size、offers.price、availability、image。
+                #   2026-09-12 之前這一型整段被 `continue` 跳過，dior beauty 的 30 個
+                #   色號因此 variants=0，價格退回 DOM 規則對整頁候選取 min ——
+                #   碰巧對（本品剛好是頁面上最便宜的），換一件就會取到推薦商品的價。
+                group = self._find_product_group(data)
+                if group is not None:
+                    self._apply_product_group(group, product)
+                    continue
                 if isinstance(data, list):
                     data = next((d for d in data if d.get("@type") in ("Product", "IndividualProduct")), data[0] if data else {})
                 if data.get("@type") not in ("Product", "IndividualProduct"):
@@ -314,6 +332,159 @@ class GenericMixin:
                             product.price_jpy = p
             except (json.JSONDecodeError, StopIteration):
                 continue
+
+    # ============================================================
+    # JSON-LD ProductGroup（多變體）
+    # ============================================================
+    @staticmethod
+    def _find_product_group(data):
+        """在一段 JSON-LD 裡找 @type=ProductGroup 的節點（頂層／list／@graph）。"""
+        pool = data if isinstance(data, list) else [data]
+        for node in pool:
+            if not isinstance(node, dict):
+                continue
+            t = node.get("@type")
+            types = t if isinstance(t, list) else [t]
+            if "ProductGroup" in types:
+                return node
+            graph = node.get("@graph")
+            if isinstance(graph, list):
+                for g in graph:
+                    if isinstance(g, dict):
+                        gt = g.get("@type")
+                        if "ProductGroup" in (gt if isinstance(gt, list) else [gt]):
+                            return g
+        return None
+
+    @staticmethod
+    def _same_page(a: str, b: str) -> bool:
+        """兩條網址是不是同一頁：只比 host + path（unquote、去尾斜線），忽略 query／fragment。"""
+        from urllib.parse import unquote
+        try:
+            pa, pb = urlparse(a or ""), urlparse(b or "")
+            if not pa.hostname or not pb.hostname:
+                return False
+            return (pa.hostname.lower() == pb.hostname.lower()
+                    and unquote(pa.path).rstrip("/") == unquote(pb.path).rstrip("/"))
+        except Exception:
+            return False
+
+    def _apply_product_group(self, group: dict, product: ProductInfo) -> bool:
+        """
+        ProductGroup.hasVariant → product.variants，並依規則決定主商品價。
+
+        🔴 主商品價的規則（2026-09-12 定，tests/verify_jsonld_productgroup.py 釘死）：
+          1. 客人貼的網址正好是某個變體的 offers.url → 那個變體的價（即使它缺貨）
+          2. 否則 → **文件順序第一個有貨**的變體的價
+          3. 全部缺貨 → **文件順序第一個**變體的價，整件 in_stock=False
+             ★ 不取最低：Dior 的 hasVariant[0] 就是頁面預設選中的那個
+               （リップ マキシマイザー 預設 064＝hasVariant[0]；ミス ディオール
+               頁面標價 ¥12,430＝hasVariant[0] 的 30mL），取第一個＝客人看到的價。
+               取最低會把 50mL 標成 30mL 的價 —— 少收，沒人會來反映。
+
+        🔴 缺價的變體**直接排除**，不繼承主商品價。shopify_client 對 price 0 的變體
+          會退回主商品售價（第 306 行）——那正是 _muji_apply_variants 的缺陷，
+          所以要在這裡就擋掉；被排除的數量記進 warnings。
+        沒有 color／size 的變體：name 與群組名不同就拿 name 當選項，否則排除
+        （沒有選項值的變體到 Shopify 那邊也會被略過，見 shopify_client 第 290 行）。
+        availability 口徑對齊 scrapers/jsonld.py：非 InStock 視為缺貨，沒寫視為有貨。
+
+        全部變體都不能用（hasVariant 空、或每筆都缺價／缺選項）→ 回 False、
+        **一個欄位都不動**，讓 og／DOM 照今天的方式接手。
+        """
+        raw = group.get("hasVariant")
+        group_name = str(group.get("name") or "").strip()
+        if not isinstance(raw, list) or not raw:
+            _note_error(f"JSON-LD ProductGroup『{group_name[:30]}』hasVariant 為空，退回一般解析",
+                        "generic:jsonld")
+            print(f"[Generic] ⚠️ ProductGroup hasVariant 為空: {group_name[:40]}")
+            return False
+
+        usable, urls = [], []
+        dropped_price = dropped_option = 0
+        for node in raw:
+            if not isinstance(node, dict):
+                continue
+            offers = node.get("offers")
+            if isinstance(offers, list):
+                offers = next((o for o in offers if isinstance(o, dict)), {})
+            if not isinstance(offers, dict):
+                offers = {}
+            price = normalize_price(offers.get("price") or offers.get("lowPrice"))
+            if not price_in_range(price):
+                dropped_price += 1
+                continue
+            color = str(node.get("color") or "").strip()
+            size = str(node.get("size") or "").strip()
+            if not color and not size:
+                nm = str(node.get("name") or "").strip()
+                if nm and nm != group_name:
+                    color = nm
+            if not color and not size:
+                dropped_option += 1
+                continue
+            avail = str(offers.get("availability") or "")
+            in_stock = avail.lower().endswith("instock") if avail else True
+            img = node.get("image")
+            if isinstance(img, list):
+                img = img[0] if img else ""
+            if isinstance(img, dict):
+                img = img.get("url") or img.get("contentUrl") or ""
+            usable.append({
+                "color": color, "size": size, "price": price,
+                "sku": str(node.get("sku") or "").strip(),
+                "in_stock": in_stock, "image": str(img or "").strip(),
+            })
+            urls.append(str(offers.get("url") or node.get("url") or ""))
+
+        if not usable:
+            _note_error(f"JSON-LD ProductGroup『{group_name[:30]}』{len(raw)} 個變體全部不能用"
+                        f"（缺價 {dropped_price}／缺選項 {dropped_option}），退回一般解析",
+                        "generic:jsonld")
+            print(f"[Generic] ⚠️ ProductGroup 變體全部不能用: {group_name[:40]}")
+            return False
+
+        # 主商品價：規則見 docstring
+        chosen, rule = None, ""
+        for v, u in zip(usable, urls):
+            if u and self._same_page(u, product.source_url):
+                chosen, rule = v, "網址指定"
+                break
+        if chosen is None:
+            chosen = next((v for v in usable if v["in_stock"]), None)
+            rule = "第一個有貨"
+        if chosen is None:
+            chosen, rule = usable[0], "全缺貨→第一個"
+
+        product.variants = usable
+        product.in_stock = any(v["in_stock"] for v in usable)
+        if not product.title and group_name:
+            product.title = group_name
+        if not product.image_url:
+            product.image_url = chosen["image"] or ""
+            if not product.image_url:
+                gimg = group.get("image")
+                product.image_url = gimg[0] if isinstance(gimg, list) and gimg else (gimg or "") if isinstance(gimg, str) else ""
+        if not product.brand and group.get("brand"):
+            b = group["brand"]
+            product.brand = b.get("name", "") if isinstance(b, dict) else str(b)
+        if not product.description:
+            product.description = (group.get("description") or "")[:500]
+        if not product.price_jpy:
+            product.price_jpy = chosen["price"]
+
+        n_in = sum(1 for v in usable if v["in_stock"])
+        brief = (f"JSON-LD ProductGroup: {len(usable)} 變體（有貨 {n_in}"
+                 f"{f'／缺價排除 {dropped_price}' if dropped_price else ''}"
+                 f"{f'／缺選項排除 {dropped_option}' if dropped_option else ''}），"
+                 f"主價 ¥{chosen['price']:,} 取{rule}"
+                 f"（{chosen['sku'] or chosen['color'] or chosen['size']}）")
+        print(f"[Generic] ✅ {brief}")
+        # ★ 走 note_error：ok=True 時會落在紀錄的 warnings 欄位，
+        #   線上就看得到「Selenium 拿回的 HTML 裡有沒有 ProductGroup」——
+        #   這不是錯誤，是刻意留的證據（2026-09-12 部署驗證要用）。
+        _note_error(brief, "generic:jsonld")
+        return True
 
     def _extract_og_tags(self, soup, product: ProductInfo):
         og = {}
