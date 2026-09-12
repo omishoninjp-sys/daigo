@@ -130,7 +130,27 @@ def make_variants(n, with_image, colors=3):
     return out
 
 
-async def run_case(name, expect_ok=True, expect_linked=None, **kw):
+def dior_shades(declared):
+    """
+    リップ マキシマイザー 30 個真實色號（2026-09-12 抓自 dior.com ProductGroup）。
+    8 個是純數字（"1","3","4","5","6","7","10","12"），會命中 _vals_look_like_size 的
+    `^\\s*\\d{1,3}\\s*$`；顏色詞只命中 4 個 → 多數決把「カラー」貼成「サイズ」。
+    declared=True 模擬 generic 從 variesBy 帶上來的標記。
+    """
+    import os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from verify_jsonld_productgroup import LIPMAX_ROWS
+    out = []
+    for sku, color, avail in LIPMAX_ROWS:
+        v = {"color": color, "size": "", "sku": sku, "price": 4840,
+             "in_stock": avail == "InStock", "image": f"https://img.example/{sku}.jpg"}
+        if declared:
+            v["axis_declared"] = True
+        out.append(v)
+    return out
+
+
+async def run_case(name, expect_ok=True, expect_linked=None, expect_option_names=None, **kw):
     sc._variant_limit_cache.update({"value": None, "fetched": False})
     client = FakeShopify(n_created=kw.pop("n_created", None),
                          user_errors=kw.pop("user_errors", None),
@@ -187,6 +207,15 @@ async def run_case(name, expect_ok=True, expect_linked=None, **kw):
     if expect_linked is not None and linked != expect_linked:
         print(f"  ❌ FAIL：預期顏色連動涵蓋 {expect_linked} 個變體，實際 {linked} 個")
         return False
+
+    # ★ 選項名：客人在商品頁看到的是「カラー」還是「サイズ」，錯了會以為色號是容量
+    if expect_option_names is not None:
+        names = [o.get("name") for s in sets
+                 for o in (s.get("input", {}).get("productOptions") or [])]
+        if names != expect_option_names:
+            print(f"  ❌ FAIL：選項名預期 {expect_option_names}，實際 {names}")
+            return False
+        print(f"  ✅ 選項名 = {names}")
     print("  ✅ PASS")
     return True
 
@@ -213,6 +242,17 @@ async def main():
                   variants=make_variants(4, True),
                   user_errors=[{"field": ["variants", "0", "price"],
                                 "message": "Price must be greater than 0"}])),
+        # ★ 2026-09-12：選項名。同一組 30 個 Dior 真實色號，有無 axis_declared 結果要不同 ——
+        #   帶標記 → 站方 variesBy 宣告是 color，直接「カラー」；
+        #   不帶   → 退回 regex 多數決，8 個純數字 > 4 個顏色詞 → 「サイズ」（現況，證明退路還在）
+        ("Dior 30 色號 + variesBy 標記 → 選項名「カラー」",
+         run_case("axis_declared=True → 不跑 _vals_look_like_size",
+                  variants=dior_shades(True), expect_linked=30,
+                  expect_option_names=["カラー"])),
+        ("Dior 30 色號、無標記 → regex 退路仍是「サイズ」",
+         run_case("沒有 axis_declared → 多數決（8 純數字 vs 4 顏色詞）",
+                  variants=dior_shades(False), expect_linked=30,
+                  expect_option_names=["サイズ"])),
     ]
 
     results = []

@@ -228,6 +228,13 @@ class ShopifyClient:
             has_color = any(v["color"] for v in vn)
             has_size = any(v["size"] for v in vn)
 
+            # ★ 2026-09-12：軸名有站方宣告就不猜。generic 解析 JSON-LD ProductGroup 時，
+            #   variesBy 宣告的軸與實際填值的欄位對得上，就在每個變體放 axis_declared=True。
+            #   有這個標記 → color 欄一律「カラー」、size 欄一律「サイズ」，
+            #   跳過下面的 regex 多數決（Dior 30 個色號有 8 個純數字，多數決會貼成「サイズ」）。
+            #   要**每一個**變體都帶才算數 —— 混進一個沒標記的，就整批退回原本的猜法。
+            axis_declared = all(v.get("axis_declared") is True for v in variants)
+
             import re as _re
 
             def _vals_look_like_size(field):
@@ -265,8 +272,13 @@ class ShopifyClient:
                         c += 1
                 return s > c
 
-            color_is_actually_size = has_color and _vals_look_like_size("color")
-            size_is_actually_color = has_size and not _vals_look_like_size("size")
+            if axis_declared:
+                color_is_actually_size = False
+                size_is_actually_color = False
+                print("[Shopify] options 依站方 variesBy 宣告，不跑 _vals_look_like_size")
+            else:
+                color_is_actually_size = has_color and _vals_look_like_size("color")
+                size_is_actually_color = has_size and not _vals_look_like_size("size")
 
             # active = 真正的選項清單 [(欄位, 選項名)]（沿用相容命名/避免撞名）
             active = []

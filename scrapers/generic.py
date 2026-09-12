@@ -369,6 +369,26 @@ class GenericMixin:
         except Exception:
             return False
 
+    @staticmethod
+    def _declared_axes(varies_by) -> set:
+        """
+        ProductGroup.variesBy → 站方宣告的軸名集合（小寫、去掉 schema.org 前綴）。
+        Dior 寫 "https://schema.org/color"；容錯 "schema.org/color"、"Color"、單一字串。
+        回傳的是**全部**宣告的軸（含 material／pattern 之類），由呼叫端決定支不支援。
+        """
+        if not varies_by:
+            return set()
+        items = varies_by if isinstance(varies_by, list) else [varies_by]
+        out = set()
+        for it in items:
+            s = str(it or "").strip().lower()
+            if not s:
+                continue
+            s = s.rstrip("/").rsplit("/", 1)[-1]        # 只留最後一段
+            if s:
+                out.add(s)
+        return out
+
     def _apply_product_group(self, group: dict, product: ProductInfo) -> bool:
         """
         ProductGroup.hasVariant → product.variants，並依規則決定主商品價。
@@ -402,6 +422,7 @@ class GenericMixin:
 
         usable, urls = [], []
         dropped_price = dropped_option = 0
+        filled_axes: set = set()          # 可用變體實際填了值的欄位（只看站方自己的 color/size 欄）
         for node in raw:
             if not isinstance(node, dict):
                 continue
@@ -416,13 +437,15 @@ class GenericMixin:
                 continue
             color = str(node.get("color") or "").strip()
             size = str(node.get("size") or "").strip()
+            own_axes = {k for k, v in (("color", color), ("size", size)) if v}
             if not color and not size:
                 nm = str(node.get("name") or "").strip()
                 if nm and nm != group_name:
-                    color = nm
+                    color = nm            # 借 name 當選項值 —— 不算站方宣告的欄位，不進 own_axes
             if not color and not size:
                 dropped_option += 1
                 continue
+            filled_axes |= own_axes if own_axes else {"(name)"}
             avail = str(offers.get("availability") or "")
             in_stock = avail.lower().endswith("instock") if avail else True
             img = node.get("image")
@@ -456,6 +479,30 @@ class GenericMixin:
         if chosen is None:
             chosen, rule = usable[0], "全缺貨→第一個"
 
+        # ── 選項軸的來源標記（2026-09-12）──────────────────────────────
+        # shopify_client._vals_look_like_size 用 regex 多數決猜「color 欄裝的是不是尺寸」，
+        # Dior 30 個色號裡 8 個是純數字（"1","3","10"…）→ 被貼成「サイズ」，客人會以為是容量。
+        # ProductGroup.variesBy 是站方自己宣告的軸，不用猜 —— 但只在
+        # 「宣告的軸集合 == 我們實際填了值的欄位集合」時才信，任何一邊多出來都不標：
+        #   variesBy=[color]、變體 color+size 都有值  → 半套宣告，不標
+        #   variesBy=[color,size]、變體只有 color      → 不標
+        #   variesBy 含 material／pattern 等我們沒讀的軸 → 不標（見下）
+        #   沒有 variesBy                              → 不標
+        # 不標 = shopify_client 走原本的 regex，零行為變更。
+        declared = self._declared_axes(group.get("variesBy"))
+        unsupported = declared - {"color", "size"}
+        axis_declared = bool(declared) and not unsupported and declared == filled_axes
+        if axis_declared:
+            for v in usable:
+                v["axis_declared"] = True
+        if unsupported:
+            # ★ 寫給未來的：Dior 目前只宣告 color 或 size（2026-09-12 五個商品頁實測），
+            #   這一行**從來沒在正式站觸發過**。留著是因為解析器只讀 color/size，
+            #   碰到宣告 material／pattern 的站，同色不同材質的變體會在 shopify_client
+            #   被當重複去掉 —— 那時要從這行 warnings 看到，不是從客訴看到。
+            _note_error(f"JSON-LD ProductGroup variesBy 含未支援軸 {'/'.join(sorted(unsupported))}"
+                        f"（解析器只讀 color/size，這些軸的變體會被合併）", "generic:jsonld")
+
         product.variants = usable
         product.in_stock = any(v["in_stock"] for v in usable)
         if not product.title and group_name:
@@ -474,11 +521,18 @@ class GenericMixin:
             product.price_jpy = chosen["price"]
 
         n_in = sum(1 for v in usable if v["in_stock"])
+        axes_txt = "+".join(sorted(filled_axes)) or "-"
+        if axis_declared:
+            axes_note = f"軸={axes_txt}（宣告）"
+        elif not declared:
+            axes_note = f"軸={axes_txt}（未宣告）"
+        else:
+            axes_note = f"軸={axes_txt}（宣告與實際不符：variesBy={'+'.join(sorted(declared))}）"
         brief = (f"JSON-LD ProductGroup: {len(usable)} 變體（有貨 {n_in}"
                  f"{f'／缺價排除 {dropped_price}' if dropped_price else ''}"
                  f"{f'／缺選項排除 {dropped_option}' if dropped_option else ''}），"
                  f"主價 ¥{chosen['price']:,} 取{rule}"
-                 f"（{chosen['sku'] or chosen['color'] or chosen['size']}）")
+                 f"（{chosen['sku'] or chosen['color'] or chosen['size']}），{axes_note}")
         print(f"[Generic] ✅ {brief}")
         # ★ 走 note_error：ok=True 時會落在紀錄的 warnings 欄位，
         #   線上就看得到「Selenium 拿回的 HTML 裡有沒有 ProductGroup」——

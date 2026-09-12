@@ -315,6 +315,62 @@ def test_broken_json_and_plain_product():
     check("ProductGroup 在 @graph 裡也找得到", len(p.variants) == 2)
 
 
+def test_axis_declared():
+    print()
+    print("【11】★ variesBy → axis_declared 標記：站方宣告的軸集合 == 實際填值的欄位集合才信")
+    # color 單軸（Dior 現況）
+    p, errs = run(LIPMAX)
+    check("★ variesBy=[color]、變體都填 color → 每個變體 axis_declared=True",
+          len(p.variants) == 30 and all(v.get("axis_declared") is True for v in p.variants))
+    check("warnings 寫明軸", "軸=color（宣告）" in errs, errs[:140])
+    # size 單軸
+    p, _ = run(MISSDIOR, url=f"{BASE}/X-Y0000393.html")
+    check("variesBy=[size]、變體都填 size → 標記", all(v.get("axis_declared") for v in p.variants))
+    # 雙軸：每個變體 color+size 都有
+    both = group("雙軸", "G9", [variant("A", 3000, "InStock", color="赤", size="S"),
+                               variant("B", 3000, "InStock", color="赤", size="M")], varies="color")
+    both["variesBy"] = ["https://schema.org/color", "https://schema.org/size"]
+    p, errs = run(both, url=f"{BASE}/X-G9.html")
+    check("★ variesBy=[color,size]、變體兩欄都有 → 標記", all(v.get("axis_declared") for v in p.variants))
+    check("warnings 寫「軸=color+size（宣告）」", "軸=color+size（宣告）" in errs, errs[:140])
+    # 宣告一軸、實際兩欄都有值 → 不符 → 不標
+    half = group("半套", "G10", [variant("A", 3000, "InStock", color="赤", size="S")], varies="color")
+    p, errs = run(half, url=f"{BASE}/X-G10.html")
+    check("★ variesBy 只宣告 color、變體卻 color+size 都有 → 不標（退回 regex）",
+          p.variants and not any(v.get("axis_declared") for v in p.variants), str(p.variants[:1]))
+    check("warnings 說明不符", "宣告與實際不符" in errs, errs[:160])
+    # 宣告兩軸、實際只填一欄 → 不符 → 不標
+    half2 = group("半套2", "G11", [variant("A", 3000, "InStock", color="赤")], varies="color")
+    half2["variesBy"] = ["https://schema.org/color", "https://schema.org/size"]
+    p, _ = run(half2, url=f"{BASE}/X-G11.html")
+    check("variesBy 宣告 color+size、變體只有 color → 不標", not any(v.get("axis_declared") for v in p.variants))
+    # 沒有 variesBy → 不標
+    nov = group("無宣告", "G12", [variant("A", 3000, "InStock", color="赤")])
+    del nov["variesBy"]
+    p, errs = run(nov, url=f"{BASE}/X-G12.html")
+    check("★ 沒有 variesBy → 不標，走 regex", not any(v.get("axis_declared") for v in p.variants))
+    check("warnings 寫「軸=color（未宣告）」", "軸=color（未宣告）" in errs, errs[:140])
+    # variesBy 含 color/size 以外的軸 → 不標 + 留痕
+    mat = group("材質", "G13", [variant("A", 3000, "InStock", color="赤")], varies="color")
+    mat["variesBy"] = ["https://schema.org/color", "https://schema.org/material"]
+    p, errs = run(mat, url=f"{BASE}/X-G13.html")
+    check("★ variesBy 含 material → 不標（我們沒讀那個軸，不能說宣告對得上）",
+          not any(v.get("axis_declared") for v in p.variants))
+    check("warnings 記「未支援軸 material」", "未支援軸 material" in errs, errs[:160])
+    # variesBy 寫法容錯：不帶網域、大小寫
+    loose = group("寫法", "G14", [variant("A", 3000, "InStock", color="赤")], varies="color")
+    loose["variesBy"] = ["Color"]
+    p, _ = run(loose, url=f"{BASE}/X-G14.html")
+    check("variesBy=['Color']（不帶網域、大寫）也認得", all(v.get("axis_declared") for v in p.variants))
+    loose["variesBy"] = "https://schema.org/color"          # 單一字串不是 list
+    p, _ = run(loose, url=f"{BASE}/X-G14.html")
+    check("variesBy 是單一字串也認得", all(v.get("axis_declared") for v in p.variants))
+    # name 當 color 的變體（沒有 color/size 欄）→ 不是站方宣告的欄位 → 不標
+    nm = group("本体", "G15", [variant("A", 3000, "InStock", name="本体 詰め替え")], varies="color")
+    p, _ = run(nm, url=f"{BASE}/X-G15.html")
+    check("★ 值是從 name 借來的（變體沒有 color 欄）→ 不標", not any(v.get("axis_declared") for v in p.variants))
+
+
 def test_no_ctx_failsafe():
     print()
     print("【10】沒有監控 ctx 時解析照常（note_error 是 fail-safe）")
@@ -336,6 +392,7 @@ def main_():
     test_price_formats_and_availability()
     test_variant_without_option()
     test_broken_json_and_plain_product()
+    test_axis_declared()
     test_no_ctx_failsafe()
     print()
     print("=" * 74)
