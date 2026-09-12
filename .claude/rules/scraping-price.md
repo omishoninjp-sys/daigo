@@ -66,6 +66,13 @@ C 多半是客人貼錯連結、每天都會響；D 在最終失敗時 `error_br
 那正是「一條連結送到你家」的產品定義，槓桿在通用抓取器的成功率，
 不在多寫幾支 Platform。
 
+### 🔴「自動抓不到」不等於「不該收單」（2026-09-12）
+
+httpx 401/403 + 瀏覽器載完仍 <5KB 的網站（dior fashion／cos／gunze／loft／abc-mart／fighters）
+一律走手動表單（`note_page_settled` 回 True → generic 回空字串），**不要用路徑或網域硬擋** ——
+那些店人買得到，擋了是推掉生意。而且站方的擋法會變：chanel.com 9/9 不通、9/12 Selenium 就過得去，
+硬擋的話恢復了也不會知道。真正該擋的是商業規則（品類、通路政策），那在 `detect_restricted_*`，不在取價路徑。
+
 ## 取價
 
 **價格取税込，不是税拔。** SNIDEL 的 JSON-LD `price` 是税拔，要用頁面的
