@@ -131,3 +131,9 @@ httpx 401/403 + 瀏覽器載完仍 <5KB 的網站（dior fashion／cos／gunze�
 
 **變體上限向 Shopify 查（`shop.resourceLimits.maxProductVariants`），不要寫死。**
 目前是 2048，不是舊的 100。
+
+**ProductGroup 的 color 可能是裸數字，官網真名在 img alt（2026-09-13，暫不補）。**
+Dior 的 JSON-LD `color` 對部分變體只給裸數字（`"1"`、`"12"`），官網完整名稱
+（`"001 ピンク"`）在色塊 img 的 `alt`，用 SKU 對得起來（檔名 `Y0319000_<SKU>_cs.jpg`、
+`data-product-id=<SKU>`），SSR HTML 裡就有。要補全得讓 `_apply_product_group` 同時讀 DOM ——
+那是**來源擴充不是修 bug**，有新的失效模式（alt 缺、SKU 對不上），評估後暫不做。
