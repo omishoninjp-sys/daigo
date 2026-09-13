@@ -27,6 +27,44 @@ print("[shopify_client] LOADED build=GRAPHQL-PRODUCTSET-v2 (2026-06-11)")
 _variant_limit_cache = {"value": None, "fetched": False}
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 圖片抓取：header profile 與唯一的 httpx 出處
+# ══════════════════════════════════════════════════════════════════════
+# 兩群站需要相反的 header（2026-09-13）：
+#   browser：帶瀏覽器 UA + Referer —— hotlink 保護站、一般站
+#   plain  ：不設 UA（httpx 送預設）、不帶 Referer —— Dior 圖床這類「帶瀏覽器 UA
+#            就被 Akamai 路由到 403、無 UA 走 Cloudflare 正常給圖」的站（MUJI 的反面）
+# commit 1 只有 _download_b64 用 browser（行為與今天完全一致）；plain 目前只給
+# probe 端點觀察機房 IP 的回應。兩段 profile 重試是 Part B（未驗點 1 確認後才做）。
+_BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+_IMAGE_HEADER_PROFILES = [
+    ("browser", lambda url: {
+        "User-Agent": _BROWSER_UA,
+        "Referer": url,
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }),
+    ("plain", lambda url: {
+        "Accept": "image/*,*/*;q=0.8",
+    }),
+]
+
+
+async def _fetch_image(url, headers, *, follow_redirects, timeout=15):
+    """單次 httpx GET，回 (status, content_type, content_bytes, server)。
+
+    ★ 這是圖片抓取**唯一**的 httpx 出處：_download_b64 與 /api/admin/probe-fetch
+      都經過它，兩邊的 header 與 httpx 參數才保證一致（不另寫一份）。
+      follow_redirects 由呼叫端決定：_download_b64 用 True（沿用今天行為）；
+      probe 用 False（3xx 的 Location 可指向內網，不自己追，見端點的 SSRF 說明）。
+    """
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=follow_redirects) as c:
+        r = await c.get(url, headers=headers)
+        return (r.status_code, r.headers.get("content-type", ""),
+                r.content, r.headers.get("server", ""))
+
+
 def next_page_info(link_header: str) -> str:
     """
     從 Shopify 的 Link header 取「下一頁」的 page_info；沒有下一頁回空字串。
@@ -601,19 +639,22 @@ class ShopifyClient:
 
     @staticmethod
     async def _download_b64(url):
-        """下載圖片轉 base64（帶 Referer，繞過部分 CDN hotlink 阻擋）；失敗回 None。"""
+        """下載圖片轉 base64（帶 Referer，繞過部分 CDN hotlink 阻擋）；失敗回 None。
+
+        ★ 2026-09-13 commit 1：把 header 組合與 httpx 呼叫抽到 _IMAGE_HEADER_PROFILES
+          與 _fetch_image（唯一的 httpx 出處，probe 端點也走它）。**這一版行為與今天
+          完全一致** —— 只用 browser profile、不重試（tests/verify_image_fetch.py
+          用側錄假 httpx 逐一比對改前改後的回傳值與送出的 url/headers/follow_redirects）。
+          plain profile 的重試是 Part B（未驗點 1 在機房 IP 確認後才做）。
+        """
         if not url or url.startswith("data:image"):
             return url.split(",", 1)[1] if url and "," in url else None
+        _name, builder = _IMAGE_HEADER_PROFILES[0]      # browser（commit 1 只用這組）
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": url,
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            }
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
-                r = await c.get(url, headers=headers)
-                if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-                    return _b64.b64encode(r.content).decode()
+            status, ctype, content, _server = await _fetch_image(
+                url, builder(url), follow_redirects=True)
+            if status == 200 and "image" in ctype:
+                return _b64.b64encode(content).decode()
         except Exception as e:
             print(f"[Shopify] 圖片下載失敗，改用 src: {e}")
         return None
