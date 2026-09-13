@@ -54,10 +54,10 @@ _IMAGE_HEADER_PROFILES = [
 async def _fetch_image(url, headers, *, follow_redirects, timeout=15):
     """單次 httpx GET，回 (status, content_type, content_bytes, server)。
 
-    ★ 這是圖片抓取**唯一**的 httpx 出處：_download_b64 與 /api/admin/probe-fetch
-      都經過它，兩邊的 header 與 httpx 參數才保證一致（不另寫一份）。
-      follow_redirects 由呼叫端決定：_download_b64 用 True（沿用今天行為）；
-      probe 用 False（3xx 的 Location 可指向內網，不自己追，見端點的 SSRF 說明）。
+    ★ 這是圖片抓取**唯一**的 httpx 出處，header 與 httpx 參數只寫一份。
+      follow_redirects 由呼叫端決定：_download_b64 用 True（沿用今天行為）。
+      （2026-09-13 曾有臨時 probe 端點也走它做機房 IP 驗證，用 follow_redirects=False；
+       驗完移除，結果記在 .claude/rules/shopify-ops.md 圖片上傳段落。）
     """
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=follow_redirects) as c:
         r = await c.get(url, headers=headers)

@@ -38,6 +38,26 @@ paths:
 - storefront 的公開 `products.json` **看不到未上架/草稿商品**
   （實測 Admin API 比 storefront 多 25 件）
 
+### 🔴 圖片上傳：CDN 依 UA 分流，兩群站要相反的 header（2026-09-13）
+
+`_download_b64`（`shopify_client.py`）抓圖轉 base64 再上傳。兩群站需要**相反**的 header：
+
+- **Dior 圖床（demandware / `www.dior.com`）依 UA 分流**：帶瀏覽器 UA → 路由到
+  **Akamai → 403**；不帶 UA（httpx 預設）→ **Cloudflare → 200 image/jpeg**。
+  **與 MUJI 相反**（MUJI 依 TLS 指紋擋非瀏覽器，需要瀏覽器 session）。
+  機房 IP **2026-09-13 實測確認**（Zeabur 上 `/api/admin/probe-fetch` 探針，
+  browser→403 AkamaiGHost、plain→200 46,721B cloudflare，與住宅 IP 一致；
+  探針用完即移除，見該 commit）。症狀：商品建出來 media=0、status ACTIVE、
+  可購買但無圖（和 MUJI 當初 15 件無圖同形、不同因）。
+- **修法**：`_IMAGE_HEADER_PROFILES` 兩段 —— `browser`（UA+Referer，服務 hotlink／
+  一般站）先，收到 **401/403 才**換 `plain`（不帶 UA）重試。
+  🔴 **逾時／連線層例外不重試**：那是傳輸層被擋（MUJI 的 TLS 指紋擋 → 首位元組
+  不來 → 逾時），換 UA 無用，重試只會再等一輪（MUJI 一次 15 秒）。404/5xx 也不重試。
+  → 今天能成功的站在第一組就定案、零額外請求；只有本來就 403 的站多付一次。
+- `_download_b64` 與（任何臨時的）探針**共用 `_fetch_image`**（唯一 httpx 出處），
+  才不會兩邊 header 各寫一份、驗的不是同一條路。呼叫次數由
+  `tests/verify_image_fetch.py` 釘死（尤其「逾時只呼叫一次」）。
+
 ### API 金鑰（三把，用途不可混用）
 
 | 變數 | Header | 保護什麼 | 可不可以進前端 |
