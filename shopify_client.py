@@ -639,24 +639,36 @@ class ShopifyClient:
 
     @staticmethod
     async def _download_b64(url):
-        """下載圖片轉 base64（帶 Referer，繞過部分 CDN hotlink 阻擋）；失敗回 None。
+        """下載圖片轉 base64；失敗回 None。兩段 header profile，browser 先。
 
-        ★ 2026-09-13 commit 1：把 header 組合與 httpx 呼叫抽到 _IMAGE_HEADER_PROFILES
-          與 _fetch_image（唯一的 httpx 出處，probe 端點也走它）。**這一版行為與今天
-          完全一致** —— 只用 browser profile、不重試（tests/verify_image_fetch.py
-          用側錄假 httpx 逐一比對改前改後的回傳值與送出的 url/headers/follow_redirects）。
-          plain profile 的重試是 Part B（未驗點 1 在機房 IP 確認後才做）。
+        ★ 2026-09-13：兩群站需要相反的 header（見 _IMAGE_HEADER_PROFILES）。
+          browser（帶 UA + Referer）服務 hotlink 站與一般站；收到 **401/403** 時
+          換 plain（不帶 UA）重試 —— Dior 圖床帶瀏覽器 UA 被 Akamai 403、
+          無 UA 走 Cloudflare 200（機房 IP 2026-09-13 實測 probe 確認）。
+
+        🔴 只有拿到 401/403 才重試。逾時／連線層例外**不重試、直接回 None**：
+          那是傳輸層被擋（如 MUJI 依 TLS 指紋擋、首位元組不來→逾時），換 UA 無用，
+          重試只會再等一整輪（MUJI 一次 15 秒）。404/5xx 也不是 UA 問題，不重試。
+          → 今天能成功的站在第一組就定案，零額外請求；只有本來就抓不到（403）的站
+            多付一次。tests/verify_image_fetch.py 釘住這些呼叫次數（case 3 尤其）。
         """
         if not url or url.startswith("data:image"):
             return url.split(",", 1)[1] if url and "," in url else None
-        _name, builder = _IMAGE_HEADER_PROFILES[0]      # browser（commit 1 只用這組）
-        try:
-            status, ctype, content, _server = await _fetch_image(
-                url, builder(url), follow_redirects=True)
+        for name, builder in _IMAGE_HEADER_PROFILES:        # browser, plain
+            try:
+                status, ctype, content, _server = await _fetch_image(
+                    url, builder(url), follow_redirects=True)
+            except Exception as e:
+                print(f"[Shopify] 圖片下載失敗（{name}，傳輸層被擋，不重試）: {e}")
+                return None
             if status == 200 and "image" in ctype:
+                if name != "browser":
+                    print(f"[Shopify] 圖片改用 {name} profile 抓到: {url[:60]}")
                 return _b64.b64encode(content).decode()
-        except Exception as e:
-            print(f"[Shopify] 圖片下載失敗，改用 src: {e}")
+            if status in (401, 403):
+                continue                                    # UA 被擋 → 換 plain 再試
+            print(f"[Shopify] 圖片非 200（{name}, {status}），不重試: {url[:60]}")
+            break                                           # 404/5xx 換 UA 無益
         return None
 
     async def _upload_color_images(self, product_id, color_to_variant_ids, color_image_map):
