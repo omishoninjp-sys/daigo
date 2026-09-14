@@ -11,9 +11,10 @@ import re
 import time
 import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
-from fastapi import FastAPI, HTTPException, Depends, Header
+import json
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ from seo_title import generate_seo_title
 import scrape_monitor
 import scrape_digest
 import brake_log     # 重複下單煞車第一階段：只記錄，不擋任何東西
+import price_verify  # A' 請款前重驗價（orders/create webhook）
 from handoff import line_handoff_url
 
 
@@ -1309,6 +1311,166 @@ async def brake_summary(day: str = ""):
         "key_rule_version": brake_log.source_key.KEY_RULE_VERSION,
         "summary": brake_log.read_summary(target),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# A' 請款前重驗價：orders/create webhook + 手動補驗 + backstop
+# ══════════════════════════════════════════════════════════════════════
+# webhook 在 Shopify 後台手動建（signing secret 與 app client secret 分開，洩漏面小、
+# 可在 UI 停用重建）。secret 設成環境變數 SHOPIFY_WEBHOOK_SECRET。
+# 端點 URL（填進 Shopify 後台）：
+#     https://goyoutatidaigo.zeabur.app/api/webhooks/shopify/orders-create
+#
+# 🔴 fail-closed：沒有 secret → 503 什麼都不做（絕不「沒 secret 就跳過驗簽」）；
+#    HMAC 不符 → 401；驗證過程出錯 → 打「失敗」標、保留「待驗」，一律不會變 OK。
+
+
+async def _order_line_meta(product_id):
+    """product_id → (source_url, original_price_jpy)。取不到回 (None, None)。"""
+    if not product_id:
+        return None, None
+    gid = f"gid://shopify/Product/{str(product_id).rsplit('/', 1)[-1]}"
+    q = """query($id: ID!){ product(id:$id){
+             metafields(first:15, namespace:"daigo"){ nodes{ key value } } } }"""
+    r = await shopify._graphql(q, {"id": gid})
+    nodes = ((((r.get("data") or {}).get("product") or {}).get("metafields") or {}).get("nodes")) or []
+    mf = {n["key"]: n["value"] for n in nodes}
+    rec = mf.get("original_price_jpy")
+    try:
+        rec = int(rec) if rec is not None else None
+    except (TypeError, ValueError):
+        rec = None
+    return mf.get("source_url"), rec
+
+
+async def _scrape_current_jpy(source_url):
+    """重抓 source_url，回現在的原價（JPY）。爬不到會 raise 或回 None。"""
+    product = await scrape_with_queue(source_url)
+    return product.price_jpy
+
+
+async def _order_tags(order_gid, add=None, remove=None):
+    """對訂單加/移除標籤（tagsAdd / tagsRemove 都是冪等的）。"""
+    if remove:
+        await shopify._graphql(
+            "mutation($id:ID!,$tags:[String!]!){ tagsRemove(id:$id,tags:$tags){ userErrors{message} } }",
+            {"id": order_gid, "tags": list(remove)})
+    if add:
+        await shopify._graphql(
+            "mutation($id:ID!,$tags:[String!]!){ tagsAdd(id:$id,tags:$tags){ userErrors{message} } }",
+            {"id": order_gid, "tags": list(add)})
+
+
+async def _write_price_check_metafield(order_gid, result):
+    """把逐 line 明細寫進 order metafield daigo.price_check（best-effort，失敗不影響打標）。"""
+    try:
+        payload = json.dumps({"ok": result["ok"], "lines": result["lines"]}, ensure_ascii=False)[:65000]
+        await shopify._graphql(
+            """mutation($mf:[MetafieldsSetInput!]!){ metafieldsSet(metafields:$mf){ userErrors{message} } }""",
+            {"mf": [{"ownerId": order_gid, "namespace": "daigo", "key": "price_check",
+                     "type": "json", "value": payload}]})
+    except Exception as e:
+        print(f"[PriceVerify] ⚠️ 明細 metafield 寫入失敗（略過）: {type(e).__name__}: {e}")
+
+
+async def _run_price_verify(order_gid, order):
+    """背景執行：重抓比對 → 換標。任何錯誤都不會讓訂單變 OK（fail-closed）。"""
+    try:
+        res = await price_verify.verify_order(order, _order_line_meta, _scrape_current_jpy)
+        await _write_price_check_metafield(order_gid, res)
+        # 換標：拿掉「待驗」，套上結果（只有整單 OK 時 apply 才是 {OK}）
+        await _order_tags(order_gid, add=res["apply"], remove=[price_verify.TAG_PENDING])
+        print(f"[PriceVerify] {order_gid} → {sorted(res['apply'])} (ok={res['ok']})")
+    except Exception as e:
+        # 🔴 驗證流程本身炸掉：保留「待驗」+ 打「失敗」，絕不套 OK
+        print(f"[PriceVerify] ❌ {order_gid} 驗證流程出錯，維持待驗+失敗: {type(e).__name__}: {e}")
+        try:
+            await _order_tags(order_gid, add=[price_verify.TAG_FAIL])
+        except Exception:
+            pass
+
+
+@app.post("/api/webhooks/shopify/orders-create")
+async def shopify_orders_create(request: Request, background_tasks: BackgroundTasks):
+    secret = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "")
+    if not secret:
+        # 🔴 沒有 secret → 安全地什麼都不做。不處理、不打標，靠 backstop 接住。
+        raise HTTPException(status_code=503, detail="webhook secret 未設定")
+    body = await request.body()
+    if not price_verify.verify_hmac(body, request.headers.get("X-Shopify-Hmac-Sha256", ""), secret):
+        raise HTTPException(status_code=401, detail="HMAC 驗簽失敗")
+    try:
+        order = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="payload 不是合法 JSON")
+    order_gid = f"gid://shopify/Order/{order.get('id')}"
+    # fail-closed 起點：先打「待驗」（失敗也無妨，backstop 看的是「有沒有 OK」），
+    # 立刻回 200，重抓放背景（避免 Shopify <5s 逾時重送）。
+    try:
+        await _order_tags(order_gid, add=[price_verify.TAG_PENDING])
+    except Exception as e:
+        print(f"[PriceVerify] ⚠️ 待驗標籤寫入失敗（不影響）: {type(e).__name__}: {e}")
+    background_tasks.add_task(_run_price_verify, order_gid, order)
+    return {"ok": True}
+
+
+async def _fetch_order_payload(order_id):
+    """把 Shopify 訂單組成 verify_order 吃的形狀（手動補驗 / backstop 用）。"""
+    gid = f"gid://shopify/Order/{str(order_id).rsplit('/', 1)[-1]}"
+    q = """query($id: ID!){ order(id:$id){ id name lineItems(first:100){ nodes{
+             title quantity product{ id }
+             originalUnitPriceSet{ shopMoney{ amount } } } } } }"""
+    r = await shopify._graphql(q, {"id": gid})
+    o = (r.get("data") or {}).get("order")
+    if not o:
+        return None
+    lines = []
+    for li in ((o.get("lineItems") or {}).get("nodes")) or []:
+        prod = li.get("product") or {}
+        amt = (((li.get("originalUnitPriceSet") or {}).get("shopMoney") or {}).get("amount"))
+        lines.append({"product_id": prod.get("id"), "price": amt, "title": li.get("title")})
+    return {"id": str(order_id).rsplit("/", 1)[-1], "name": o.get("name"), "line_items": lines}
+
+
+@app.post("/api/admin/verify-order", dependencies=[Depends(verify_admin_key)])
+async def admin_verify_order(order_id: str):
+    """手動補驗單筆訂單（webhook 漏掉 / 系統修好後補跑）。走同一套邏輯。"""
+    order = await _fetch_order_payload(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="訂單不存在或超出 read_orders 的 60 天")
+    await _run_price_verify(f"gid://shopify/Order/{order['id']}", order)
+    return {"order_id": order["id"], "name": order.get("name"), "done": True}
+
+
+@app.get("/api/admin/orders/unverified", dependencies=[Depends(verify_admin_key)])
+async def admin_unverified_orders(days: int = 14):
+    """
+    backstop：近 days 天、**沒有『價格驗證:OK』標籤**的訂單。
+
+    🔴 這是 fail-closed 的兜底：涵蓋「webhook 沒送到（完全沒標籤）」「驗證失敗」「還在待驗」
+       三種 —— 只要沒有 OK 就當要人工。請款前掃這張清單。
+    （read_orders 只看得到近 60 天，days 會被夾在 1..60。）
+    """
+    days = max(1, min(days, 60))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    q = """query($q:String!,$cursor:String){ orders(first:100, after:$cursor, query:$q,
+             sortKey:CREATED_AT, reverse:true){ pageInfo{hasNextPage endCursor}
+             nodes{ id name createdAt tags displayFinancialStatus } } }"""
+    out, cursor = [], None
+    while True:
+        r = await shopify._graphql(q, {"q": f"created_at:>={since}", "cursor": cursor})
+        conn = ((r.get("data") or {}).get("orders") or {})
+        for o in conn.get("nodes", []):
+            tags = [t.strip() for t in (o.get("tags") or [])]
+            if price_verify.SAFE_TAG not in tags:
+                out.append({"id": o["id"].rsplit("/", 1)[-1], "name": o.get("name"),
+                            "created_at": o.get("createdAt"), "tags": tags,
+                            "financial_status": o.get("displayFinancialStatus")})
+        pi = conn.get("pageInfo") or {}
+        if not pi.get("hasNextPage"):
+            break
+        cursor = pi.get("endCursor")
+    return {"since": since, "count": len(out), "safe_tag": price_verify.SAFE_TAG, "orders": out}
 
 
 if __name__ == "__main__":
