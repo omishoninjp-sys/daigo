@@ -97,3 +97,9 @@ https://fd249b-ba.myshopify.com/admin/oauth/access_scopes.json
 改了 app 的 scope 之後**舊 token 不會自動獲得新權限**，必須重走 OAuth。
 redirect 是 `http://localhost:5000/auth/callback`，必須與 app 設定完全一致；
 scope 清單是**整份覆蓋**，漏列即失去該權限。
+
+### 請款前重驗價的 backstop（`/api/admin/orders/unverified`）
+
+請款時用 `days=7` 或 `14`。`days=60` 會列出 webhook 生效（2026-09-14）之前的 377 張舊單 ——
+那些從來沒被驗過，不是驗證失敗，會一直在清單裡直到滿 60 天滾出去（最晚 11 月中）。
+安全標籤有兩個：`價格驗證:OK`（驗過沒問題）與 `價格驗證:不適用`（沒有代購 line，沒東西可驗）。
