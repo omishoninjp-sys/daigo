@@ -14,6 +14,7 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 import json
+import httpx
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -1326,21 +1327,28 @@ async def brake_summary(day: str = ""):
 
 
 async def _order_line_meta(product_id):
-    """product_id → (source_url, original_price_jpy)。取不到回 (None, None)。"""
+    """
+    product_id → {"found", "daigo", "source_url", "recorded"}（形狀見 price_verify.verify_order）。
+      found  = product 查得到
+      daigo  = 有任何 daigo.* metafield —— 常態商品一個都沒有，這是「是不是代購品」的判準
+    """
     if not product_id:
-        return None, None
+        return {"found": False, "daigo": False, "source_url": None, "recorded": None}
     gid = f"gid://shopify/Product/{str(product_id).rsplit('/', 1)[-1]}"
-    q = """query($id: ID!){ product(id:$id){
+    q = """query($id: ID!){ product(id:$id){ id
              metafields(first:15, namespace:"daigo"){ nodes{ key value } } } }"""
     r = await shopify._graphql(q, {"id": gid})
-    nodes = ((((r.get("data") or {}).get("product") or {}).get("metafields") or {}).get("nodes")) or []
+    prod = (r.get("data") or {}).get("product")
+    if not prod:
+        return {"found": False, "daigo": False, "source_url": None, "recorded": None}
+    nodes = ((prod.get("metafields") or {}).get("nodes")) or []
     mf = {n["key"]: n["value"] for n in nodes}
     rec = mf.get("original_price_jpy")
     try:
         rec = int(rec) if rec is not None else None
     except (TypeError, ValueError):
         rec = None
-    return mf.get("source_url"), rec
+    return {"found": True, "daigo": bool(mf), "source_url": mf.get("source_url"), "recorded": rec}
 
 
 async def _scrape_current_jpy(source_url):
@@ -1364,7 +1372,8 @@ async def _order_tags(order_gid, add=None, remove=None):
 async def _write_price_check_metafield(order_gid, result):
     """把逐 line 明細寫進 order metafield daigo.price_check（best-effort，失敗不影響打標）。"""
     try:
-        payload = json.dumps({"ok": result["ok"], "lines": result["lines"]}, ensure_ascii=False)[:65000]
+        payload = json.dumps({"ok": result["ok"], "na": bool(result.get("na")),
+                              "lines": result["lines"]}, ensure_ascii=False)[:65000]
         await shopify._graphql(
             """mutation($mf:[MetafieldsSetInput!]!){ metafieldsSet(metafields:$mf){ userErrors{message} } }""",
             {"mf": [{"ownerId": order_gid, "namespace": "daigo", "key": "price_check",
@@ -1380,7 +1389,8 @@ async def _run_price_verify(order_gid, order):
         await _write_price_check_metafield(order_gid, res)
         # 換標：拿掉「待驗」，套上結果（只有整單 OK 時 apply 才是 {OK}）
         await _order_tags(order_gid, add=res["apply"], remove=[price_verify.TAG_PENDING])
-        print(f"[PriceVerify] {order_gid} → {sorted(res['apply'])} (ok={res['ok']})")
+        print(f"[PriceVerify] {order_gid} → {sorted(res['apply'])} "
+              f"(ok={res['ok']}{', na=True' if res.get('na') else ''})")
     except Exception as e:
         # 🔴 驗證流程本身炸掉：保留「待驗」+ 打「失敗」，絕不套 OK
         print(f"[PriceVerify] ❌ {order_gid} 驗證流程出錯，維持待驗+失敗: {type(e).__name__}: {e}")
@@ -1415,21 +1425,22 @@ async def shopify_orders_create(request: Request, background_tasks: BackgroundTa
 
 
 async def _fetch_order_payload(order_id):
-    """把 Shopify 訂單組成 verify_order 吃的形狀（手動補驗 / backstop 用）。"""
-    gid = f"gid://shopify/Order/{str(order_id).rsplit('/', 1)[-1]}"
-    q = """query($id: ID!){ order(id:$id){ id name lineItems(first:100){ nodes{
-             title quantity product{ id }
-             originalUnitPriceSet{ shopMoney{ amount } } } } } }"""
-    r = await shopify._graphql(q, {"id": gid})
-    o = (r.get("data") or {}).get("order")
-    if not o:
-        return None
-    lines = []
-    for li in ((o.get("lineItems") or {}).get("nodes")) or []:
-        prod = li.get("product") or {}
-        amt = (((li.get("originalUnitPriceSet") or {}).get("shopMoney") or {}).get("amount"))
-        lines.append({"product_id": prod.get("id"), "price": amt, "title": li.get("title")})
-    return {"id": str(order_id).rsplit("/", 1)[-1], "name": o.get("name"), "line_items": lines}
+    """
+    手動補驗 / backstop 用：抓 REST orders/{id}.json —— **那就是 webhook payload 的形狀**，
+    兩條路徑吃同一種輸入（line_items[].product_id / price / title），不用翻譯。
+    以前用 GraphQL 再手工拼，拼不出 product_id（已刪商品 GraphQL 的 product 是 null，
+    分不出「已刪」與「本來就沒有」）。回 None = 查不到（不存在或超出 read_orders 的 60 天）。
+    """
+    oid = str(order_id).rsplit("/", 1)[-1]
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp, err = await shopify._get_with_retry(
+            client, f"{shopify.base_url}/orders/{oid}.json",
+            {"fields": "id,name,line_items"}, what=f"訂單 {oid}")
+    if resp is None:
+        if "404" in err:
+            return None
+        raise RuntimeError(f"訂單 {oid} 讀取失敗：{err}")
+    return (resp.json() or {}).get("order")
 
 
 @app.post("/api/admin/verify-order", dependencies=[Depends(verify_admin_key)])
@@ -1445,10 +1456,13 @@ async def admin_verify_order(order_id: str):
 @app.get("/api/admin/orders/unverified", dependencies=[Depends(verify_admin_key)])
 async def admin_unverified_orders(days: int = 14):
     """
-    backstop：近 days 天、**沒有『價格驗證:OK』標籤**的訂單。
+    backstop：近 days 天、**『價格驗證:OK』與『價格驗證:不適用』都沒有**的訂單。
 
     🔴 這是 fail-closed 的兜底：涵蓋「webhook 沒送到（完全沒標籤）」「驗證失敗」「還在待驗」
-       三種 —— 只要沒有 OK 就當要人工。請款前掃這張清單。
+       三種 —— 兩個安全標籤都沒有就當要人工。請款前掃這張清單。
+    🔴 OK 與不適用都能放行，但理由不同（price_verify.SAFE_TAGS 那段註解）：
+       OK = 驗過沒問題；不適用 = 整單沒有代購 line，這個檢查沒有東西可驗。
+       改這裡的判準前先確認你要的是哪一種「安全」。
     （read_orders 只看得到近 60 天，days 會被夾在 1..60。）
     """
     days = max(1, min(days, 60))
@@ -1462,7 +1476,7 @@ async def admin_unverified_orders(days: int = 14):
         conn = ((r.get("data") or {}).get("orders") or {})
         for o in conn.get("nodes", []):
             tags = [t.strip() for t in (o.get("tags") or [])]
-            if price_verify.SAFE_TAG not in tags:
+            if not (price_verify.SAFE_TAGS & set(tags)):
                 out.append({"id": o["id"].rsplit("/", 1)[-1], "name": o.get("name"),
                             "created_at": o.get("createdAt"), "tags": tags,
                             "financial_status": o.get("displayFinancialStatus")})
@@ -1470,7 +1484,7 @@ async def admin_unverified_orders(days: int = 14):
         if not pi.get("hasNextPage"):
             break
         cursor = pi.get("endCursor")
-    return {"since": since, "count": len(out), "safe_tag": price_verify.SAFE_TAG, "orders": out}
+    return {"since": since, "count": len(out), "safe_tags": sorted(price_verify.SAFE_TAGS), "orders": out}
 
 
 if __name__ == "__main__":

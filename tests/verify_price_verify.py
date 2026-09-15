@@ -73,8 +73,12 @@ def _order(*prices_and_pids):
                                     for p, s in prices_and_pids]}
 
 
+def _meta(found=True, daigo=True, src="https://src/x", rec=80):
+    return {"found": found, "daigo": daigo, "source_url": src, "recorded": rec}
+
+
 async def _meta_ok(pid):
-    return f"https://src/{pid}", 80          # source_url + 記錄原價 80
+    return _meta(src=f"https://src/{pid}")   # 代購品：source_url + 記錄原價 80
 
 
 async def _scrape_const(url):
@@ -124,12 +128,17 @@ def test_verify_order_scrape_raises():
 
 
 def test_verify_order_no_source():
-    print("\n【6】商品缺 source_url → 失敗（不是 OK）")
-    async def meta_none(pid):
-        return None, None
-    res = run(pv.verify_order(_order((111, 100)), meta_none, _scrape_const))
-    check("該 line = 失敗", res["lines"][0]["tag"] == pv.TAG_FAIL)
+    print("\n【6】代購品缺 source_url／product 查不到 → 失敗（不是 OK、也不是不適用）")
+    async def meta_daigo_no_src(pid):
+        return _meta(daigo=True, src=None)
+    res = run(pv.verify_order(_order((111, 100)), meta_daigo_no_src, _scrape_const))
+    check("有 daigo.* 但沒 source_url → 該 line = 失敗", res["lines"][0]["tag"] == pv.TAG_FAIL)
     check("整單不 OK", res["ok"] is False and pv.TAG_OK not in res["apply"])
+    async def meta_not_found(pid):
+        return _meta(found=False, daigo=False, src=None, rec=None)
+    res = run(pv.verify_order(_order((111, 100)), meta_not_found, _scrape_const))
+    check("★ product 查不到（建單後被刪）→ 失敗，不是不適用（fail-closed：分不出是不是代購品）",
+          res["lines"][0]["tag"] == pv.TAG_FAIL and res["apply"] == {pv.TAG_FAIL}, str(res["apply"]))
 
     print("  空 line_items → 不 OK、apply 不含 OK（怪單當人工）")
     res2 = run(pv.verify_order({"id": 1, "line_items": []}, _meta_ok, _scrape_const))
@@ -145,6 +154,122 @@ def test_meta_get_raises():
     check("★ apply 不含 OK", pv.TAG_OK not in res["apply"] and pv.TAG_FAIL in res["apply"], str(res["apply"]))
 
 
+# ── 不適用：常態商品／安心GO／自訂項目 ──────────────────────────────────
+# 真實形狀（2026-09-15 REST 實測）：
+#   GYT20262738  4 line 全常態（小倉山莊 ×3 + 安心GO），product 存在、沒有 daigo.*
+#   GYT20262716  安心GO(常態) + 代購 + 「差額」(product_id=None)
+#   GYT20262720  兩件已刪的代購品：product_id=None，標題「日本代購｜…」
+NORMAL, DAIGO, GONE = 8635038564586, 8732457107690, None
+
+
+async def _meta_by_pid(pid):
+    """常態商品：found 但沒有 daigo.*；代購品：有 source_url。"""
+    if pid == NORMAL:
+        return _meta(daigo=False, src=None, rec=None)
+    return _meta(src=f"https://src/{pid}")
+
+
+def _line(pid, price, title):
+    return {"product_id": pid, "price": price, "title": title}
+
+
+def test_na_all_normal():
+    print("\n【8】整單全常態 → {不適用}（沒有東西可驗，不是驗過沒問題）")
+    order = {"id": 1, "line_items": [_line(NORMAL, "3578.0", "だんらん香具山 化妝箱(大)"),
+                                     _line(NORMAL, "1500.0", "GOYOUTATI - 安心GO｜最高理賠上限25萬円")]}
+    calls = []
+    async def scrape_never(url):
+        calls.append(url); return 70
+    res = run(pv.verify_order(order, _meta_by_pid, scrape_never))
+    check("apply = {不適用}", res["apply"] == {pv.TAG_NA}, str(res["apply"]))
+    check("★ ok=False（不適用不是「驗過」）、na=True", res["ok"] is False and res.get("na") is True)
+    check("每條 line 都是不適用", all(l["tag"] == pv.TAG_NA for l in res["lines"]))
+    check("★ 一次都沒有重抓（沒有 source_url 可抓）", calls == [], str(calls))
+    check("不適用 ∈ SAFE_TAGS、OK ∈ SAFE_TAGS", pv.TAG_NA in pv.SAFE_TAGS and pv.TAG_OK in pv.SAFE_TAGS)
+    check("失敗／需確認 ∉ SAFE_TAGS", not ({pv.TAG_FAIL, pv.TAG_BLOCK} & pv.SAFE_TAGS))
+
+
+def test_na_mixed_only_daigo_lines_count():
+    print("\n【9】混單：整單只看代購 line，不適用不參與判定、也不會和別的標籤共存")
+    mixed = {"id": 1, "line_items": [_line(NORMAL, "1500.0", "GOYOUTATI - 安心GO"),
+                                     _line(DAIGO, "100", "日本代購｜AI Camera"),
+                                     _line(GONE, "13855", "差額")]}
+    res = run(pv.verify_order(mixed, _meta_by_pid, _scrape_const))      # 現成本 70 < 售 100 → OK
+    check("安心GO + 代購(OK) + 差額 → apply = {OK}", res["apply"] == {pv.TAG_OK}, str(res["apply"]))
+    check("ok=True", res["ok"] is True)
+    tags = [l["tag"] for l in res["lines"]]
+    check("逐 line 明細：不適用／OK／不適用", tags == [pv.TAG_NA, pv.TAG_OK, pv.TAG_NA], str(tags))
+    async def scrape_high(url):
+        return 150                                                       # 現成本 > 售價 → 需確認
+    res2 = run(pv.verify_order(mixed, _meta_by_pid, scrape_high))
+    check("★ 代購那條需確認 → 整單 {需確認}，不含 OK、不含不適用",
+          res2["apply"] == {pv.TAG_BLOCK}, str(res2["apply"]))
+    async def scrape_boom(url):
+        raise RuntimeError("boom")
+    res3 = run(pv.verify_order(mixed, _meta_by_pid, scrape_boom))
+    check("★ 代購那條爬失敗 → 整單 {失敗}（不適用救不了它）", res3["apply"] == {pv.TAG_FAIL}, str(res3["apply"]))
+
+
+def test_na_null_product_id():
+    print("\n【10】product_id=null：自訂項目 → 不適用；已刪代購品（標題 日本代購｜）→ 失敗")
+    calls = []
+    async def meta_spy(pid):
+        calls.append(pid); return _meta()
+    custom = {"id": 1, "line_items": [_line(None, "13855", "差額"), _line(None, "500", "G0074 代付 9169")]}
+    res = run(pv.verify_order(custom, meta_spy, _scrape_const))
+    check("差額／代付 → {不適用}", res["apply"] == {pv.TAG_NA}, str(res["apply"]))
+    check("product_id=null 不會去查 metafield", calls == [], str(calls))
+    gone = {"id": 1, "line_items": [_line(None, "3375", "日本代購｜塔卡拉托米 玩具 - BEYBLADE X UX-20"),
+                                    _line(None, "5625", "日本代購｜BEYBLADE 玩具 - X UX-21 玩具｜樂天")]}
+    res = run(pv.verify_order(gone, meta_spy, _scrape_const))
+    check("★ 已刪代購品 → {失敗}，不是不適用", res["apply"] == {pv.TAG_FAIL}, str(res["apply"]))
+    check("理由寫的是已刪除", "已刪除" in res["lines"][0]["detail"]["reason"], str(res["lines"][0]["detail"]))
+    both = {"id": 1, "line_items": [_line(None, "13855", "差額"),
+                                    _line(None, "3375", "日本代購｜BEYBLADE X UX-20")]}
+    res = run(pv.verify_order(both, meta_spy, _scrape_const))
+    check("差額 + 已刪代購品 → {失敗}（不適用那條不參與）", res["apply"] == {pv.TAG_FAIL}, str(res["apply"]))
+
+
+def _mutate(path, old, new, fn):
+    """把 price_verify 某段改壞、重新 import、跑 fn()、一定還原。"""
+    import importlib
+    backup = open(path, encoding="utf-8").read()
+    assert backup.count(old) == 1, f"mutation 目標不唯一/不存在: {old!r}"
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backup.replace(old, new))
+        importlib.reload(pv)
+        return fn()
+    finally:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backup)
+        importlib.reload(pv)
+
+
+def test_negative():
+    print("\n【11】★ 負向驗證：把修正拿掉，對應的測試要紅")
+    path = pv.__file__
+    # (a) 拿掉標題前綴判斷 → 已刪代購品變不適用 —— 那是漏掉真問題
+    def a():
+        gone = {"id": 1, "line_items": [_line(None, "3375", "日本代購｜BEYBLADE X UX-20")]}
+        res = run(pv.verify_order(gone, _meta_by_pid, _scrape_const))
+        return res["apply"] == {pv.TAG_NA}
+    check("(a) 拿掉「日本代購｜」前綴判斷 → 已刪代購品變 {不適用}（漏掉真問題）",
+          _mutate(path, "if _is_daigo_title(title):", "if False:", a))
+    # (b) 拿掉整單過濾 → 混單因不適用而非 OK —— 那是誤放行的反面：不適用混進判定
+    def b():
+        mixed = {"id": 1, "line_items": [_line(NORMAL, "1500.0", "安心GO"), _line(DAIGO, "100", "日本代購｜x")]}
+        res = run(pv.verify_order(mixed, _meta_by_pid, _scrape_const))
+        return res["apply"] != {pv.TAG_OK} and pv.TAG_NA in res["apply"]
+    check("(b) 拿掉整單過濾 → 混單 apply 混進不適用、不再是 {OK}",
+          _mutate(path, 'verified = {r["tag"] for r in lines if r["tag"] != TAG_NA}',
+                  'verified = {r["tag"] for r in lines}', b))
+    # 還原後
+    mixed = {"id": 1, "line_items": [_line(NORMAL, "1500.0", "安心GO"), _line(DAIGO, "100", "日本代購｜x")]}
+    res = run(pv.verify_order(mixed, _meta_by_pid, _scrape_const))
+    check("還原後混單 = {OK}", res["apply"] == {pv.TAG_OK}, str(res["apply"]))
+
+
 def main_():
     print("=" * 74)
     print("A' price_verify：HMAC + 綁毛利門檻 + fail-closed")
@@ -156,6 +281,10 @@ def main_():
     test_verify_order_scrape_raises()
     test_verify_order_no_source()
     test_meta_get_raises()
+    test_na_all_normal()
+    test_na_mixed_only_daigo_lines_count()
+    test_na_null_product_id()
+    test_negative()
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")
     for f in FAIL:
