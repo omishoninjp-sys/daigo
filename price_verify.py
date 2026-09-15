@@ -49,6 +49,43 @@ ALL_TERMINAL_TAGS = {TAG_OK, TAG_BLOCK, TAG_WARN, TAG_DROP, TAG_FAIL, TAG_NA}
 # 代購品標題前綴：create_daigo_product 生成的，用來認「product 已刪除的 line 原本是不是代購品」
 DAIGO_TITLE_PREFIX = "日本代購｜"
 
+# ── backstop 的涵蓋範圍：「還能改變決定的訂單」，不是「所有可疑的訂單」 ──────
+#
+# 這個檢查叫「請款前重驗價」。商品費用一旦 capture，重抓的結果就改變不了已經收的錢，
+# 檢查在那一刻起就失去作用點。所以 backstop 預設只列商品費用**還沒 capture** 的訂單：
+#
+#   AUTHORIZED / PENDING  → 還能決定要不要請款、請多少     → 列
+#   PARTIALLY_PAID        → 商品費用已收、只剩運費         → 不列
+#   PAID                  → 已收                            → 不列
+#   EXPIRED               → 授權過期，收不到了              → 不列
+#   VOIDED / REFUNDED / PARTIALLY_REFUNDED → 取消或已退     → 不列
+#
+# 2026-09-15 實測（近 60 天 9 張 PARTIALLY_PAID 全部）：已收 == 商品小計、未收 == 運費，
+# 而且都在建單後一天內 capture —— 這家店的二段式請款就是「商品費用先請、運費到倉再請」。
+#
+# 🔴 接受的後果：capture 之後才發現的問題（例如 wako-dou 爬不到、予約商品頁面撤掉、
+#    商品被刪）**不會出現在這張清單**，即使它「看起來可疑」。那些屬於另一種追蹤
+#    （採購前確認商品還買不買得到），不歸這個檢查管。把它們塞進來只會讓清單
+#    永遠有幾百筆沒人能處理的東西（2026-09-15 曾經是 394 筆，377 筆是 webhook 生效前的舊單）。
+#
+# 要看全部時用 all_statuses=True —— 那是主動要求，預設值一定是收斂的這個。
+ACTIONABLE_STATUSES = {"AUTHORIZED", "PENDING"}
+
+
+def needs_review(tags, financial_status, all_statuses=False) -> bool:
+    """
+    backstop 的單筆判定：這張訂單該不該列出來要人看。
+      沒有任何安全標籤（OK／不適用）  且  商品費用還沒 capture（或 all_statuses=True）
+    """
+    if SAFE_TAGS & {str(t).strip() for t in (tags or [])}:
+        return False
+    if all_statuses:
+        return True
+    st = str(financial_status or "").strip().upper()
+    if not st:
+        return True          # 狀態看不到 → fail-closed：當成還能請款，列出來給人看
+    return st in ACTIONABLE_STATUSES
+
 WARN_RATIO = 0.9    # 售價的九成 → 毛利剩不到一半
 DROP_RATIO = 0.8    # 現成本掉到記錄原價八成以下 → ②
 

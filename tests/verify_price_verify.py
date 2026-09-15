@@ -270,6 +270,46 @@ def test_negative():
     check("還原後混單 = {OK}", res["apply"] == {pv.TAG_OK}, str(res["apply"]))
 
 
+# ── backstop 涵蓋範圍：只列「還能改變決定」的訂單 ──────────────────────
+# 2026-09-15 線上 backstop days=60 的真實分佈（394 筆，全部沒有安全標籤）：
+REAL_394 = {"PAID": 247, "VOIDED": 130, "PARTIALLY_REFUNDED": 7, "PARTIALLY_PAID": 5,
+            "EXPIRED": 2, "AUTHORIZED": 2, "REFUNDED": 1}
+assert sum(REAL_394.values()) == 394
+
+
+def _count(all_statuses=False):
+    return sum(n for st, n in REAL_394.items() if pv.needs_review([], st, all_statuses=all_statuses))
+
+
+def test_backstop_scope():
+    print("\n【12】backstop 只列商品費用還沒 capture 的訂單（AUTHORIZED / PENDING）")
+    for st in ("AUTHORIZED", "PENDING"):
+        check(f"{st} 且無安全標籤 → 列", pv.needs_review([], st) is True)
+        check(f"{st} 小寫也認", pv.needs_review([], st.lower()) is True)
+    for st in ("PAID", "PARTIALLY_PAID", "EXPIRED", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"):
+        check(f"★ {st} → 不列（錢已收／收不到，看價來不及）", pv.needs_review([], st) is False)
+    check("None／空狀態 → 列（fail-closed：狀態看不到就當成還能請款，交給人）",
+          pv.needs_review([], None) is True and pv.needs_review([], "") is True)
+    check("AUTHORIZED 但已有 OK → 不列", pv.needs_review([pv.TAG_OK], "AUTHORIZED") is False)
+    check("AUTHORIZED 但已有 不適用 → 不列", pv.needs_review([pv.TAG_NA], "AUTHORIZED") is False)
+    check("AUTHORIZED 帶 失敗 → 列", pv.needs_review([pv.TAG_FAIL], "AUTHORIZED") is True)
+    check("AUTHORIZED 帶 待驗 → 列", pv.needs_review([pv.TAG_PENDING], "AUTHORIZED") is True)
+    check("標籤有空白也認得 OK", pv.needs_review([" 價格驗證:OK "], "AUTHORIZED") is False)
+    print("  —— 真實分佈（2026-09-15 線上 394 筆）——")
+    check("★ 預設 → 2 筆（只剩 AUTHORIZED）", _count() == 2, str(_count()))
+    check("★ all_statuses=True → 394 筆（主動要求才看到）", _count(all_statuses=True) == 394, str(_count(True)))
+    check("all_statuses=True 仍然尊重安全標籤", pv.needs_review([pv.TAG_OK], "PAID", all_statuses=True) is False)
+
+
+def test_backstop_scope_negative():
+    print("\n【13】★ 負向：拿掉狀態過濾 → 394 筆那個狀況要重現")
+    def a():
+        return _count() == 394
+    check("(c) 拿掉 financial_status 過濾 → 預設也變 394 筆",
+          _mutate(pv.__file__, "return st in ACTIONABLE_STATUSES", "return True", a))
+    check("還原後預設仍是 2 筆", _count() == 2, str(_count()))
+
+
 def main_():
     print("=" * 74)
     print("A' price_verify：HMAC + 綁毛利門檻 + fail-closed")
@@ -285,6 +325,8 @@ def main_():
     test_na_mixed_only_daigo_lines_count()
     test_na_null_product_id()
     test_negative()
+    test_backstop_scope()
+    test_backstop_scope_negative()
     print("\n" + "=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")
     for f in FAIL:

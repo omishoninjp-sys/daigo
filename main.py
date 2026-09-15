@@ -1454,15 +1454,19 @@ async def admin_verify_order(order_id: str):
 
 
 @app.get("/api/admin/orders/unverified", dependencies=[Depends(verify_admin_key)])
-async def admin_unverified_orders(days: int = 14):
+async def admin_unverified_orders(days: int = 14, all: bool = False):
     """
-    backstop：近 days 天、**『價格驗證:OK』與『價格驗證:不適用』都沒有**的訂單。
+    backstop：近 days 天、**『價格驗證:OK』與『價格驗證:不適用』都沒有**、
+    而且**商品費用還沒 capture**（AUTHORIZED / PENDING）的訂單。
 
     🔴 這是 fail-closed 的兜底：涵蓋「webhook 沒送到（完全沒標籤）」「驗證失敗」「還在待驗」
        三種 —— 兩個安全標籤都沒有就當要人工。請款前掃這張清單。
     🔴 OK 與不適用都能放行，但理由不同（price_verify.SAFE_TAGS 那段註解）：
        OK = 驗過沒問題；不適用 = 整單沒有代購 line，這個檢查沒有東西可驗。
-       改這裡的判準前先確認你要的是哪一種「安全」。
+    🔴 涵蓋範圍是「還能改變決定的訂單」，不是「所有可疑的訂單」
+       （price_verify.ACTIONABLE_STATUSES 那段註解）：PAID／PARTIALLY_PAID／EXPIRED／VOIDED
+       預設不列，錢已經收了或收不到了，看價來不及。`all=true` 才列全部 ——
+       那是主動要求；預設值一定是收斂的，不能讓人不小心看到幾百筆舊單。
     （read_orders 只看得到近 60 天，days 會被夾在 1..60。）
     """
     days = max(1, min(days, 60))
@@ -1476,7 +1480,7 @@ async def admin_unverified_orders(days: int = 14):
         conn = ((r.get("data") or {}).get("orders") or {})
         for o in conn.get("nodes", []):
             tags = [t.strip() for t in (o.get("tags") or [])]
-            if not (price_verify.SAFE_TAGS & set(tags)):
+            if price_verify.needs_review(tags, o.get("displayFinancialStatus"), all_statuses=all):
                 out.append({"id": o["id"].rsplit("/", 1)[-1], "name": o.get("name"),
                             "created_at": o.get("createdAt"), "tags": tags,
                             "financial_status": o.get("displayFinancialStatus")})
@@ -1484,7 +1488,8 @@ async def admin_unverified_orders(days: int = 14):
         if not pi.get("hasNextPage"):
             break
         cursor = pi.get("endCursor")
-    return {"since": since, "count": len(out), "safe_tags": sorted(price_verify.SAFE_TAGS), "orders": out}
+    return {"since": since, "count": len(out), "safe_tags": sorted(price_verify.SAFE_TAGS),
+            "statuses": "all" if all else sorted(price_verify.ACTIONABLE_STATUSES), "orders": out}
 
 
 if __name__ == "__main__":
