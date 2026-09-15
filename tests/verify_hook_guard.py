@@ -26,7 +26,10 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PASS, FAIL = [], []
-GUARD = os.path.join(".claude", "hooks", "guard.py")
+# GUARD_PATH：改守門員時先把副本放 scratchpad 跑過這支，再換掉正式檔案 ——
+# guard 自己改壞是 fail-closed，會把所有命令都擋掉。
+GUARD = os.environ.get("GUARD_PATH") or os.path.join(".claude", "hooks", "guard.py")
+GUARD_IMPL = os.path.join(os.path.dirname(GUARD), "guard_impl.py")
 
 
 def check(name, cond, detail=""):
@@ -177,7 +180,7 @@ def test_commit_message_not_misread():
 def test_failsafe():
     print()
     print("【6】★ fail-closed：守門員自己壞掉時要擋，不是放行")
-    impl = os.path.join(".claude", "hooks", "guard_impl.py")
+    impl = GUARD_IMPL
     backup = open(impl, encoding="utf-8").read()
     try:
         with open(impl, "w", encoding="utf-8", newline="\n") as f:
@@ -207,9 +210,120 @@ def test_other_tools_untouched():
           f"exit={code}")
 
 
+def test_stdin_utf8():
+    print()
+    print("【8】★ stdin 是 UTF-8，不是 locale（cp950）—— 2026-09-15")
+    # 中文尾位元組落在 0xA1–0xBF 的字（缺 ba／單 ae／新 b0）會把緊接的 ASCII
+    # 吃掉當 cp950 第二位元組。fail-closed 那邊只是吵，fail-open 那邊是防線有洞。
+    for cmd, label in [
+        ('echo "建單"', "中文緊接 \"（以前 JSONDecodeError 誤擋）"),
+        ('grep -n "source_url\\|缺\\|SAFE_TAG" price_verify.py', "中文緊接 \\|（以前 Invalid \\escape）"),
+        ('print("--- 驗證時間 vs 建單時間（x）")', "全形括號緊接 \""),
+    ]:
+        expect_allow(cmd, label)
+    for cmd, label in [
+        ("echo 缺|rm -rf y", "★ 中文緊接 |rm —— 管線符號以前會被吃掉、rm 黏進 echo → 放行"),
+        ("echo 新|git push origin main", "★ 中文緊接 |git push"),
+        ("echo 缺;rm -rf y", "中文緊接 ;rm（; 不在 cp950 trail 範圍，本來就擋得到）"),
+    ]:
+        expect_block(cmd, label)
+
+
+def test_c_flag_project_modules():
+    print()
+    print("【9】★ python -c 提到專案模組 = 等同執行該模組；stdin 餵程式碼一律擋")
+    for cmd, label in [
+        ('python -c "import main"', "-c import main（main.py 含 tagsAdd）"),
+        ('python -c "from shopify_client import ShopifyClient"', "-c from shopify_client（含 productDelete）"),
+        ('python -c "import importlib; importlib.import_module(\'main\')"', "-c importlib（不解析語法也抓得到）"),
+        ('python -c "__import__(\'shopify_client\')"', "-c __import__"),
+        ("python -m main", "-m main"),
+        ("python - <<'EOF'\nimport main\nEOF", "python - <<EOF（stdin）"),
+        ("python <<'EOF'\nprint(1)\nEOF", "python <<EOF（stdin，沒有 -）"),
+        ('echo "import main" | python', "echo … | python"),
+        ("cat x.py | python -", "cat … | python -"),
+    ]:
+        expect_block(cmd, label)
+    for cmd, label in [
+        ('python -c "from pricing import calculate_selling_price; print(calculate_selling_price(1000))"',
+         "-c 提到 pricing（沒有 marker）"),
+        ('python -c "import config; print(config.MIN_SERVICE_FEE_JPY)"', "-c 提到 config"),
+        ('python -c "import json, sys; print(json.dumps(sys.argv))"', "-c 只用標準庫"),
+        ("python -V", "python -V"),
+        ("python --version", "python --version"),
+        ("python -m pip list", "-m pip（標準庫／第三方，不是專案模組）"),
+        ("python -m json.tool x.json", "-m json.tool"),
+        ("python -m http.server 8000", "-m http.server"),
+        ("python -X utf8 tests/verify_pricing.py > out.txt 2>&1", "腳本 + 重導向"),
+    ]:
+        expect_allow(cmd, label)
+
+
+def test_m_read_only_whitelist():
+    print()
+    print("【10】★ -m 白名單：只認 -m 緊接的那個 token")
+    for mod in ("py_compile", "compileall", "pyflakes", "black", "isort", "ruff"):
+        expect_allow(f"python -m {mod} main.py", f"-m {mod} main.py（main.py 含 tagsAdd 也放行）")
+    expect_allow("python -m py_compile shopify_client.py main.py scrapers/generic.py", "-m py_compile 多檔")
+    expect_allow("python -m ruff check .", "-m ruff check .")
+    for cmd, label in [
+        ('python -c "import py_compile; import main"', "★ -c 裡出現 py_compile 不算白名單"),
+        ("python -m py_compile main.py; python main.py", "白名單段之後的 python main.py 照擋"),
+        ("python -m py_compile main.py && python -c \"import shopify_client\"", "&& 後的 -c"),
+    ]:
+        expect_block(cmd, label)
+
+
+def _mutate(path, old, new, run):
+    """把守門員某一行改壞、跑 run()、一定還原。用來證明測試真的抓得到。"""
+    backup = open(path, encoding="utf-8").read()
+    assert backup.count(old) == 1, f"mutation 目標不唯一/不存在: {old!r}"
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backup.replace(old, new))
+        return run()
+    finally:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backup)
+
+
+def test_negative():
+    print()
+    print("【11】★ 負向驗證：把修正拿掉，對應的測試要紅（證明測試抓得到）")
+    # (a) stdin 改回 locale 解碼 → 中文管線那條要變成放行
+    def a():
+        code, dec, _ = run_guard("echo 缺|rm -rf y")
+        code2, dec2, reason2 = run_guard('echo "建單"')
+        return code == 0 and dec == "" and code2 == 2 and "守門員自己壞了" in reason2
+    check("(a) 拿掉 UTF-8 解碼 → `echo 缺|rm -rf y` 放行、`echo \"建單\"` JSONDecodeError",
+          _mutate(GUARD, 'sys.stdin.buffer.read().decode("utf-8")', "sys.stdin.read()", a))
+    # (b) 白名單改成子字串比對 → -c 裡有 py_compile 就放行
+    def b():
+        code, dec, _ = run_guard('python -c "import py_compile; import main"')
+        return code == 0 and dec == ""
+    check("(b) 白名單改子字串比對 → `-c \"import py_compile; import main\"` 放行",
+          _mutate(GUARD_IMPL, "blob, visible = [], False",
+                  "if any(m in seg for m in _M_READ_ONLY):\n            return None\n"
+                  "        blob, visible = [], False", b))
+    # (c) 拿掉 -c 展開 → import main 放行
+    def c():
+        code, dec, _ = run_guard('python -c "import main"')
+        return code == 0 and dec == ""
+    check("(c) 拿掉 -c 的模組展開 → `-c \"import main\"` 放行",
+          _mutate(GUARD_IMPL, "blob.extend(_modules_named_in(code, cwd))", "pass", c))
+    # (d) 拿掉 stdin 規則 → heredoc 餵 python 放行
+    def d():
+        code, dec, _ = run_guard("python <<'EOF'\nimport main\nEOF")
+        return code == 0 and dec == ""
+    check("(d) 拿掉 stdin 規則 → `python <<EOF` 放行",
+          _mutate(GUARD_IMPL, "if not visible:", "if False:", d))
+    code, dec, _ = run_guard("echo 缺|rm -rf y")
+    check("還原後恢復正常（中文管線 rm 仍被擋）", code == 2 and dec == "deny", f"exit={code}")
+
+
 def main_():
     print("=" * 74)
-    print("PreToolUse 守門員")
+    print(f"PreToolUse 守門員  ({GUARD})")
     print("=" * 74)
     if not os.path.isfile(GUARD):
         print(f"❌ 找不到 {GUARD}")
@@ -221,6 +335,10 @@ def main_():
     test_commit_message_not_misread()
     test_failsafe()
     test_other_tools_untouched()
+    test_stdin_utf8()
+    test_c_flag_project_modules()
+    test_m_read_only_whitelist()
+    test_negative()
     print()
     print("=" * 74)
     print(f"通過 {len(PASS)} / 失敗 {len(FAIL)}")

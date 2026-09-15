@@ -85,13 +85,17 @@ def _deny(reason):
 
 
 try:
-    _raw = sys.stdin.read()
-except Exception:
-    _raw = ""
-
-try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import guard_impl
+    # 🔴 一定要讀 bytes 自己解 UTF-8，不可以用 sys.stdin.read()。
+    #    Windows 的 pipe stdin 預設是 locale 編碼（實測 cp950 + surrogateescape），
+    #    Claude Code 送的 payload 是 UTF-8 —— 中文字尾位元組落在 0xA1–0xBF 時
+    #    會把緊接的 ASCII（" \ | 等）吃掉當 cp950 的第二位元組：
+    #      '缺\|'  e7 bc ba 5c 7c  → cp950 解成 '蝻暝|'
+    #    2026-09-15 實測：`"建單"` → JSONDecodeError（fail-closed 誤擋），
+    #    `echo 缺|rm -rf y` → 管線符號被吃掉、rm 黏進 echo 那段 → **放行**（fail-open）。
+    #    讀取失敗也放在這個 try 裡 → deny；以前是 except 後給空字串 → 等於放行。
+    _raw = sys.stdin.buffer.read().decode("utf-8")
     _reason = guard_impl.inspect(_raw)
 except BaseException as _e:                      # noqa: BLE001 —— 故意包到底
     _deny("[guard] 守門員自己壞了（%s: %s）—— fail-closed，"
